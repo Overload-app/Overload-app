@@ -137,7 +137,7 @@ const DAY_TEMPLATES = {
 const GOAL_SCHEME = {
   lose: { sets: 3, reps: "12-15", rest: 60, label: "Fat Loss" },
   build: { sets: 4, reps: "8-12", rest: 90, label: "Muscle Gain" },
-  recomp: { sets: 3, reps: "10-12", rest: 75, label: "Recomposition" },
+  recomp: { sets: 3, reps: "10-12", rest: 75, label: "Lose Fat & Build Muscle" },
 };
 
 const DURATION_CAP = { 30: 4, 45: 5, 60: 6, 75: 8 };
@@ -399,7 +399,7 @@ function Login({ onSignUp, onSignIn }) {
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
           <Zap size={20} color={T.charge} />
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>PHYSIQUE COACH</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
         </div>
         <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 34, lineHeight: 1.1, margin: "18px 0 8px", fontWeight: 700 }}>
           {mode === "signup" ? "Create your account" : "Welcome back"}
@@ -456,9 +456,16 @@ function Login({ onSignUp, onSignIn }) {
    PAYWALL
 ============================================================ */
 function Paywall({ account, onRefresh, onLogout }) {
+  const [plan, setPlan] = useState("monthly");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+
+  // Update these to match whatever you actually set as your Stripe prices —
+  // this is just display text, Stripe is the source of truth for what's charged.
+  const MONTHLY_PRICE = "$7.99";
+  const YEARLY_PRICE = "$59.99";
+  const YEARLY_SAVE_PCT = "37%";
 
   async function startCheckout() {
     setLoading(true);
@@ -467,7 +474,7 @@ function Paywall({ account, onRefresh, onLogout }) {
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: account.email, userId: account.id }),
+        body: JSON.stringify({ email: account.email, userId: account.id, plan }),
       });
       const data = await res.json();
       if (data.url) {
@@ -488,22 +495,55 @@ function Paywall({ account, onRefresh, onLogout }) {
     setRefreshing(false);
   }
 
+  const FEATURES = [
+    "Training program built by AI for your exact goals",
+    "Personalized calorie & macro targets",
+    "Workout logging with rest timers & progress charts",
+    "On-demand AI coach chat, anytime you need it",
+  ];
+
   return (
     <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
           <Zap size={20} color={T.charge} />
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>PHYSIQUE COACH</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
         </div>
-        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 32, lineHeight: 1.1, margin: "18px 0 10px", fontWeight: 700 }}>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 32, lineHeight: 1.1, margin: "18px 0 14px", fontWeight: 700 }}>
           Unlock your plan
         </h1>
-        <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 14, lineHeight: 1.6, marginBottom: 26, maxWidth: 340 }}>
-          Subscribe to get your personalized AI-built training program, nutrition targets, workout logging, and an on-demand AI coach.
-        </p>
-        <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 16, padding: 20, marginBottom: 20 }}>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700 }}>$7.99<span style={{ fontSize: 14, color: "#B9BEC6", fontWeight: 500 }}> / month</span></div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
+          {FEATURES.map((f, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <Check size={16} color={T.charge} style={{ marginTop: 2, flexShrink: 0 }} />
+              <span style={{ fontSize: 14, color: "#D6D9DE", lineHeight: 1.4 }}>{f}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button
+            onClick={() => setPlan("monthly")}
+            style={{ flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13, border: `2px solid ${plan === "monthly" ? T.charge : "rgba(255,255,255,0.15)"}`, background: plan === "monthly" ? "rgba(78,74,242,0.15)" : "transparent", color: "#fff" }}
+          >
+            Monthly
+          </button>
+          <button
+            onClick={() => setPlan("yearly")}
+            style={{ flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13, border: `2px solid ${plan === "yearly" ? T.charge : "rgba(255,255,255,0.15)"}`, background: plan === "yearly" ? "rgba(78,74,242,0.15)" : "transparent", color: "#fff", position: "relative" }}
+          >
+            Yearly
+            <span style={{ position: "absolute", top: -10, right: -6, background: T.good, color: "#fff", fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>SAVE {YEARLY_SAVE_PCT}</span>
+          </button>
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 16, padding: 20, marginBottom: 14 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700 }}>
+            {plan === "monthly" ? MONTHLY_PRICE : YEARLY_PRICE}
+            <span style={{ fontSize: 14, color: "#B9BEC6", fontWeight: 500 }}> / {plan === "monthly" ? "month" : "year"}</span>
+          </div>
           <div style={{ fontSize: 13, color: "#B9BEC6", marginTop: 6 }}>Cancel anytime.</div>
         </div>
         {error && <p style={{ color: "#FF8A80", fontSize: 13 }}>{error}</p>}
@@ -512,6 +552,7 @@ function Paywall({ account, onRefresh, onLogout }) {
         <Btn variant="accent" onClick={startCheckout} disabled={loading} style={{ width: "100%", padding: 16 }}>
           {loading ? "Redirecting…" : "Subscribe"} <ChevronRight size={18} />
         </Btn>
+        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>🔒 Payment secured by Stripe</div>
         <button onClick={refresh} disabled={refreshing} style={{ width: "100%", background: "none", border: "none", color: "#B9BEC6", fontSize: 13, padding: "14px 0 4px", cursor: "pointer" }}>
           {refreshing ? "Checking…" : "Already subscribed? Refresh status"}
         </button>
@@ -531,7 +572,7 @@ const QUIZ_STEPS = [
   { key: "age", q: "How old are you?", type: "number", placeholder: "e.g. 28", min: 13, max: 90 },
   { key: "heightIn", q: "How tall are you?", type: "height" },
   { key: "weightLb", q: "What's your current weight?", sub: "In pounds.", type: "number", placeholder: "e.g. 165", min: 60, max: 500 },
-  { key: "goal", q: "What's your main goal?", type: "choice", options: [["lose", "Lose Fat"], ["build", "Build Muscle"], ["recomp", "Recomposition"]] },
+  { key: "goal", q: "What's your main goal?", type: "choice", options: [["lose", "Lose Fat"], ["build", "Build Muscle"], ["recomp", "Both — Lose Fat & Build Muscle"]] },
   { key: "currentPhysique", q: "How would you describe your build right now?", type: "choice", options: [["higher_bf", "Just starting, higher body fat"], ["average", "Average build, some muscle"], ["athletic", "Athletic, fairly lean already"], ["lean_low_muscle", "Lean but low muscle mass"]] },
   { key: "desiredPhysique", q: "Describe the physique you're working toward.", sub: "A sentence is plenty — e.g. \"lean and athletic\" or \"bigger arms and chest.\" This helps your coach fine-tune things later.", type: "text", placeholder: "e.g. Lean, athletic, defined abs" },
   { key: "specificGoals", q: "Any specific strength or performance goals?", sub: "Optional — list anything concrete, e.g. \"bench 315\", \"do a strict pull-up\", \"squat 2x bodyweight.\" Leave blank if none.", type: "text", placeholder: "e.g. Bench 315 lb, do 10 strict pull-ups" },
@@ -1013,7 +1054,7 @@ function Train({ state, startWorkout }) {
 ============================================================ */
 function buildCoachSystem(state) {
   const p = state.profile;
-  return `You are an evidence-based strength & nutrition coach embedded in a workout app called Physique Coach.
+  return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}".
 Current program JSON: ${JSON.stringify(state.program)}
 
