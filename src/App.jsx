@@ -45,7 +45,7 @@ const SHELL_CSS = `
      a centered card on anything roomier — never a stretched, empty page. */
   .auth-screen { min-height: 100vh; min-height: 100dvh; width: 100%; }
   @media (min-width: 640px) and (min-height: 600px) {
-    .auth-screen { max-width: 460px; margin: 40px auto; min-height: calc(100vh - 80px); min-height: calc(100dvh - 80px); border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
+    .auth-screen { min-height: 0; max-width: 460px; margin: 40px auto; border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
   }
 
   /* Main app: bottom tab bar + full-bleed on phones, a real sidebar layout
@@ -887,6 +887,7 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
     }))
   );
   const [rest, setRest] = useState(null); // {seconds, total}
+  const [confirmExit, setConfirmExit] = useState(false);
   const intervalRef = useRef(null);
 
   useEffect(() => {
@@ -937,7 +938,7 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
       <style>{SHELL_CSS}</style>
       <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <button onClick={onCancel} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+          <button onClick={() => setConfirmExit(true)} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.charge, fontWeight: 700 }}>{doneSets}/{totalSets} SETS</span>
         </div>
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: "10px 0 0" }}>{day.name}</h2>
@@ -999,6 +1000,17 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
           onAdd={() => setRest((r) => ({ ...r, seconds: r.seconds + 15, total: r.total + 15 }))}
           onSkip={() => setRest(null)}
         />
+      )}
+
+      {confirmExit && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Exit this workout?</h3>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Your logged sets so far will be lost unless you resume.</p>
+          <div style={{ display: "flex", gap: 10, width: "100%", maxWidth: 320 }}>
+            <Btn variant="ghost" onClick={() => setConfirmExit(false)} style={{ flex: 1, color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Resume</Btn>
+            <Btn variant="accent" onClick={onCancel} style={{ flex: 1, background: T.protein }}>Discard</Btn>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1138,7 +1150,9 @@ The user will chat with you to adjust their training (swap exercises, change int
 
 There are TWO different kinds of requests — telling them apart matters:
 1. PERMANENT changes — the user wants their ongoing program itself changed going forward (e.g. "change my split," "my knees hurt in general, adjust my program permanently," "give me more back volume from now on"). For these, modify "program" and leave "todayOverride" null.
-2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, leave "program" completely UNCHANGED (return it exactly as given), and instead put the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, leave "program" completely UNCHANGED (return it exactly as given, byte-for-byte, using the "Current program JSON" above), and instead put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+
+Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to the EXACT SAME JSON given above (unchanged, not even reformatted), and "todayOverride" set to a fresh list of knee-friendly leg exercises for just that one session. It does NOT rename any day, and does NOT touch any other day in "program". Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly and leave "todayOverride" null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
 {"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}
@@ -1602,6 +1616,7 @@ function Progress({ state, addWeight }) {
 function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount }) {
   const [subLoading, setSubLoading] = useState(false);
   const [subError, setSubError] = useState("");
+  const [subPlan, setSubPlan] = useState("monthly");
 
   async function subscribeNow() {
     setSubLoading(true);
@@ -1610,7 +1625,7 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: account.email, userId: account.id, plan: "monthly" }),
+        body: JSON.stringify({ email: account.email, userId: account.id, plan: subPlan }),
       });
       const data = await res.json();
       if (data.url) window.location.href = data.url;
@@ -1660,6 +1675,10 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
           <>
             <div style={{ fontSize: 14, color: T.ink, fontWeight: 700, marginBottom: 4 }}>Free trial — {trialDaysLeftCount} day{trialDaysLeftCount === 1 ? "" : "s"} left</div>
             <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>Subscribe now to keep access after your trial ends.</p>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button onClick={() => setSubPlan("monthly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "monthly" ? T.charge : T.steel}`, background: subPlan === "monthly" ? "#EEEDFF" : "#fff", color: T.ink }}>Monthly</button>
+              <button onClick={() => setSubPlan("yearly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "yearly" ? T.charge : T.steel}`, background: subPlan === "yearly" ? "#EEEDFF" : "#fff", color: T.ink }}>Yearly</button>
+            </div>
             <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
               {subLoading ? "Redirecting…" : "Subscribe now"}
             </Btn>
@@ -1668,6 +1687,10 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
         ) : (
           <>
             <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>You're not currently subscribed.</p>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button onClick={() => setSubPlan("monthly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "monthly" ? T.charge : T.steel}`, background: subPlan === "monthly" ? "#EEEDFF" : "#fff", color: T.ink }}>Monthly</button>
+              <button onClick={() => setSubPlan("yearly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "yearly" ? T.charge : T.steel}`, background: subPlan === "yearly" ? "#EEEDFF" : "#fff", color: T.ink }}>Yearly</button>
+            </div>
             <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
               {subLoading ? "Redirecting…" : "Subscribe now"}
             </Btn>
@@ -1919,6 +1942,10 @@ export default function App() {
 
   const trialActive = isTrialActive(trialStartedAt);
 
+  if (!state) {
+    return <Onboarding onComplete={handleOnboarded} />;
+  }
+
   if (!subscribed && !trialActive) {
     return (
       <Paywall
@@ -1929,10 +1956,6 @@ export default function App() {
         onLogout={handleLogout}
       />
     );
-  }
-
-  if (!state) {
-    return <Onboarding onComplete={handleOnboarded} />;
   }
 
   const TABS = [
