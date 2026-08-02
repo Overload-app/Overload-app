@@ -6,6 +6,7 @@ create table public.profiles (
   name text,
   email text,
   subscribed boolean default false,
+  trial_started_at timestamptz,
   stripe_customer_id text,
   created_at timestamptz default now()
 );

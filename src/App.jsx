@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -29,6 +29,44 @@ const T = {
 };
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');`;
+
+const SHELL_CSS = `
+  @keyframes pulseDot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; }
+  html, body, #root { height: 100%; margin: 0; }
+  body { background: ${T.ink}; }
+  * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+  @media (max-width: 639px) { input, select, textarea { font-size: 16px !important; } }
+
+  .fullscreen-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; height: 100vh; height: 100dvh; }
+
+  /* Auth-style screens (login, paywall, onboarding): full-bleed on phones,
+     a centered card on anything roomier — never a stretched, empty page. */
+  .auth-screen { min-height: 100vh; min-height: 100dvh; width: 100%; }
+  @media (min-width: 640px) and (min-height: 600px) {
+    .auth-screen { max-width: 460px; margin: 40px auto; min-height: calc(100vh - 80px); min-height: calc(100dvh - 80px); border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
+  }
+
+  /* Main app: bottom tab bar + full-bleed on phones, a real sidebar layout
+     using the whole screen on anything roomier. */
+  .app-shell { min-height: 100vh; min-height: 100dvh; width: 100%; background: ${T.paper}; }
+  .app-main { padding-bottom: 90px; }
+  .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; width: 100%; background: #fff; border-top: 1px solid ${T.steel}; display: flex; padding: 8px 4px calc(8px + env(safe-area-inset-bottom, 0px)) 4px; box-sizing: border-box; z-index: 40; }
+  .sidebar-nav { display: none; }
+
+  @media (min-width: 900px) and (min-height: 600px) {
+    .app-shell { display: flex; }
+    .sidebar-nav {
+      display: flex; flex-direction: column; width: 240px; flex-shrink: 0;
+      background: ${T.ink}; min-height: 100vh; min-height: 100dvh; padding: 28px 16px;
+      position: sticky; top: 0;
+    }
+    .bottom-nav { display: none; }
+    .app-main { flex: 1; padding-bottom: 40px; }
+    .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
+  }
+`;
 
 /* ============================================================
    CLAUDE API HELPERS
@@ -289,6 +327,18 @@ async function loadProfile(userId) {
   return data;
 }
 
+const TRIAL_DAYS = 30;
+function isTrialActive(startedAt) {
+  if (!startedAt) return false;
+  const elapsed = Date.now() - new Date(startedAt).getTime();
+  return elapsed < TRIAL_DAYS * 24 * 60 * 60 * 1000;
+}
+function trialDaysLeft(startedAt) {
+  if (!startedAt) return 0;
+  const elapsed = Date.now() - new Date(startedAt).getTime();
+  return Math.max(0, Math.ceil((TRIAL_DAYS * 24 * 60 * 60 * 1000 - elapsed) / (24 * 60 * 60 * 1000)));
+}
+
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -394,8 +444,9 @@ function Login({ onSignUp, onSignIn }) {
   }
 
   return (
-    <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
           <Zap size={20} color={T.charge} />
@@ -455,9 +506,10 @@ function Login({ onSignUp, onSignIn }) {
 /* ============================================================
    PAYWALL
 ============================================================ */
-function Paywall({ account, onRefresh, onLogout }) {
+function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
   const [plan, setPlan] = useState("monthly");
   const [loading, setLoading] = useState(false);
+  const [trialLoading, setTrialLoading] = useState(false);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
@@ -489,6 +541,12 @@ function Paywall({ account, onRefresh, onLogout }) {
     }
   }
 
+  async function handleStartTrial() {
+    setTrialLoading(true);
+    await onStartTrial();
+    setTrialLoading(false);
+  }
+
   async function refresh() {
     setRefreshing(true);
     await onRefresh();
@@ -503,15 +561,16 @@ function Paywall({ account, onRefresh, onLogout }) {
   ];
 
   return (
-    <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
           <Zap size={20} color={T.charge} />
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
         </div>
         <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 32, lineHeight: 1.1, margin: "18px 0 14px", fontWeight: 700 }}>
-          Unlock your plan
+          {trialUsed ? "Your trial has ended" : "Unlock your plan"}
         </h1>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
@@ -550,9 +609,16 @@ function Paywall({ account, onRefresh, onLogout }) {
       </div>
       <div>
         <Btn variant="accent" onClick={startCheckout} disabled={loading} style={{ width: "100%", padding: 16 }}>
-          {loading ? "Redirecting…" : "Subscribe"} <ChevronRight size={18} />
+          {loading ? "Redirecting…" : "Subscribe now"} <ChevronRight size={18} />
         </Btn>
-        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>🔒 Payment secured by Stripe</div>
+        {!trialUsed && (
+          <Btn variant="ghost" onClick={handleStartTrial} disabled={trialLoading} style={{ width: "100%", padding: 14, marginTop: 8, color: "#fff", borderColor: "rgba(255,255,255,0.2)" }}>
+            {trialLoading ? "Starting…" : "Start 30-day free trial instead"}
+          </Btn>
+        )}
+        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>
+          {trialUsed ? "🔒 Payment secured by Stripe" : "🔒 No card needed for the trial — it just ends after 30 days"}
+        </div>
         <button onClick={refresh} disabled={refreshing} style={{ width: "100%", background: "none", border: "none", color: "#B9BEC6", fontSize: 13, padding: "14px 0 4px", cursor: "pointer" }}>
           {refreshing ? "Checking…" : "Already subscribed? Refresh status"}
         </button>
@@ -651,8 +717,9 @@ function Onboarding({ onComplete }) {
 
   if (building) {
     return (
-      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, background: T.ink, color: "#fff", textAlign: "center" }}>
+      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, background: T.ink, color: "#fff", textAlign: "center" }}>
         <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
         <Loader2 size={36} color={T.charge} className="spin" />
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "18px 0 6px" }}>{buildNote}</h2>
         <p style={{ color: "#B9BEC6", fontSize: 13, maxWidth: 280 }}>Weighing your goal, experience, equipment, injuries, and desired physique to build a program made for you.</p>
@@ -663,8 +730,9 @@ function Onboarding({ onComplete }) {
 
   if (step === -1) {
     return (
-      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
         <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
             <Zap size={20} color={T.charge} />
@@ -686,8 +754,9 @@ function Onboarding({ onComplete }) {
   }
 
   return (
-    <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", padding: 24, background: T.paper }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", padding: 24, background: T.paper }}>
       <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
       <div style={{ display: "flex", gap: 3, marginBottom: 24, flexWrap: "wrap" }}>
         {QUIZ_STEPS.map((_, i) => (
           <div key={i} style={{ flex: 1, minWidth: 12, height: 4, borderRadius: 2, background: i <= step ? T.charge : T.steel }} />
@@ -790,6 +859,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
   return (
     <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 60, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: done ? T.good : T.charge, fontWeight: 700 }}>
         {done ? "REST COMPLETE" : "RESTING"}
       </span>
@@ -809,7 +879,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-function WorkoutSession({ day, lastLog, onFinish, onCancel }) {
+function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
   const [sets, setSets] = useState(() =>
     day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest,
@@ -864,12 +934,18 @@ function WorkoutSession({ day, lastLog, onFinish, onCancel }) {
   return (
     <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 50, display: "flex", flexDirection: "column" }}>
       <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
       <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <button onClick={onCancel} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.charge, fontWeight: 700 }}>{doneSets}/{totalSets} SETS</span>
         </div>
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: "10px 0 0" }}>{day.name}</h2>
+        {isOverride && (
+          <div style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(78,74,242,0.2)", color: T.charge, fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 20 }}>
+            <Sparkles size={12} /> SWAPPED BY COACH FOR TODAY ONLY
+          </div>
+        )}
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {sets.map((ex, exIdx) => (
@@ -1058,16 +1134,22 @@ function buildCoachSystem(state) {
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}".
 Current program JSON: ${JSON.stringify(state.program)}
 
-The user will chat with you to adjust their training program (swap exercises, change intensity, work around a new injury, change split, add/remove exercises, etc.) or just ask training questions.
+The user will chat with you to adjust their training (swap exercises, change intensity, work around an injury, change split, add/remove exercises, etc.) or just ask training questions.
+
+There are TWO different kinds of requests — telling them apart matters:
+1. PERMANENT changes — the user wants their ongoing program itself changed going forward (e.g. "change my split," "my knees hurt in general, adjust my program permanently," "give me more back volume from now on"). For these, modify "program" and leave "todayOverride" null.
+2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, leave "program" completely UNCHANGED (return it exactly as given), and instead put the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
-- If the request doesn't require a program change (e.g. a general question), return the program UNCHANGED but still answer helpfully in "reply".
+- If the request doesn't require any change at all (e.g. a general question), return the program UNCHANGED, todayOverride null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
-- Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.`;
+- Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
+- Never set both a modified "program" AND a non-null "todayOverride" in the same response — pick one based on which kind of request this is.`;
 }
 
 const DEFAULT_COACH_MESSAGES = [
@@ -1517,7 +1599,28 @@ function Progress({ state, addWeight }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-function ProfileTab({ state, resetAll, account, onLogout }) {
+function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount }) {
+  const [subLoading, setSubLoading] = useState(false);
+  const [subError, setSubError] = useState("");
+
+  async function subscribeNow() {
+    setSubLoading(true);
+    setSubError("");
+    try {
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: account.email, userId: account.id, plan: "monthly" }),
+      });
+      const data = await res.json();
+      if (data.url) window.location.href = data.url;
+      else { setSubError(data.error || "Couldn't start checkout."); setSubLoading(false); }
+    } catch (e) {
+      setSubError("Couldn't start checkout.");
+      setSubLoading(false);
+    }
+  }
+
   const { profile, targets } = state;
   const rows = [
     ["Goal", GOAL_SCHEME[profile.goal]?.label],
@@ -1547,6 +1650,32 @@ function ProfileTab({ state, resetAll, account, onLogout }) {
         <Btn variant="ghost" onClick={onLogout}>Log out</Btn>
       </Card>
 
+      <TickRule label="Subscription" />
+      <Card>
+        {subscribed ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: T.good, fontWeight: 700, fontSize: 14 }}>
+            <Check size={16} /> Active subscription
+          </div>
+        ) : trialActive ? (
+          <>
+            <div style={{ fontSize: 14, color: T.ink, fontWeight: 700, marginBottom: 4 }}>Free trial — {trialDaysLeftCount} day{trialDaysLeftCount === 1 ? "" : "s"} left</div>
+            <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>Subscribe now to keep access after your trial ends.</p>
+            <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
+              {subLoading ? "Redirecting…" : "Subscribe now"}
+            </Btn>
+            {subError && <p style={{ color: T.warn, fontSize: 12, marginTop: 8 }}>{subError}</p>}
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>You're not currently subscribed.</p>
+            <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
+              {subLoading ? "Redirecting…" : "Subscribe now"}
+            </Btn>
+            {subError && <p style={{ color: T.warn, fontSize: 12, marginTop: 8 }}>{subError}</p>}
+          </>
+        )}
+      </Card>
+
       <TickRule label="Details" />
       <Card>
         {rows.map(([label, val], i) => (
@@ -1572,6 +1701,7 @@ function ProfileTab({ state, resetAll, account, onLogout }) {
 export default function App() {
   const [account, setAccount] = useState(null);
   const [subscribed, setSubscribed] = useState(false);
+  const [trialStartedAt, setTrialStartedAt] = useState(null);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -1594,6 +1724,7 @@ export default function App() {
         setAccount(null);
         setState(null);
         setSubscribed(false);
+        setTrialStartedAt(null);
       }
     });
     return () => listener.subscription.unsubscribe();
@@ -1603,6 +1734,7 @@ export default function App() {
     const profileRow = await loadProfile(user.id);
     setAccount({ id: user.id, name: profileRow?.name || user.user_metadata?.name || "", email: user.email });
     setSubscribed(!!profileRow?.subscribed);
+    setTrialStartedAt(profileRow?.trial_started_at || null);
     const loaded = await loadState(user.id);
     setState(loaded);
   }
@@ -1611,6 +1743,16 @@ export default function App() {
     if (!account) return;
     const profileRow = await loadProfile(account.id);
     setSubscribed(!!profileRow?.subscribed);
+    setTrialStartedAt(profileRow?.trial_started_at || null);
+  }
+
+  // Cardless 30-day trial: just a timestamp on the user's own profile row,
+  // no Stripe/payment info involved at all.
+  async function startFreeTrial() {
+    if (!account) return;
+    const startedAt = new Date().toISOString();
+    const { error } = await supabase.from("profiles").update({ trial_started_at: startedAt }).eq("id", account.id);
+    if (!error) setTrialStartedAt(startedAt);
   }
 
   // The Stripe webhook updates the database asynchronously, so when we land
@@ -1666,12 +1808,14 @@ export default function App() {
         parsed = { reply: raw.replace(/```json/g, "").replace(/```/g, "").trim() || "Got it.", program: null };
       }
       const withReply = [...withUser, { role: "assistant", text: parsed.reply }];
+      const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
       persist((prev) => ({
         ...prev,
         coachChat: withReply,
-        program: parsed.program && Array.isArray(parsed.program.days)
+        program: parsed.program && Array.isArray(parsed.program.days) && !hasOverride
           ? { splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days }
           : prev.program,
+        todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
       }));
     } catch (e) {
       console.error("Coach send failed:", e);
@@ -1716,6 +1860,7 @@ export default function App() {
       profile, program, targets,
       logs: { workouts: [], nutrition: [], bodyweight: [{ date: todayISO(), weight: profile.weightLb }] },
       coachChat: DEFAULT_COACH_MESSAGES,
+      todayOverride: null,
     };
     persist(fresh);
   }
@@ -1727,7 +1872,7 @@ export default function App() {
   function finishWorkout(sets) {
     const day = state.program.days[session.dayIdx];
     const entry = { date: todayISO(), dayName: day.name, exercises: sets };
-    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] } }));
+    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null }));
     setSession(null);
     setActiveTab("train");
   }
@@ -1764,31 +1909,30 @@ export default function App() {
   }
 
   if (loading) {
-    return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: T.paper }}><style>{FONT_IMPORT}</style></div>;
+    return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: T.paper }}><style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style></div>;
   }
 
   if (!account) {
-    return (
-      <div style={{ minHeight: "100vh", background: T.ink }}>
-        <Login onSignUp={handleSignUp} onSignIn={handleSignIn} />
-      </div>
-    );
+    return <Login onSignUp={handleSignUp} onSignIn={handleSignIn} />;
   }
 
-  if (!subscribed) {
+  const trialActive = isTrialActive(trialStartedAt);
+
+  if (!subscribed && !trialActive) {
     return (
-      <div style={{ minHeight: "100vh", background: T.ink }}>
-        <Paywall account={account} onRefresh={checkSubscription} onLogout={handleLogout} />
-      </div>
+      <Paywall
+        account={account}
+        trialUsed={!!trialStartedAt}
+        onStartTrial={startFreeTrial}
+        onRefresh={checkSubscription}
+        onLogout={handleLogout}
+      />
     );
   }
 
   if (!state) {
-    return (
-      <div style={{ minHeight: "100vh", background: T.ink }}>
-        <Onboarding onComplete={handleOnboarded} />
-      </div>
-    );
+    return <Onboarding onComplete={handleOnboarded} />;
   }
 
   const TABS = [
@@ -1801,33 +1945,53 @@ export default function App() {
   ];
 
   return (
-    <div className="app-shell-outer">
+    <div className="app-shell">
       <style>{FONT_IMPORT}</style>
-      <style>{`
-        @keyframes pulseDot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
-        html, body, #root { height: 100%; }
-        * { -webkit-tap-highlight-color: transparent; }
-        .app-shell-outer { min-height: 100vh; min-height: 100dvh; width: 100%; background: ${T.ink}; display: flex; justify-content: center; box-sizing: border-box; }
-        .app-shell-inner { width: 100%; max-width: 480px; background: ${T.paper}; position: relative; box-sizing: border-box; min-height: 100vh; min-height: 100dvh; }
-        .fullscreen-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; height: 100vh; height: 100dvh; box-sizing: border-box; }
-        @media (max-width: 639px) {
-          input, select, textarea { font-size: 16px !important; }
-        }
-        .bottom-nav { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 480px; background: #fff; border-top: 1px solid ${T.steel}; display: flex; padding: 8px 4px calc(8px + env(safe-area-inset-bottom, 0px)) 4px; box-sizing: border-box; }
-        @media (min-width: 640px) and (min-height: 700px) {
-          .app-shell-outer { align-items: center; padding: 32px 16px; }
-          .app-shell-inner { height: min(880px, 92vh); min-height: 0; border-radius: 28px; overflow-y: auto; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
-          .bottom-nav { position: absolute; left: 0; right: 0; transform: none; width: 100%; max-width: none; }
-          .fullscreen-overlay { position: absolute; height: 100%; border-radius: 28px; overflow: hidden; }
-        }
-      `}</style>
-      <div className="app-shell-inner" style={{ fontFamily: "'Inter', sans-serif" }}>
-        {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
-        {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
-        {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} />}
-        {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
-        {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
-        {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} />}
+      <style>{SHELL_CSS}</style>
+
+      <div className="sidebar-nav">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 10px", marginBottom: 36 }}>
+          <Zap size={20} color={T.charge} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, letterSpacing: 2, color: T.charge, fontWeight: 700 }}>OVERLOAD</span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = activeTab === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={() => setActiveTab(t.key)}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 10, border: "none", cursor: "pointer", background: active ? "rgba(78,74,242,0.18)" : "transparent", color: active ? "#fff" : "#9CA3AF", fontWeight: active ? 700 : 500, fontSize: 14, textAlign: "left", position: "relative" }}
+              >
+                {t.key === "coach" && coachLoading && !active && (
+                  <span style={{ position: "absolute", top: 8, left: 30, width: 7, height: 7, borderRadius: "50%", background: T.charge, animation: "pulseDot 1s ease-in-out infinite" }} />
+                )}
+                <Icon size={19} strokeWidth={active ? 2.5 : 2} color={active ? T.charge : "#9CA3AF"} />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={handleLogout} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 12px", borderRadius: 10, border: "none", cursor: "pointer", background: "transparent", color: "#6B7280", fontSize: 13, textAlign: "left" }}>
+          <LogOut size={17} /> Log out
+        </button>
+      </div>
+
+      <div className="app-main" style={{ fontFamily: "'Inter', sans-serif" }}>
+        {!subscribed && trialActive && (
+          <div style={{ background: T.charge, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px" }}>
+            {trialDaysLeft(trialStartedAt)} day{trialDaysLeft(trialStartedAt) === 1 ? "" : "s"} left in your free trial — <button onClick={() => setActiveTab("profile")} style={{ background: "none", border: "none", color: "#fff", textDecoration: "underline", cursor: "pointer", fontWeight: 700, fontSize: 12, padding: 0 }}>subscribe anytime</button>
+          </div>
+        )}
+        <div className="app-main-inner">
+          {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
+          {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} />}
+          {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
+          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} />}
+        </div>
 
         <div className="bottom-nav">
           {TABS.map((t) => {
@@ -1848,16 +2012,21 @@ export default function App() {
             );
           })}
         </div>
-
-        {session && (
-          <WorkoutSession
-            day={state.program.days[session.dayIdx]}
-            lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
-            onFinish={finishWorkout}
-            onCancel={() => setSession(null)}
-          />
-        )}
       </div>
+
+      {session && (
+        <WorkoutSession
+          day={
+            Array.isArray(state.todayOverride) && state.todayOverride.length > 0
+              ? { ...state.program.days[session.dayIdx], exercises: state.todayOverride }
+              : state.program.days[session.dayIdx]
+          }
+          isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}
+          lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
+          onFinish={finishWorkout}
+          onCancel={() => setSession(null)}
+        />
+      )}
     </div>
   );
 }
