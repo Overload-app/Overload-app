@@ -53,6 +53,10 @@ const SHELL_CSS = `
   .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; width: 100%; background: #fff; border-top: 1px solid ${T.steel}; display: flex; padding: 8px 4px calc(8px + env(safe-area-inset-bottom, 0px)) 4px; box-sizing: border-box; z-index: 40; }
   .sidebar-nav { display: none; }
 
+  /* Coach tab: a fixed panel independent of any page content above it
+     (banners, etc.) so the input box can never get pushed off-screen. */
+  .coach-panel { position: fixed; top: 0; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); background: ${T.paper}; z-index: 30; display: flex; flex-direction: column; }
+
   @media (min-width: 900px) and (min-height: 600px) {
     .app-shell { display: flex; }
     .sidebar-nav {
@@ -63,6 +67,7 @@ const SHELL_CSS = `
     .bottom-nav { display: none; }
     .app-main { flex: 1; padding-bottom: 40px; }
     .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
+    .coach-panel { left: 240px; bottom: 0; }
   }
 `;
 
@@ -73,7 +78,7 @@ async function claudeChat({ system, messages }) {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1400, system, messages }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 2200, system, messages }),
   });
   if (!res.ok) {
     let detail = "";
@@ -1248,20 +1253,20 @@ The user will chat with you to adjust their training (swap exercises, change int
 
 There are TWO different kinds of requests — telling them apart matters:
 1. PERMANENT changes — the user wants their ongoing program itself changed going forward (e.g. "change my split," "my knees hurt in general, adjust my program permanently," "give me more back volume from now on"). For these, modify "program" and leave "todayOverride" null.
-2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, leave "program" completely UNCHANGED (return it exactly as given, byte-for-byte, using the "Current program JSON" above), and instead put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, set "program" to null (do NOT echo the current program back — it's unused and just wastes space), and instead put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
 
-Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to the EXACT SAME JSON given above (unchanged, not even reformatted), and "todayOverride" set to a fresh list of knee-friendly leg exercises for just that one session. It does NOT rename any day, and does NOT touch any other day in "program". Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly and leave "todayOverride" null.
+Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else. Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly (returning the full program) and leave "todayOverride" null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
-- If the request doesn't require any change at all (e.g. a general question), return the program UNCHANGED, todayOverride null, and just answer helpfully in "reply".
+- If the request doesn't require any change at all (e.g. a general question), set "program" to null, "todayOverride" to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
-- Never set both a modified "program" AND a non-null "todayOverride" in the same response — pick one based on which kind of request this is.`;
+- Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above).`;
 }
 
 const DEFAULT_COACH_MESSAGES = [
@@ -1285,7 +1290,7 @@ function Coach({ messages, loading, onSend }) {
   }
 
   return (
-    <div style={{ padding: "20px 16px 0", display: "flex", flexDirection: "column", height: "min(calc(100vh - 140px), 700px)" }}>
+    <div className="coach-panel" style={{ padding: "20px 16px 0" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 12px", color: T.ink }}>Ask your coach</h1>
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 10 }}>
