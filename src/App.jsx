@@ -42,10 +42,12 @@ const SHELL_CSS = `
   .fullscreen-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; height: 100vh; height: 100dvh; }
 
   /* Auth-style screens (login, paywall, onboarding): full-bleed on phones,
-     a centered card on anything roomier — never a stretched, empty page. */
+     a roomy, fully-centered card filling much more of the screen on desktop. */
   .auth-screen { min-height: 100vh; min-height: 100dvh; width: 100%; }
+  .auth-screen-outer { min-height: 100vh; min-height: 100dvh; width: 100%; }
   @media (min-width: 640px) and (min-height: 600px) {
-    .auth-screen { min-height: 0; max-width: 460px; margin: 40px auto; border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
+    .auth-screen-outer { display: flex; align-items: center; justify-content: center; padding: 32px; box-sizing: border-box; }
+    .auth-screen { min-height: 0; max-width: 760px; width: 100%; border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
   }
 
   /* Main app: bottom tab bar + full-bleed on phones, a real sidebar layout
@@ -625,6 +627,106 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
         <button onClick={onLogout} style={{ width: "100%", background: "none", border: "none", color: "#6B7280", fontSize: 12, padding: "4px 0", cursor: "pointer" }}>
           Log out
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SUBSCRIBE OVERLAY (in-app upgrade page, same offer as the paywall,
+   but dismissible — reached from the Profile tab once already inside the app)
+============================================================ */
+function SubscribeOverlay({ account, onClose }) {
+  const [plan, setPlan] = useState("monthly");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const MONTHLY_PRICE = "$7.99";
+  const YEARLY_PRICE = "$59.99";
+  const YEARLY_SAVE_PCT = "37%";
+
+  async function startCheckout() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: account.email, userId: account.id, plan }),
+      });
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        setError(data.error || "Couldn't start checkout. Try again.");
+        setLoading(false);
+      }
+    } catch (e) {
+      setError("Couldn't start checkout. Try again.");
+      setLoading(false);
+    }
+  }
+
+  const FEATURES = [
+    "Training program built by AI for your exact goals",
+    "Personalized calorie & macro targets",
+    "Workout logging with rest timers & progress charts",
+    "On-demand AI coach chat, anytime you need it",
+  ];
+
+  return (
+    <div className="fullscreen-overlay" style={{ background: T.ink, color: "#fff", zIndex: 65, overflowY: "auto" }}>
+      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, maxWidth: 560, margin: "0 auto" }}>
+        <div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer", padding: 0, marginBottom: 20 }}><X size={24} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Zap size={20} color={T.charge} />
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
+          </div>
+          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 32, lineHeight: 1.1, margin: "18px 0 14px", fontWeight: 700 }}>
+            Upgrade to Overload
+          </h1>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
+            {FEATURES.map((f, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <Check size={16} color={T.charge} style={{ marginTop: 2, flexShrink: 0 }} />
+                <span style={{ fontSize: 14, color: "#D6D9DE", lineHeight: 1.4 }}>{f}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button
+              onClick={() => setPlan("monthly")}
+              style={{ flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13, border: `2px solid ${plan === "monthly" ? T.charge : "rgba(255,255,255,0.15)"}`, background: plan === "monthly" ? "rgba(78,74,242,0.15)" : "transparent", color: "#fff" }}
+            >
+              Monthly
+            </button>
+            <button
+              onClick={() => setPlan("yearly")}
+              style={{ flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13, border: `2px solid ${plan === "yearly" ? T.charge : "rgba(255,255,255,0.15)"}`, background: plan === "yearly" ? "rgba(78,74,242,0.15)" : "transparent", color: "#fff", position: "relative" }}
+            >
+              Yearly
+              <span style={{ position: "absolute", top: -10, right: -6, background: T.good, color: "#fff", fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>SAVE {YEARLY_SAVE_PCT}</span>
+            </button>
+          </div>
+
+          <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 16, padding: 20, marginBottom: 14 }}>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700 }}>
+              {plan === "monthly" ? MONTHLY_PRICE : YEARLY_PRICE}
+              <span style={{ fontSize: 14, color: "#B9BEC6", fontWeight: 500 }}> / {plan === "monthly" ? "month" : "year"}</span>
+            </div>
+            <div style={{ fontSize: 13, color: "#B9BEC6", marginTop: 6 }}>Cancel anytime.</div>
+          </div>
+          {error && <p style={{ color: "#FF8A80", fontSize: 13 }}>{error}</p>}
+        </div>
+        <div>
+          <Btn variant="accent" onClick={startCheckout} disabled={loading} style={{ width: "100%", padding: 16 }}>
+            {loading ? "Redirecting…" : "Subscribe now"} <ChevronRight size={18} />
+          </Btn>
+          <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>🔒 Payment secured by Stripe</div>
+        </div>
       </div>
     </div>
   );
@@ -1613,29 +1715,7 @@ function Progress({ state, addWeight }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount }) {
-  const [subLoading, setSubLoading] = useState(false);
-  const [subError, setSubError] = useState("");
-  const [subPlan, setSubPlan] = useState("monthly");
-
-  async function subscribeNow() {
-    setSubLoading(true);
-    setSubError("");
-    try {
-      const res = await fetch("/api/create-checkout-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: account.email, userId: account.id, plan: subPlan }),
-      });
-      const data = await res.json();
-      if (data.url) window.location.href = data.url;
-      else { setSubError(data.error || "Couldn't start checkout."); setSubLoading(false); }
-    } catch (e) {
-      setSubError("Couldn't start checkout.");
-      setSubLoading(false);
-    }
-  }
-
+function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
   const { profile, targets } = state;
   const rows = [
     ["Goal", GOAL_SCHEME[profile.goal]?.label],
@@ -1675,26 +1755,12 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
           <>
             <div style={{ fontSize: 14, color: T.ink, fontWeight: 700, marginBottom: 4 }}>Free trial — {trialDaysLeftCount} day{trialDaysLeftCount === 1 ? "" : "s"} left</div>
             <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>Subscribe now to keep access after your trial ends.</p>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <button onClick={() => setSubPlan("monthly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "monthly" ? T.charge : T.steel}`, background: subPlan === "monthly" ? "#EEEDFF" : "#fff", color: T.ink }}>Monthly</button>
-              <button onClick={() => setSubPlan("yearly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "yearly" ? T.charge : T.steel}`, background: subPlan === "yearly" ? "#EEEDFF" : "#fff", color: T.ink }}>Yearly</button>
-            </div>
-            <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
-              {subLoading ? "Redirecting…" : "Subscribe now"}
-            </Btn>
-            {subError && <p style={{ color: T.warn, fontSize: 12, marginTop: 8 }}>{subError}</p>}
+            <Btn variant="accent" onClick={onOpenSubscribe} style={{ width: "100%" }}>Subscribe</Btn>
           </>
         ) : (
           <>
             <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 12px" }}>You're not currently subscribed.</p>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <button onClick={() => setSubPlan("monthly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "monthly" ? T.charge : T.steel}`, background: subPlan === "monthly" ? "#EEEDFF" : "#fff", color: T.ink }}>Monthly</button>
-              <button onClick={() => setSubPlan("yearly")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12, border: `2px solid ${subPlan === "yearly" ? T.charge : T.steel}`, background: subPlan === "yearly" ? "#EEEDFF" : "#fff", color: T.ink }}>Yearly</button>
-            </div>
-            <Btn variant="accent" onClick={subscribeNow} disabled={subLoading} style={{ width: "100%" }}>
-              {subLoading ? "Redirecting…" : "Subscribe now"}
-            </Btn>
-            {subError && <p style={{ color: T.warn, fontSize: 12, marginTop: 8 }}>{subError}</p>}
+            <Btn variant="accent" onClick={onOpenSubscribe} style={{ width: "100%" }}>Subscribe</Btn>
           </>
         )}
       </Card>
@@ -1725,6 +1791,7 @@ export default function App() {
   const [account, setAccount] = useState(null);
   const [subscribed, setSubscribed] = useState(false);
   const [trialStartedAt, setTrialStartedAt] = useState(null);
+  const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -1937,24 +2004,40 @@ export default function App() {
   }
 
   if (!account) {
-    return <Login onSignUp={handleSignUp} onSignIn={handleSignIn} />;
+    return (
+      <div className="auth-screen-outer">
+        <style>{FONT_IMPORT}</style>
+        <style>{SHELL_CSS}</style>
+        <Login onSignUp={handleSignUp} onSignIn={handleSignIn} />
+      </div>
+    );
   }
 
   const trialActive = isTrialActive(trialStartedAt);
 
   if (!state) {
-    return <Onboarding onComplete={handleOnboarded} />;
+    return (
+      <div className="auth-screen-outer">
+        <style>{FONT_IMPORT}</style>
+        <style>{SHELL_CSS}</style>
+        <Onboarding onComplete={handleOnboarded} />
+      </div>
+    );
   }
 
   if (!subscribed && !trialActive) {
     return (
-      <Paywall
-        account={account}
-        trialUsed={!!trialStartedAt}
-        onStartTrial={startFreeTrial}
-        onRefresh={checkSubscription}
-        onLogout={handleLogout}
-      />
+      <div className="auth-screen-outer">
+        <style>{FONT_IMPORT}</style>
+        <style>{SHELL_CSS}</style>
+        <Paywall
+          account={account}
+          trialUsed={!!trialStartedAt}
+          onStartTrial={startFreeTrial}
+          onRefresh={checkSubscription}
+          onLogout={handleLogout}
+        />
+      </div>
     );
   }
 
@@ -2013,7 +2096,7 @@ export default function App() {
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
           {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
         </div>
 
         <div className="bottom-nav">
@@ -2049,6 +2132,10 @@ export default function App() {
           onFinish={finishWorkout}
           onCancel={() => setSession(null)}
         />
+      )}
+
+      {showSubscribeOverlay && (
+        <SubscribeOverlay account={account} onClose={() => setShowSubscribeOverlay(false)} />
       )}
     </div>
   );
