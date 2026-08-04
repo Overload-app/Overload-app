@@ -41,14 +41,10 @@ const SHELL_CSS = `
 
   .fullscreen-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; height: 100vh; height: 100dvh; }
 
-  /* Auth-style screens (login, paywall, onboarding): full-bleed on phones,
-     a roomy, fully-centered card filling much more of the screen on desktop. */
+  /* Auth-style screens (login, paywall, onboarding): always full-bleed,
+     no card/frame, on every screen size — same on desktop as on mobile. */
   .auth-screen { min-height: 100vh; min-height: 100dvh; width: 100%; }
   .auth-screen-outer { min-height: 100vh; min-height: 100dvh; width: 100%; }
-  @media (min-width: 640px) and (min-height: 600px) {
-    .auth-screen-outer { display: flex; align-items: center; justify-content: center; padding: 32px; box-sizing: border-box; }
-    .auth-screen { min-height: 0; max-width: 760px; width: 100%; border-radius: 24px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); }
-  }
 
   /* Main app: bottom tab bar + full-bleed on phones, a real sidebar layout
      using the whole screen on anything roomier. */
