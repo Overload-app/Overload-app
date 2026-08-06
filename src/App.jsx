@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -999,7 +999,28 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
   );
   const [rest, setRest] = useState(null); // {seconds, total}
   const [confirmExit, setConfirmExit] = useState(false);
+  const [expandedTips, setExpandedTips] = useState({});
+  const [tipsCache, setTipsCache] = useState({});
+  const [tipsLoading, setTipsLoading] = useState({});
   const intervalRef = useRef(null);
+
+  async function toggleTips(name) {
+    setExpandedTips((e) => ({ ...e, [name]: !e[name] }));
+    if (tipsCache[name] || tipsLoading[name]) return;
+    setTipsLoading((l) => ({ ...l, [name]: true }));
+    try {
+      const raw = await claudeChat({
+        system: `You are a knowledgeable, safety-conscious strength coach. Give concise, practical form tips for a single exercise. Respond ONLY with a JSON object, no markdown fences, no prose outside it: {"tips": ["<tip>", "<tip>", "<tip>", "<tip>"]} — exactly 4 short tips (under 18 words each) covering setup, execution, and one common mistake to avoid.`,
+        messages: [{ role: "user", content: `Exercise: ${name}` }],
+      });
+      const parsed = parseJSONLoose(raw);
+      setTipsCache((c) => ({ ...c, [name]: Array.isArray(parsed.tips) ? parsed.tips : [] }));
+    } catch (e) {
+      setTipsCache((c) => ({ ...c, [name]: ["Couldn't load tips right now — try again."] }));
+    } finally {
+      setTipsLoading((l) => ({ ...l, [name]: false }));
+    }
+  }
 
   useEffect(() => {
     if (rest === null) return;
@@ -1068,6 +1089,28 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
             </div>
             {lastFor(ex.name) && (
               <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
+            )}
+            <button
+              onClick={() => toggleTips(ex.name)}
+              style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+            >
+              <Info size={13} /> How to do it
+              <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+            </button>
+            {expandedTips[ex.name] && (
+              <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
+                {tipsLoading[ex.name] ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.steelDark }}>
+                    <Loader2 size={13} className="spin" /> Loading tips…
+                  </div>
+                ) : (
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {(tipsCache[ex.name] || []).map((tip, i) => (
+                      <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
             <div style={{ marginTop: 10 }}>
               {ex.logged.map((l, setIdx) => (
