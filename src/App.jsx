@@ -90,7 +90,15 @@ async function claudeChat({ system, messages }) {
 }
 
 function parseJSONLoose(text) {
-  const clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  let clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  // The model is instructed to return only JSON, but sometimes adds a stray
+  // sentence before or after it anyway — pull out just the {...} block
+  // rather than requiring the entire response to be pure JSON.
+  const start = clean.indexOf("{");
+  const end = clean.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    clean = clean.slice(start, end + 1);
+  }
   return JSON.parse(clean);
 }
 
@@ -1257,7 +1265,7 @@ There are TWO different kinds of requests — telling them apart matters:
 
 Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else. Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly (returning the full program) and leave "todayOverride" null.
 
-Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
+Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
 {"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}
 
 Rules:
