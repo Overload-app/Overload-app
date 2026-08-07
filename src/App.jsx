@@ -1708,14 +1708,23 @@ function Progress({ state, addWeight }) {
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
   const totalWorkouts = logs.workouts.length;
-  const streak = (() => {
-    const dates = new Set(logs.workouts.map((w) => w.date));
-    let s = 0, d = new Date();
+  const weekStreak = (() => {
+    const dateSet = new Set(logs.workouts.map((w) => w.date));
+    const toISO = (d) => d.toISOString().slice(0, 10);
+    let streak = 0;
+    let cursor = new Date();
     for (;;) {
-      const iso = d.toISOString().slice(0, 10);
-      if (dates.has(iso)) { s++; d.setDate(d.getDate() - 1); } else break;
+      let hasWorkout = false;
+      for (let i = 0; i < 7; i++) {
+        const check = new Date(cursor);
+        check.setDate(check.getDate() - i);
+        if (dateSet.has(toISO(check))) { hasWorkout = true; break; }
+      }
+      if (!hasWorkout) break;
+      streak++;
+      cursor.setDate(cursor.getDate() - 7);
     }
-    return s;
+    return streak;
   })();
 
   return (
@@ -1725,7 +1734,7 @@ function Progress({ state, addWeight }) {
 
       <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
         <StatChip label="Workouts logged" val={totalWorkouts} color={T.charge} icon={<Award size={16} color={T.charge} />} />
-        <StatChip label="Day streak" val={streak} color={T.good} icon={<Sparkles size={16} color={T.good} />} />
+        <StatChip label="Week streak" val={weekStreak} color={T.good} icon={<Sparkles size={16} color={T.good} />} />
       </div>
 
       <TickRule label="This month" />
