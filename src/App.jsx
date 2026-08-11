@@ -78,7 +78,7 @@ async function claudeChat({ system, messages }) {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 2200, system, messages }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 4000, system, messages }),
   });
   if (!res.ok) {
     let detail = "";
@@ -100,6 +100,20 @@ function parseJSONLoose(text) {
     clean = clean.slice(start, end + 1);
   }
   return JSON.parse(clean);
+}
+
+// If the full response got cut off (e.g. a very large program rewrite hit the
+// length limit), the JSON won't parse — but "reply" is always written first
+// and is almost always complete even when the tail of the response wasn't.
+// Pull it out directly with a regex instead of showing the raw broken JSON.
+function extractReplyOnly(text) {
+  const match = text.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!match) return null;
+  try {
+    return JSON.parse(`"${match[1]}"`);
+  } catch (e) {
+    return match[1];
+  }
 }
 
 function fileToBase64(file) {
@@ -423,13 +437,68 @@ function Btn({ children, onClick, variant = "primary", style, disabled }) {
 /* ============================================================
    LOGIN
 ============================================================ */
-function Login({ onSignUp, onSignIn }) {
-  const [mode, setMode] = useState("signup"); // "signup" | "signin"
+function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
+  const [resending, setResending] = useState(false);
+  const [resent, setResent] = useState(false);
+  const [error, setError] = useState("");
+
+  async function resend() {
+    setResending(true);
+    setError("");
+    setResent(false);
+    const result = await onResend(email);
+    setResending(false);
+    if (result.ok) setResent(true);
+    else setError(result.error);
+  }
+
+  return (
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+      <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
+          <Zap size={20} color={T.charge} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
+        </div>
+        <div style={{ width: 56, height: 56, borderRadius: 16, background: "rgba(78,74,242,0.15)", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 30 }}>
+          <MessageCircle size={26} color={T.charge} />
+        </div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, lineHeight: 1.15, margin: "18px 0 10px", fontWeight: 700 }}>
+          Check your email
+        </h1>
+        <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 14, lineHeight: 1.6, maxWidth: 360 }}>
+          We sent a confirmation link to <strong style={{ color: "#fff" }}>{email}</strong>. Click it to activate your account, then come back and sign in.
+        </p>
+        <p style={{ fontFamily: "'Inter', sans-serif", color: "#7C838F", fontSize: 12, lineHeight: 1.6, marginTop: 14, maxWidth: 360 }}>
+          Don't see it? Check your spam or junk folder — confirmation emails sometimes end up there.
+        </p>
+        {resent && <p style={{ color: T.good, fontSize: 13, marginTop: 14 }}>Confirmation email resent.</p>}
+        {error && <p style={{ color: "#FF8A80", fontSize: 13, marginTop: 14 }}>{error}</p>}
+      </div>
+      <div>
+        <Btn variant="accent" onClick={resend} disabled={resending} style={{ width: "100%", padding: 16 }}>
+          {resending ? "Sending…" : "Resend confirmation email"}
+        </Btn>
+        <button
+          onClick={onBackToLogin}
+          style={{ width: "100%", background: "none", border: "none", color: "#B9BEC6", fontSize: 13, padding: "14px 0 4px", cursor: "pointer" }}
+        >
+          Back to sign in
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Login({ onSignUp, onSignIn, onForgotPassword }) {
+  const [mode, setMode] = useState("signup"); // "signup" | "signin" | "forgot"
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
 
   const inputStyle = { width: "100%", padding: "14px 16px", fontSize: 15, borderRadius: 10, border: "none", marginTop: 4, boxSizing: "border-box", fontFamily: "'Inter', sans-serif", color: T.ink, background: "#fff" };
@@ -437,6 +506,18 @@ function Login({ onSignUp, onSignIn }) {
   async function submit() {
     const trimmedEmail = email.trim().toLowerCase();
     if (!/^\S+@\S+\.\S+$/.test(trimmedEmail)) return setError("Enter a valid email.");
+
+    if (mode === "forgot") {
+      setError("");
+      setInfo("");
+      setBusy(true);
+      const result = await onForgotPassword(trimmedEmail);
+      setBusy(false);
+      if (result.ok) setInfo("Check your email for a password reset link.");
+      else setError(result.error);
+      return;
+    }
+
     if (password.length < 6) return setError("Password must be at least 6 characters.");
 
     setError("");
@@ -464,10 +545,10 @@ function Login({ onSignUp, onSignIn }) {
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
         </div>
         <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 34, lineHeight: 1.1, margin: "18px 0 8px", fontWeight: 700 }}>
-          {mode === "signup" ? "Create your account" : "Welcome back"}
+          {mode === "signup" ? "Create your account" : mode === "forgot" ? "Reset your password" : "Welcome back"}
         </h1>
         <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 14, lineHeight: 1.5, marginBottom: 26, maxWidth: 340 }}>
-          Your program, logs, and chats are saved to this account so they're here next time you open the app.
+          {mode === "forgot" ? "Enter your email and we'll send you a link to set a new password." : "Your program, logs, and chats are saved to this account so they're here next time you open the app."}
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {mode === "signup" && (
@@ -480,14 +561,16 @@ function Login({ onSignUp, onSignIn }) {
             <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Email</label>
             <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" style={inputStyle} />
           </div>
-          <div>
-            <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Password</label>
-            <input
-              value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" type="password"
-              onKeyDown={(e) => e.key === "Enter" && mode === "signin" && submit()}
-              style={inputStyle}
-            />
-          </div>
+          {mode !== "forgot" && (
+            <div>
+              <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Password</label>
+              <input
+                value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" type="password"
+                onKeyDown={(e) => e.key === "Enter" && mode === "signin" && submit()}
+                style={inputStyle}
+              />
+            </div>
+          )}
           {mode === "signup" && (
             <div>
               <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Confirm password</label>
@@ -498,17 +581,26 @@ function Login({ onSignUp, onSignIn }) {
               />
             </div>
           )}
+          {mode === "signin" && (
+            <button
+              onClick={() => { setMode("forgot"); setError(""); setInfo(""); }}
+              style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 12, cursor: "pointer", textAlign: "left", padding: 0, textDecoration: "underline" }}
+            >
+              Forgot password?
+            </button>
+          )}
           {error && <span style={{ color: "#FF8A80", fontSize: 13 }}>{error}</span>}
+          {info && <span style={{ color: T.good, fontSize: 13 }}>{info}</span>}
           <button
-            onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); }}
+            onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); setInfo(""); }}
             style={{ background: "none", border: "none", color: T.charge, fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "left", padding: 0 }}
           >
-            {mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
+            {mode === "forgot" ? "Back to sign in" : mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
           </button>
         </div>
       </div>
       <Btn variant="accent" onClick={submit} disabled={busy} style={{ width: "100%", padding: "16px" }}>
-        {busy ? "One sec…" : mode === "signup" ? "Create account" : "Sign in"} <ChevronRight size={18} />
+        {busy ? "One sec…" : mode === "forgot" ? "Send reset link" : mode === "signup" ? "Create account" : "Sign in"} <ChevronRight size={18} />
       </Btn>
     </div>
   );
@@ -517,6 +609,53 @@ function Login({ onSignUp, onSignIn }) {
 /* ============================================================
    PAYWALL
 ============================================================ */
+function SetNewPasswordScreen({ onSetPassword }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const inputStyle = { width: "100%", padding: "14px 16px", fontSize: 15, borderRadius: 10, border: "none", marginTop: 4, boxSizing: "border-box", fontFamily: "'Inter', sans-serif", color: T.ink, background: "#fff" };
+
+  async function submit() {
+    if (password.length < 6) return setError("Password must be at least 6 characters.");
+    if (password !== confirm) return setError("Passwords don't match.");
+    setError("");
+    setBusy(true);
+    const result = await onSetPassword(password);
+    setBusy(false);
+    if (!result.ok) setError(result.error);
+  }
+
+  return (
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+      <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
+          <Zap size={20} color={T.charge} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
+        </div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 34, lineHeight: 1.1, margin: "18px 0 8px", fontWeight: 700 }}>Set a new password</h1>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 20 }}>
+          <div>
+            <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>New password</label>
+            <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" type="password" style={inputStyle} />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Confirm password</label>
+            <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Re-enter password" type="password" onKeyDown={(e) => e.key === "Enter" && submit()} style={inputStyle} />
+          </div>
+          {error && <span style={{ color: "#FF8A80", fontSize: 13 }}>{error}</span>}
+        </div>
+      </div>
+      <Btn variant="accent" onClick={submit} disabled={busy} style={{ width: "100%", padding: "16px" }}>
+        {busy ? "One sec…" : "Save new password"} <ChevronRight size={18} />
+      </Btn>
+    </div>
+  );
+}
+
 function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
   const [plan, setPlan] = useState("monthly");
   const [loading, setLoading] = useState(false);
@@ -1057,8 +1196,12 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
     if (!lastLog) return null;
     const found = lastLog.exercises.find((e) => e.name === name);
     if (!found) return null;
-    const best = found.logged.filter((l) => l.weight).slice(-1)[0];
-    return best ? `${best.weight}lb x ${best.reps}` : null;
+    const withWeight = found.logged.filter((l) => l.weight);
+    if (withWeight.length === 0) return null;
+    // Show the heaviest set from last time — that's the real benchmark to
+    // beat for progressive overload, not just whichever set was logged last.
+    const best = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) ? l : max), withWeight[0]);
+    return `${best.weight}lb x ${best.reps}`;
   }
 
   const totalSets = sets.reduce((a, e) => a + e.logged.length, 0);
@@ -1777,6 +1920,26 @@ function Progress({ state, addWeight }) {
    PROFILE
 ============================================================ */
 function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
+  const [portalLoading, setPortalLoading] = useState(false);
+  const [portalError, setPortalError] = useState("");
+
+  async function openManageSubscription() {
+    setPortalLoading(true);
+    setPortalError("");
+    try {
+      const res = await fetch("/api/create-portal-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: account.id }),
+      });
+      const data = await res.json();
+      if (data.url) window.location.href = data.url;
+      else { setPortalError(data.error || "Couldn't open billing portal."); setPortalLoading(false); }
+    } catch (e) {
+      setPortalError("Couldn't open billing portal.");
+      setPortalLoading(false);
+    }
+  }
   const { profile, targets } = state;
   const rows = [
     ["Goal", GOAL_SCHEME[profile.goal]?.label],
@@ -1809,9 +1972,15 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
       <TickRule label="Subscription" />
       <Card>
         {subscribed ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: T.good, fontWeight: 700, fontSize: 14 }}>
-            <Check size={16} /> Active subscription
-          </div>
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: T.good, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>
+              <Check size={16} /> Active subscription
+            </div>
+            <Btn variant="ghost" onClick={openManageSubscription} disabled={portalLoading} style={{ width: "100%" }}>
+              {portalLoading ? "Opening…" : "Manage or cancel subscription"}
+            </Btn>
+            {portalError && <p style={{ color: T.warn, fontSize: 12, marginTop: 8 }}>{portalError}</p>}
+          </>
         ) : trialActive ? (
           <>
             <div style={{ fontSize: 14, color: T.ink, fontWeight: 700, marginBottom: 4 }}>Free trial — {trialDaysLeftCount} day{trialDaysLeftCount === 1 ? "" : "s"} left</div>
@@ -1853,6 +2022,8 @@ export default function App() {
   const [subscribed, setSubscribed] = useState(false);
   const [trialStartedAt, setTrialStartedAt] = useState(null);
   const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
+  const [confirmEmailPending, setConfirmEmailPending] = useState(null);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -1876,6 +2047,10 @@ export default function App() {
         setState(null);
         setSubscribed(false);
         setTrialStartedAt(null);
+      }
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecovery(true);
+        setLoading(false);
       }
     });
     return () => listener.subscription.unsubscribe();
@@ -1956,7 +2131,12 @@ export default function App() {
       try {
         parsed = parseJSONLoose(raw);
       } catch (parseErr) {
-        parsed = { reply: raw.replace(/```json/g, "").replace(/```/g, "").trim() || "Got it.", program: null };
+        const extractedReply = extractReplyOnly(raw);
+        parsed = {
+          reply: extractedReply || "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?",
+          program: null,
+          todayOverride: null,
+        };
       }
       const withReply = [...withUser, { role: "assistant", text: parsed.reply }];
       const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
@@ -1985,9 +2165,16 @@ export default function App() {
     if (!data.session) {
       // Email confirmation is required by the Supabase project settings —
       // there's no session yet until they click the link in their inbox.
-      return { ok: false, error: "Account created! Check your email to confirm it, then sign in." };
+      setConfirmEmailPending(email);
+      return { ok: true };
     }
     await hydrateAccount(data.user);
+    return { ok: true };
+  }
+
+  async function resendConfirmation(email) {
+    const { error } = await supabase.auth.resend({ type: "signup", email });
+    if (error) return { ok: false, error: error.message };
     return { ok: true };
   }
 
@@ -1995,6 +2182,21 @@ export default function App() {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return { ok: false, error: error.message };
     await hydrateAccount(data.user);
+    return { ok: true };
+  }
+
+  async function handleForgotPassword(email) {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  }
+
+  async function handleSetNewPassword(password) {
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return { ok: false, error: error.message };
+    setPasswordRecovery(false);
+    const { data: { session: sbSession } } = await supabase.auth.getSession();
+    if (sbSession?.user) await hydrateAccount(sbSession.user);
     return { ok: true };
   }
 
@@ -2064,12 +2266,30 @@ export default function App() {
       <style>{SHELL_CSS}</style></div>;
   }
 
+  if (passwordRecovery) {
+    return (
+      <div className="auth-screen-outer">
+        <style>{FONT_IMPORT}</style>
+        <style>{SHELL_CSS}</style>
+        <SetNewPasswordScreen onSetPassword={handleSetNewPassword} />
+      </div>
+    );
+  }
+
   if (!account) {
     return (
       <div className="auth-screen-outer">
         <style>{FONT_IMPORT}</style>
         <style>{SHELL_CSS}</style>
-        <Login onSignUp={handleSignUp} onSignIn={handleSignIn} />
+        {confirmEmailPending ? (
+          <ConfirmEmailScreen
+            email={confirmEmailPending}
+            onResend={resendConfirmation}
+            onBackToLogin={() => setConfirmEmailPending(null)}
+          />
+        ) : (
+          <Login onSignUp={handleSignUp} onSignIn={handleSignIn} onForgotPassword={handleForgotPassword} />
+        )}
       </div>
     );
   }
