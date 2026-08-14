@@ -331,9 +331,16 @@ function calcTargets(profile) {
 /* ============================================================
    STORAGE (Supabase — real accounts + real database)
 ============================================================ */
-async function loadState(userId) {
+async function loadState(userId, attempt = 0) {
   const { data, error } = await supabase.from("app_state").select("state").eq("user_id", userId).maybeSingle();
   if (error) {
+    // A fresh session (e.g. right after a password reset) can occasionally
+    // hit an RLS/auth timing hiccup on the very first request — retry a
+    // couple times before concluding this is genuinely a new account.
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 500));
+      return loadState(userId, attempt + 1);
+    }
     console.error("loadState failed", error);
     return null;
   }
@@ -343,9 +350,13 @@ async function saveState(userId, state) {
   const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
   if (error) console.error("saveState failed", error);
 }
-async function loadProfile(userId) {
+async function loadProfile(userId, attempt = 0) {
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
   if (error) {
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 500));
+      return loadProfile(userId, attempt + 1);
+    }
     console.error("loadProfile failed", error);
     return null;
   }
@@ -1467,8 +1478,9 @@ const DEFAULT_COACH_MESSAGES = [
   { role: "assistant", text: "Hey — I'm your coach. Ask me to adjust your program: swap an exercise, work around an injury, add volume, change your split, or anything else." },
 ];
 
-function Coach({ messages, loading, onSend }) {
+function Coach({ messages, loading, onSend, onClearChat }) {
   const [input, setInput] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
   const list = messages && messages.length > 0 ? messages : DEFAULT_COACH_MESSAGES;
 
@@ -1485,8 +1497,26 @@ function Coach({ messages, loading, onSend }) {
 
   return (
     <div className="coach-panel" style={{ padding: "20px 16px 0" }}>
-      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
-      <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 12px", color: T.ink }}>Ask your coach</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
+          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 12px", color: T.ink }}>Ask your coach</h1>
+        </div>
+        {list.length > 1 && !confirmClear && (
+          <button
+            onClick={() => setConfirmClear(true)}
+            style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "4px 0", marginTop: 4 }}
+          >
+            Clear chat
+          </button>
+        )}
+        {confirmClear && (
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button onClick={() => setConfirmClear(false)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: 0 }}>Cancel</button>
+            <button onClick={() => { onClearChat(); setConfirmClear(false); }} style={{ background: "none", border: "none", color: T.protein, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>Confirm clear</button>
+          </div>
+        )}
+      </div>
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 10 }}>
         {list.map((m, i) => (
           <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "85%" }}>
@@ -2113,6 +2143,10 @@ export default function App() {
   // Lives at the App level (not inside the Coach tab component) so an in-flight
   // request keeps running — and its reply gets saved — even if the person
   // switches to Train, Fuel, etc. while waiting on it.
+  function clearCoachChat() {
+    persist((prev) => ({ ...prev, coachChat: DEFAULT_COACH_MESSAGES }));
+  }
+
   async function sendCoachMessage(text) {
     const trimmed = text.trim();
     if (!trimmed || coachLoading) return;
@@ -2131,6 +2165,7 @@ export default function App() {
       try {
         parsed = parseJSONLoose(raw);
       } catch (parseErr) {
+        console.error("Coach JSON parse failed. Raw response was:", raw);
         const extractedReply = extractReplyOnly(raw);
         parsed = {
           reply: extractedReply || "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?",
@@ -2195,6 +2230,9 @@ export default function App() {
     const { error } = await supabase.auth.updateUser({ password });
     if (error) return { ok: false, error: error.message };
     setPasswordRecovery(false);
+    // Give the new session a moment to fully settle before reading data —
+    // this is the extra safety net on top of the retry logic in loadState/loadProfile.
+    await new Promise((r) => setTimeout(r, 400));
     const { data: { session: sbSession } } = await supabase.auth.getSession();
     if (sbSession?.user) await hydrateAccount(sbSession.user);
     return { ok: true };
@@ -2374,7 +2412,7 @@ export default function App() {
         <div className="app-main-inner">
           {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
-          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
           {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
