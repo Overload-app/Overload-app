@@ -1140,9 +1140,9 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
+function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit }) {
   const [sets, setSets] = useState(() =>
-    day.exercises.map((ex) => ({
+    initialSets || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest,
       logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
     }))
@@ -1313,10 +1313,11 @@ function WorkoutSession({ day, isOverride, lastLog, onFinish, onCancel }) {
       {confirmExit && (
         <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
           <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Exit this workout?</h3>
-          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Your logged sets so far will be lost unless you resume.</p>
-          <div style={{ display: "flex", gap: 10, width: "100%", maxWidth: 320 }}>
-            <Btn variant="ghost" onClick={() => setConfirmExit(false)} style={{ flex: 1, color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Resume</Btn>
-            <Btn variant="accent" onClick={onCancel} style={{ flex: 1, background: T.protein }}>Discard</Btn>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Save your progress to pick it back up later, or discard it completely.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
+            <Btn variant="accent" onClick={() => onSaveExit(sets)} style={{ width: "100%" }}>Save & exit</Btn>
+            <Btn variant="ghost" onClick={onCancel} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
+            <button onClick={() => setConfirmExit(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
           </div>
         </div>
       )}
@@ -1360,6 +1361,16 @@ function Home({ state, setActiveTab, startWorkout }) {
           <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>THIS WK</div>
         </div>
       </div>
+
+      {state.inProgressWorkout && (
+        <Card style={{ marginTop: 16, background: "#FFF7ED", border: `1px solid ${T.warn}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>Workout in progress</div>
+            <div style={{ fontSize: 12, color: T.steelDark, marginTop: 2 }}>{program.days[state.inProgressWorkout.dayIdx]?.name}</div>
+          </div>
+          <Btn variant="accent" onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}>Resume</Btn>
+        </Card>
+      )}
 
       <TickRule label="Next workout" />
       <Card style={{ background: T.ink, border: "none" }}>
@@ -1963,8 +1974,16 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
         body: JSON.stringify({ userId: account.id }),
       });
       const data = await res.json();
-      if (data.url) window.location.href = data.url;
-      else { setPortalError(data.error || "Couldn't open billing portal."); setPortalLoading(false); }
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        const raw = data.error || "";
+        const friendly = raw.toLowerCase().includes("no such customer")
+          ? "We couldn't find a billing record for this account — this can happen if your subscription was set up in an earlier test environment. Please contact support."
+          : raw || "Couldn't open billing portal.";
+        setPortalError(friendly);
+        setPortalLoading(false);
+      }
     } catch (e) {
       setPortalError("Couldn't open billing portal.");
       setPortalLoading(false);
@@ -2197,6 +2216,14 @@ export default function App() {
       options: { data: { name } },
     });
     if (error) return { ok: false, error: error.message };
+    // Supabase deliberately doesn't error here if the email is already
+    // registered (to avoid leaking which emails have accounts) — but it
+    // does leave a tell: data.user.identities is an empty array for an
+    // existing, already-confirmed account, vs. containing an entry for a
+    // genuinely new signup.
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return { ok: false, error: "That email is already registered — sign in instead." };
+    }
     if (!data.session) {
       // Email confirmation is required by the Supabase project settings —
       // there's no session yet until they click the link in their inbox.
@@ -2252,18 +2279,29 @@ export default function App() {
       logs: { workouts: [], nutrition: [], bodyweight: [{ date: todayISO(), weight: profile.weightLb }] },
       coachChat: DEFAULT_COACH_MESSAGES,
       todayOverride: null,
+      inProgressWorkout: null,
     };
     persist(fresh);
   }
 
-  function startWorkout(dayIdx) {
-    setSession({ dayIdx });
+  function startWorkout(dayIdx, resume) {
+    setSession({ dayIdx, resume: !!resume });
+  }
+
+  function saveWorkoutProgress(dayIdx, sets) {
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString() } }));
+    setSession(null);
+  }
+
+  function discardWorkoutProgress() {
+    persist((prev) => ({ ...prev, inProgressWorkout: null }));
+    setSession(null);
   }
 
   function finishWorkout(sets) {
     const day = state.program.days[session.dayIdx];
     const entry = { date: todayISO(), dayName: day.name, exercises: sets };
-    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null }));
+    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null, inProgressWorkout: null }));
     setSession(null);
     setActiveTab("train");
   }
@@ -2448,8 +2486,10 @@ export default function App() {
           }
           isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
+          initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           onFinish={finishWorkout}
-          onCancel={() => setSession(null)}
+          onCancel={discardWorkoutProgress}
+          onSaveExit={(sets) => saveWorkoutProgress(session.dayIdx, sets)}
         />
       )}
 
