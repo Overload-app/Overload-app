@@ -1465,6 +1465,8 @@ function buildCoachSystem(state) {
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}".
 Current program JSON: ${JSON.stringify(state.program)}
 
+SCOPE: You only discuss this person's training, workouts, exercise technique, nutrition/diet, recovery, and their use of this app. If a message is about anything else — general knowledge, current events, coding, other apps, personal advice unrelated to fitness, or literally anything outside training/nutrition/this app — do NOT answer it, even briefly or partially. Instead, in "reply", write ONE short sentence redirecting them back to fitness/nutrition topics (e.g. "I'm just here for your training and nutrition — happy to help with that!"). Do not explain why in detail, do not apologize at length, do not engage with the off-topic content at all, even to say you can't help with it specifically — keep the redirect generic and brief. Set "program" and "todayOverride" to null in this case.
+
 The user will chat with you to adjust their training (swap exercises, change intensity, work around an injury, change split, add/remove exercises, etc.) or just ask training questions.
 
 There are TWO different kinds of requests — telling them apart matters:
@@ -1483,18 +1485,22 @@ Rules:
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above).
-- If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms (e.g. "eat at a slight surplus with high protein"). Do NOT give a detailed macro/calorie breakdown unprompted; offer to work out exact numbers if they ask, rather than including them by default. This keeps the response short enough to never get cut off.`;
+- If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms (e.g. "eat at a slight surplus with high protein"). Do NOT give a detailed macro/calorie breakdown unprompted; offer to work out exact numbers if they ask, rather than including them by default. This keeps the response short enough to never get cut off.
+- This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
 }
 
 const DEFAULT_COACH_MESSAGES = [
   { role: "assistant", text: "Hey — I'm your coach. Ask me to adjust your program: swap an exercise, work around an injury, add volume, change your split, or anything else." },
 ];
 
-function Coach({ messages, loading, onSend, onClearChat }) {
+function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
   const list = messages && messages.length > 0 ? messages : DEFAULT_COACH_MESSAGES;
+  const today = todayISO();
+  const usedToday = coachUsage && coachUsage.date === today ? coachUsage.count : 0;
+  const remaining = Math.max(0, (dailyLimit || 30) - usedToday);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -1512,7 +1518,12 @@ function Coach({ messages, loading, onSend, onClearChat }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
-          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 12px", color: T.ink }}>Ask your coach</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Ask your coach</h1>
+          {remaining <= 10 && (
+            <div style={{ fontSize: 11, color: remaining === 0 ? T.protein : T.steelDark, fontWeight: 600, marginBottom: 8 }}>
+              {remaining} message{remaining === 1 ? "" : "s"} left today
+            </div>
+          )}
         </div>
         {list.length > 1 && !confirmClear && (
           <button
@@ -2167,12 +2178,31 @@ export default function App() {
     persist((prev) => ({ ...prev, coachChat: DEFAULT_COACH_MESSAGES }));
   }
 
+  const COACH_DAILY_LIMIT = 30;
+
   async function sendCoachMessage(text) {
     const trimmed = text.trim();
     if (!trimmed || coachLoading) return;
+
+    const today = todayISO();
+    const usage = stateRef.current.coachUsage;
+    const usedToday = usage && usage.date === today ? usage.count : 0;
     const baseList = stateRef.current.coachChat && stateRef.current.coachChat.length ? stateRef.current.coachChat : DEFAULT_COACH_MESSAGES;
+
+    if (usedToday >= COACH_DAILY_LIMIT) {
+      const withUser = [...baseList, { role: "user", text: trimmed }];
+      persist((prev) => ({
+        ...prev,
+        coachChat: [...withUser, { role: "assistant", text: "You've hit today's message limit for the coach — it resets tomorrow. Thanks for being an active user!" }],
+      }));
+      return;
+    }
+
     const withUser = [...baseList, { role: "user", text: trimmed }];
-    persist((prev) => ({ ...prev, coachChat: withUser }));
+    // Count this attempt against today's quota now, before the API call —
+    // this way a maxed-out user is stopped above without ever costing an
+    // API call, and this attempt is counted whether or not it succeeds.
+    persist((prev) => ({ ...prev, coachChat: withUser, coachUsage: { date: today, count: usedToday + 1 } }));
     setCoachLoading(true);
     try {
       const system = buildCoachSystem(stateRef.current);
@@ -2187,8 +2217,9 @@ export default function App() {
       } catch (parseErr) {
         console.error("Coach JSON parse failed. Raw response was: " + raw);
         const extractedReply = extractReplyOnly(raw);
+        const looksLikePlainText = !raw.includes("{");
         parsed = {
-          reply: extractedReply || "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?",
+          reply: extractedReply || (looksLikePlainText ? raw.trim() : "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?"),
           program: null,
           todayOverride: null,
         };
@@ -2281,6 +2312,7 @@ export default function App() {
       coachChat: DEFAULT_COACH_MESSAGES,
       todayOverride: null,
       inProgressWorkout: null,
+      coachUsage: null,
     };
     persist(fresh);
   }
@@ -2451,7 +2483,7 @@ export default function App() {
         <div className="app-main-inner">
           {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
-          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
           {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
