@@ -78,7 +78,7 @@ async function claudeChat({ system, messages }) {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 4000, system, messages }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 6000, system, messages }),
   });
   if (!res.ok) {
     let detail = "";
@@ -1482,7 +1482,8 @@ Rules:
 - If the request doesn't require any change at all (e.g. a general question), set "program" to null, "todayOverride" to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
-- Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above).`;
+- Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above).
+- If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms (e.g. "eat at a slight surplus with high protein"). Do NOT give a detailed macro/calorie breakdown unprompted; offer to work out exact numbers if they ask, rather than including them by default. This keeps the response short enough to never get cut off.`;
 }
 
 const DEFAULT_COACH_MESSAGES = [
@@ -2184,7 +2185,7 @@ export default function App() {
       try {
         parsed = parseJSONLoose(raw);
       } catch (parseErr) {
-        console.error("Coach JSON parse failed. Raw response was:", raw);
+        console.error("Coach JSON parse failed. Raw response was: " + raw);
         const extractedReply = extractReplyOnly(raw);
         parsed = {
           reply: extractedReply || "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?",
