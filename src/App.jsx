@@ -57,6 +57,10 @@ const SHELL_CSS = `
      (banners, etc.) so the input box can never get pushed off-screen. */
   .coach-panel { position: fixed; top: 0; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); background: ${T.paper}; z-index: 30; display: flex; flex-direction: column; }
 
+  /* Resume-workout bar: pinned to the bottom of the screen, above the tab
+     bar, visible on any tab — same idea as Hevy's persistent resume bar. */
+  .resume-bar { position: fixed; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); z-index: 35; }
+
   @media (min-width: 900px) and (min-height: 600px) {
     .app-shell { display: flex; }
     .sidebar-nav {
@@ -68,6 +72,7 @@ const SHELL_CSS = `
     .app-main { flex: 1; padding-bottom: 40px; }
     .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
     .coach-panel { left: 240px; bottom: 0; }
+    .resume-bar { left: 240px; bottom: 0; }
   }
 `;
 
@@ -1362,16 +1367,6 @@ function Home({ state, setActiveTab, startWorkout }) {
         </div>
       </div>
 
-      {state.inProgressWorkout && (
-        <Card style={{ marginTop: 16, background: "#FFF7ED", border: `1px solid ${T.warn}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>Workout in progress</div>
-            <div style={{ fontSize: 12, color: T.steelDark, marginTop: 2 }}>{program.days[state.inProgressWorkout.dayIdx]?.name}</div>
-          </div>
-          <Btn variant="accent" onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}>Resume</Btn>
-        </Card>
-      )}
-
       <TickRule label="Next workout" />
       <Card style={{ background: T.ink, border: "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1461,10 +1456,19 @@ function Train({ state, startWorkout }) {
 ============================================================ */
 function buildCoachSystem(state) {
   const p = state.profile;
+  const history = state.programHistory || [];
+  const historySummary = history.map((h, i) => ({
+    index: i,
+    savedAt: h.savedAt,
+    splitName: h.program?.splitName,
+    dayNames: (h.program?.days || []).map((d) => d.name),
+    calories: h.targets?.calories,
+  }));
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
+Version history — earlier versions of the program/targets, saved automatically each time you changed them, most recent first (index 0 = the version right before the current one). Use this if the user wants to undo/revert/go back to something earlier: ${JSON.stringify(historySummary)}
 
 SCOPE: You only discuss this person's training, workouts, exercise technique, nutrition/diet, recovery, and their use of this app. If a message is about anything else — general knowledge, current events, coding, other apps, personal advice unrelated to fitness, or literally anything outside training/nutrition/this app — do NOT answer it, even briefly or partially. Instead, in "reply", write ONE short sentence redirecting them back to fitness/nutrition topics (e.g. "I'm just here for your training and nutrition — happy to help with that!"). Do not explain why in detail, do not apologize at length, do not engage with the off-topic content at all, even to say you can't help with it specifically — keep the redirect generic and brief. Set "program", "todayOverride", and "targets" to null in this case.
 
@@ -1480,16 +1484,19 @@ Worked example — user says "my knees hurt, adjust leg day for today": this is 
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 
+Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
+
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
-- If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", and "targets" all to null, and just answer helpfully in "reply".
+- If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
+- If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
 - This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
@@ -2234,17 +2241,55 @@ export default function App() {
       const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
       const t = parsed.targets;
       const hasValidTargets = t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
-      persist((prev) => ({
-        ...prev,
-        coachChat: withReply,
-        program: parsed.program && Array.isArray(parsed.program.days) && !hasOverride
-          ? { splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days }
-          : prev.program,
-        todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
-        targets: hasValidTargets
-          ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
-          : prev.targets,
-      }));
+      const hasNewProgram = parsed.program && Array.isArray(parsed.program.days) && !hasOverride;
+      const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
+
+      persist((prev) => {
+        const history = prev.programHistory || [];
+
+        // Restoring from a saved snapshot: apply the exact stored program/targets,
+        // never something the model reconstructed from memory.
+        if (restoreIdx !== null && history[restoreIdx]) {
+          const snapshot = history[restoreIdx];
+          const newHistory = [
+            { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
+            ...history,
+          ].slice(0, 8);
+          return {
+            ...prev,
+            coachChat: withReply,
+            program: snapshot.program,
+            targets: snapshot.targets,
+            programHistory: newHistory,
+          };
+        }
+
+        // A real, non-restore change to program and/or targets: snapshot the
+        // current version into history first so it can be reverted to later.
+        if (hasNewProgram || hasValidTargets) {
+          const newHistory = [
+            { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
+            ...history,
+          ].slice(0, 8);
+          return {
+            ...prev,
+            coachChat: withReply,
+            program: hasNewProgram ? { splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days } : prev.program,
+            todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
+            targets: hasValidTargets
+              ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
+              : prev.targets,
+            programHistory: newHistory,
+          };
+        }
+
+        // No lasting change (e.g. a one-time swap, or just a question) — no history entry needed.
+        return {
+          ...prev,
+          coachChat: withReply,
+          todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
+        };
+      });
     } catch (e) {
       console.error("Coach send failed:", e);
       persist((prev) => ({ ...prev, coachChat: [...withUser, { role: "assistant", text: "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment." }] }));
@@ -2324,6 +2369,7 @@ export default function App() {
       todayOverride: null,
       inProgressWorkout: null,
       coachUsage: null,
+      programHistory: [],
     };
     persist(fresh);
   }
@@ -2520,6 +2566,22 @@ export default function App() {
           })}
         </div>
       </div>
+
+      {state.inProgressWorkout && !session && (
+        <div
+          className="resume-bar"
+          onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}
+          style={{ background: T.ink, color: "#fff", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", boxShadow: "0 -4px 16px rgba(0,0,0,0.25)" }}
+        >
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.charge, letterSpacing: 1 }}>WORKOUT IN PROGRESS</div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{state.program.days[state.inProgressWorkout.dayIdx]?.name}</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.charge, padding: "9px 16px", borderRadius: 8, fontWeight: 700, fontSize: 13 }}>
+            Resume <ChevronRight size={16} />
+          </div>
+        </div>
+      )}
 
       {session && (
         <WorkoutSession
