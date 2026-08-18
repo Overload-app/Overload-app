@@ -83,12 +83,33 @@ const SHELL_CSS = `
 /* ============================================================
    CLAUDE API HELPERS
 ============================================================ */
+const OFFLINE_MESSAGE = "No internet connection — try again once you're back online.";
+
+function offlineError() {
+  const err = new Error(OFFLINE_MESSAGE);
+  err.offline = true;
+  return err;
+}
+
 async function claudeChat({ system, messages }) {
-  const res = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 6000, system, messages }),
-  });
+  // Fail fast and with a clear reason rather than letting a doomed request
+  // hang — every AI feature in the app (Coach, meal suggestions, photo
+  // analysis, program generation) routes through here, so this one check
+  // covers all of them.
+  if (!navigator.onLine) throw offlineError();
+  let res;
+  try {
+    res = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 6000, system, messages }),
+    });
+  } catch (networkErr) {
+    // fetch() itself throws (rather than resolving with a bad status) for a
+    // genuine connectivity failure — DNS, connection refused, offline —
+    // as opposed to the server responding with an HTTP error.
+    throw offlineError();
+  }
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
@@ -133,6 +154,36 @@ function fileToBase64(file) {
     r.readAsDataURL(file);
   });
 }
+
+// Downscales + re-encodes a captured photo as JPEG before it ever leaves the
+// device — faster to upload/analyze on a normal connection, and small
+// enough to safely sit in localStorage's limited quota while queued for
+// offline analysis (a raw phone photo can be several MB; this keeps it to
+// roughly 50-200KB).
+function compressImageToBase64(file, maxDim = 1024, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(objectUrl);
+      resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+    };
+    img.onerror = (e) => { URL.revokeObjectURL(objectUrl); reject(e); };
+    img.src = objectUrl;
+  });
+}
+
+const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estimate the food and its nutrition. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}";
 
 /* ============================================================
    EXERCISE POOLS
@@ -190,6 +241,152 @@ function filterPool(pool, injuries) {
 function pick(arr, n, offset = 0) {
   const rotated = arr.slice(offset % arr.length).concat(arr.slice(0, offset % arr.length));
   return rotated.slice(0, Math.min(n, arr.length));
+}
+
+/* ============================================================
+   EXERCISE FORM TIPS
+
+   Baked into every exercise at program-generation time (both the AI-written
+   program and the rule-based offline fallback) so "How to do it" in a
+   workout never needs a live AI call — it just reads data that's already
+   saved locally. Matched by keyword against the exercise name so a handful
+   of rules cover every name variant across all three equipment pools,
+   instead of needing one entry per exact exercise name.
+============================================================ */
+const TIP_RULES = [
+  [/squat/i, [
+    "Keep your chest up and core braced throughout the movement.",
+    "Push your knees out in line with your toes as you descend.",
+    "Drive through your whole foot, not just your toes.",
+    "Common mistake: letting your knees cave inward under load.",
+  ]],
+  [/deadlift|good morning/i, [
+    "Keep the bar (or weight) close to your body the entire lift.",
+    "Brace your core and keep your back flat, not rounded.",
+    "Push the floor away with your legs rather than yanking with your back.",
+    "Common mistake: rounding the lower back to force the weight up.",
+  ]],
+  [/lunge|split squat|step-?up/i, [
+    "Keep your front knee tracking over your foot, not caving in.",
+    "Control the descent instead of dropping into the bottom position.",
+    "Keep most of your weight on the front leg to target the right muscles.",
+    "Common mistake: leaning too far forward and losing balance.",
+  ]],
+  [/bench press|floor press|chest press/i, [
+    "Keep your shoulder blades pulled back and down on the bench.",
+    "Lower the weight under control to roughly chest level.",
+    "Keep a slight arch in your lower back, feet flat on the floor.",
+    "Common mistake: flaring the elbows straight out to the sides.",
+  ]],
+  [/overhead press|shoulder press|arnold press|pike push-?up|handstand/i, [
+    "Brace your core so you don't overarch your lower back.",
+    "Press in a straight line, moving your head back slightly as the weight passes.",
+    "Keep your ribs down rather than flaring them up as you press.",
+    "Common mistake: turning it into a push press by dipping your knees.",
+  ]],
+  [/row|pulldown|pull-?up|chin-?up/i, [
+    "Pull with your back, not just your arms — lead with your elbows.",
+    "Squeeze your shoulder blades together at the top of the movement.",
+    "Control the weight back down instead of letting it drop.",
+    "Common mistake: using momentum or body swing to move the weight.",
+  ]],
+  [/fly|pec deck|pullover/i, [
+    "Keep a slight bend in your elbows throughout the movement.",
+    "Focus on squeezing your chest together rather than pressing.",
+    "Don't let the weight stretch you past a comfortable range at the bottom.",
+    "Common mistake: turning it into a press by bending the elbows more at the top.",
+  ]],
+  [/lateral raise|rear delt|y-raise|face pull/i, [
+    "Use a lighter weight than you think — strict form matters most here.",
+    "Raise with a slight bend in the elbows, leading with the elbows not the hands.",
+    "Avoid shrugging your shoulders up toward your ears.",
+    "Common mistake: swinging the weight up using momentum from the hips.",
+  ]],
+  [/curl/i, [
+    "Keep your elbows pinned close to your sides.",
+    "Control the lowering phase instead of letting the weight drop.",
+    "Avoid swinging your torso or hips to help lift the weight.",
+    "Common mistake: only doing a partial range of motion at the top.",
+  ]],
+  [/pushdown|skull crusher|overhead.*extension|kickback|tricep|diamond push-?up/i, [
+    "Keep your elbows tucked in and stationary throughout.",
+    "Fully extend at the bottom/end of the movement without locking out violently.",
+    "Control the eccentric (lowering) portion of each rep.",
+    "Common mistake: letting the elbows flare out or drift forward.",
+  ]],
+  [/leg curl|leg extension/i, [
+    "Move through a full, controlled range of motion.",
+    "Avoid using momentum to jerk the weight at the start of the rep.",
+    "Keep your hips pressed into the pad/bench throughout.",
+    "Common mistake: rushing the reps instead of controlling the tempo.",
+  ]],
+  [/leg press/i, [
+    "Keep your lower back flat against the pad — don't let it round.",
+    "Lower the sled until your knees reach about 90 degrees, no further.",
+    "Push through your whole foot, not just your toes.",
+    "Common mistake: locking the knees out hard at the top of each rep.",
+  ]],
+  [/calf raise/i, [
+    "Rise onto your toes through a full range of motion.",
+    "Pause briefly at the top for a real peak contraction.",
+    "Lower under control instead of just dropping down.",
+    "Common mistake: using tiny, bouncy partial reps instead of full range.",
+  ]],
+  [/dip/i, [
+    "Lean slightly forward and keep your elbows from flaring too wide.",
+    "Lower until your shoulders are about level with your elbows, no deeper.",
+    "Keep your core braced instead of swinging your legs.",
+    "Common mistake: going so deep it strains the front of the shoulder.",
+  ]],
+  [/plank|wall sit/i, [
+    "Keep your body in a straight line — no sagging or piking at the hips.",
+    "Brace your core like you're about to be poked in the stomach.",
+    "Breathe normally instead of holding your breath.",
+    "Common mistake: letting the hips drift out of line as fatigue sets in.",
+  ]],
+  [/crunch|sit-?up|leg raise|russian twist|side bend|mountain climber|rollout/i, [
+    "Move slowly and with control rather than using momentum.",
+    "Focus on bracing/curling through the core, not just swinging your limbs.",
+    "Exhale as you crunch or curl inward.",
+    "Common mistake: pulling on your neck instead of using your abs.",
+  ]],
+  [/glute bridge/i, [
+    "Drive through your heels and squeeze your glutes at the top.",
+    "Avoid overarching your lower back at the top of the rep.",
+    "Keep your core braced throughout.",
+    "Common mistake: using the lower back instead of the glutes to lift.",
+  ]],
+  [/push-?up/i, [
+    "Keep your body in a straight line from head to heels.",
+    "Lower until your chest nearly touches the floor.",
+    "Keep your elbows at roughly a 45-degree angle to your torso.",
+    "Common mistake: letting the hips sag or pike up.",
+  ]],
+];
+
+const DEFAULT_TIPS = [
+  "Warm up with a lighter set or two before your working sets.",
+  "Move through a full, controlled range of motion.",
+  "Keep your core braced throughout the movement.",
+  "Prioritize good form over lifting heavier weight.",
+];
+
+function tipsForExercise(name) {
+  const rule = TIP_RULES.find(([pattern]) => pattern.test(name));
+  return rule ? rule[1] : DEFAULT_TIPS;
+}
+
+// Fills in tips for any exercise that doesn't already have them (e.g. the AI
+// omitted them, or this is a program saved before this feature existed) —
+// never overwrites tips that are already there.
+function withTips(exercises) {
+  return (exercises || []).map((ex) => (
+    Array.isArray(ex.tips) && ex.tips.length > 0 ? ex : { ...ex, tips: tipsForExercise(ex.name) }
+  ));
+}
+function normalizeProgramTips(program) {
+  if (!program) return program;
+  return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
 }
 
 const DAY_TEMPLATES = {
@@ -307,13 +504,14 @@ Design a training split and day-by-day program tailored specifically to this per
 ${profile.specificGoals ? `If they've stated specific performance goals (e.g. a target bench/squat/deadlift number, a bodyweight-strength milestone like a pull-up, a running goal), make sure the relevant lift or movement is programmed directly — include it with a rep/set scheme that actually builds toward that outcome (lower-rep strength work for a numeric lift goal, progressive skill/strength work for a bodyweight milestone), not just buried as one of several accessory options.` : ""}
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
-{"splitName": "<short split name, e.g. 'Push / Pull / Legs'>", "days": [{"name": "<day name, e.g. 'Push Day'>", "exercises": [{"name": "<exercise name>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number, seconds>}]}]}
+{"splitName": "<short split name, e.g. 'Push / Pull / Legs'>", "days": [{"name": "<day name, e.g. 'Push Day'>", "exercises": [{"name": "<exercise name>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number, seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}]}]}
 
 Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
 - Never include exercises that would aggravate: ${(profile.injuries || []).join(", ") || "none — no restrictions"}.
-- Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).`;
+- Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).
+- Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.`;
 }
 
 /* ============================================================
@@ -372,6 +570,18 @@ function setPendingSync(userId, pending) {
     if (pending) localStorage.setItem(pendingSyncKey(userId), "1");
     else localStorage.removeItem(pendingSyncKey(userId));
   } catch (e) { /* best-effort only */ }
+}
+
+// Meal photos captured with no connection (e.g. offline at the gym) — kept
+// separate from the main app_state blob (rather than riding along in
+// saveState/loadState) so queued photos never bloat the JSON that gets
+// synced to Supabase; they're purely a local, transient queue.
+function pendingPhotosKey(userId) { return `overload_pending_photos_${userId}`; }
+function readPendingPhotos(userId) {
+  try { return JSON.parse(localStorage.getItem(pendingPhotosKey(userId)) || "[]"); } catch (e) { return []; }
+}
+function writePendingPhotos(userId, list) {
+  try { localStorage.setItem(pendingPhotosKey(userId), JSON.stringify(list)); } catch (e) { console.error("writePendingPhotos failed", e); }
 }
 
 async function loadState(userId, attempt = 0) {
@@ -1045,7 +1255,10 @@ function Onboarding({ onComplete }) {
     } catch (e) {
       // Fall back silently to the rule-based program below.
     }
-    onComplete({ profile, program, targets });
+    // Guarantees every exercise has form tips baked in — whether they came
+    // from the AI (normal case) or the offline rule-based fallback above —
+    // so "How to do it" during a workout never needs a live AI call.
+    onComplete({ profile, program: normalizeProgramTips(program), targets });
   }
 
   if (building) {
@@ -1215,33 +1428,20 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit }) {
   const [sets, setSets] = useState(() =>
     initialSets || day.exercises.map((ex) => ({
-      name: ex.name, reps: ex.reps, rest: ex.rest,
+      name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
       logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
     }))
   );
   const [rest, setRest] = useState(null); // {seconds, total}
   const [confirmExit, setConfirmExit] = useState(false);
   const [expandedTips, setExpandedTips] = useState({});
-  const [tipsCache, setTipsCache] = useState({});
-  const [tipsLoading, setTipsLoading] = useState({});
   const intervalRef = useRef(null);
 
-  async function toggleTips(name) {
+  // Tips are baked into the exercise data at program-generation time (see
+  // normalizeProgramTips/tipsForExercise), so this is just a local toggle —
+  // no AI call, no loading state, works with zero signal at the gym.
+  function toggleTips(name) {
     setExpandedTips((e) => ({ ...e, [name]: !e[name] }));
-    if (tipsCache[name] || tipsLoading[name]) return;
-    setTipsLoading((l) => ({ ...l, [name]: true }));
-    try {
-      const raw = await claudeChat({
-        system: `You are a knowledgeable, safety-conscious strength coach. Give concise, practical form tips for a single exercise. Respond ONLY with a JSON object, no markdown fences, no prose outside it: {"tips": ["<tip>", "<tip>", "<tip>", "<tip>"]} — exactly 4 short tips (under 18 words each) covering setup, execution, and one common mistake to avoid.`,
-        messages: [{ role: "user", content: `Exercise: ${name}` }],
-      });
-      const parsed = parseJSONLoose(raw);
-      setTipsCache((c) => ({ ...c, [name]: Array.isArray(parsed.tips) ? parsed.tips : [] }));
-    } catch (e) {
-      setTipsCache((c) => ({ ...c, [name]: ["Couldn't load tips right now — try again."] }));
-    } finally {
-      setTipsLoading((l) => ({ ...l, [name]: false }));
-    }
   }
 
   useEffect(() => {
@@ -1325,17 +1525,11 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
             </button>
             {expandedTips[ex.name] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
-                {tipsLoading[ex.name] ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.steelDark }}>
-                    <Loader2 size={13} className="spin" /> Loading tips…
-                  </div>
-                ) : (
-                  <ul style={{ margin: 0, paddingLeft: 16 }}>
-                    {(tipsCache[ex.name] || []).map((tip, i) => (
-                      <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
-                    ))}
-                  </ul>
-                )}
+                <ul style={{ margin: 0, paddingLeft: 16 }}>
+                  {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
+                    <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
+                  ))}
+                </ul>
               </div>
             )}
             <div style={{ marginTop: 10 }}>
@@ -1555,11 +1749,12 @@ Worked example for nutrition — user says "make my workout and diet focused on 
 Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. Even though those three fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
+- Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
@@ -1676,7 +1871,7 @@ function MacroBar({ label, val, max, color }) {
   );
 }
 
-function Fuel({ state, addMeal, removeMeal }) {
+function Fuel({ state, addMeal, removeMeal, userId }) {
   const { targets, logs, profile } = state;
   const today = todayISO();
   const todayLog = logs.nutrition.find((d) => d.date === today) || { date: today, meals: [] };
@@ -1692,7 +1887,59 @@ function Fuel({ state, addMeal, removeMeal }) {
   const [photoResult, setPhotoResult] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const [photoError, setPhotoError] = useState(null);
+  const [pendingPhotos, setPendingPhotos] = useState(() => readPendingPhotos(userId));
+  const [processingQueue, setProcessingQueue] = useState(false);
   const fileInputRef = useRef(null);
+
+  // Analyzes any photos that were saved offline, in the order they were
+  // taken. Runs on mount (covers "left offline, came back to this tab
+  // online") and again whenever connectivity returns while this tab is open.
+  useEffect(() => {
+    processPendingPhotos();
+    window.addEventListener("online", processPendingPhotos);
+    return () => window.removeEventListener("online", processPendingPhotos);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function processPendingPhotos() {
+    if (!navigator.onLine) return;
+    setProcessingQueue(true);
+    try {
+      // Re-read fresh each loop iteration rather than closing over a stale
+      // array, since addMeal below is async (goes through persist).
+      let queue = readPendingPhotos(userId);
+      while (queue.length > 0) {
+        const item = queue[0];
+        try {
+          const raw = await claudeChat({
+            system: MEAL_PHOTO_SYSTEM,
+            messages: [{ role: "user", content: [
+              { type: "image", source: { type: "base64", media_type: item.mediaType, data: item.base64 } },
+              { type: "text", text: "Identify this meal and estimate its calories and macros." },
+            ] }],
+          });
+          const parsed = parseJSONLoose(raw);
+          addMeal({ name: parsed.name, cal: parsed.cal, protein: parsed.protein, carb: parsed.carb, fat: parsed.fat }, item.dateISO);
+        } catch (err) {
+          // Offline again, or some other failure — stop this pass and leave
+          // whatever's left in the queue for next time rather than dropping it.
+          break;
+        }
+        queue = queue.filter((p) => p.id !== item.id);
+        writePendingPhotos(userId, queue);
+        setPendingPhotos(queue);
+      }
+    } finally {
+      setProcessingQueue(false);
+    }
+  }
+
+  function queuePhoto(base64, mediaType) {
+    const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, base64, mediaType, dateISO: todayISO(), capturedAt: new Date().toISOString() };
+    const next = [...readPendingPhotos(userId), entry];
+    writePendingPhotos(userId, next);
+    setPendingPhotos(next);
+  }
 
   function submit() {
     if (!form.name || !form.cal) return;
@@ -1713,7 +1960,7 @@ function Fuel({ state, addMeal, removeMeal }) {
       const parsed = parseJSONLoose(raw);
       setSuggestions(parsed.suggestions || []);
     } catch (e) {
-      setSuggestError("Couldn't get suggestions — try again.");
+      setSuggestError(e.offline ? OFFLINE_MESSAGE : "Couldn't get suggestions — try again.");
     } finally {
       setSuggestLoading(false);
     }
@@ -1722,14 +1969,28 @@ function Fuel({ state, addMeal, removeMeal }) {
   async function handlePhoto(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setPhotoLoading(true);
     setPhotoError(null);
     setPhotoResult(null);
+    let base64, mediaType;
     try {
-      const base64 = await fileToBase64(file);
-      const mediaType = file.type || "image/jpeg";
+      base64 = await compressImageToBase64(file);
+      mediaType = "image/jpeg"; // compression always re-encodes to JPEG
+    } catch (err) {
+      setPhotoError("Couldn't read that photo — try again.");
+      e.target.value = "";
+      return;
+    }
+
+    if (!navigator.onLine) {
+      queuePhoto(base64, mediaType);
+      e.target.value = "";
+      return;
+    }
+
+    setPhotoLoading(true);
+    try {
       const raw = await claudeChat({
-        system: "You analyze photos of meals for a fitness app. Estimate the food and its nutrition. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}",
+        system: MEAL_PHOTO_SYSTEM,
         messages: [{ role: "user", content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
           { type: "text", text: "Identify this meal and estimate its calories and macros." },
@@ -1738,7 +1999,13 @@ function Fuel({ state, addMeal, removeMeal }) {
       const parsed = parseJSONLoose(raw);
       setPhotoResult(parsed);
     } catch (err) {
-      setPhotoError("Couldn't analyze that photo — try again or add manually.");
+      if (err.offline) {
+        // Connectivity dropped between the check above and the request
+        // actually going out — same graceful fallback as being offline from the start.
+        queuePhoto(base64, mediaType);
+      } else {
+        setPhotoError("Couldn't analyze that photo — try again or add manually.");
+      }
     } finally {
       setPhotoLoading(false);
       e.target.value = "";
@@ -1813,6 +2080,14 @@ function Fuel({ state, addMeal, removeMeal }) {
       {photoLoading && (
         <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
           <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>Analyzing your photo…</span>
+        </Card>
+      )}
+      {pendingPhotos.length > 0 && (
+        <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, borderColor: T.warn }}>
+          {processingQueue ? <Loader2 size={16} color={T.warn} className="spin" /> : <Camera size={16} color={T.warn} />}
+          <span style={{ fontSize: 13, color: T.ink }}>
+            {pendingPhotos.length} photo{pendingPhotos.length > 1 ? "s" : ""} saved — {processingQueue ? "analyzing now…" : "will analyze automatically once you're back online"}
+          </span>
         </Card>
       )}
       {photoError && (
@@ -2232,7 +2507,10 @@ export default function App() {
     setSubscribed(!!profileRow?.subscribed);
     setTrialStartedAt(profileRow?.trial_started_at || null);
     const { state: loaded, fromCache } = await loadState(user.id);
-    setState(loaded);
+    // Backfills tips onto programs saved before this feature existed, so
+    // existing accounts get offline-capable "How to do it" tips immediately
+    // on next load, with no AI call and no need to regenerate the program.
+    setState(loaded && loaded.program ? { ...loaded, program: normalizeProgramTips(loaded.program) } : loaded);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
 
@@ -2392,8 +2670,8 @@ export default function App() {
           return {
             ...prev,
             coachChat: withReply,
-            program: hasNewProgram ? { splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days } : prev.program,
-            todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
+            program: hasNewProgram ? normalizeProgramTips({ splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days }) : prev.program,
+            todayOverride: hasOverride ? withTips(parsed.todayOverride) : prev.todayOverride,
             targets: hasValidTargets
               ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
               : prev.targets,
@@ -2405,12 +2683,13 @@ export default function App() {
         return {
           ...prev,
           coachChat: withReply,
-          todayOverride: hasOverride ? parsed.todayOverride : prev.todayOverride,
+          todayOverride: hasOverride ? withTips(parsed.todayOverride) : prev.todayOverride,
         };
       });
     } catch (e) {
       console.error("Coach send failed:", e);
-      persist((prev) => ({ ...prev, coachChat: [...withUser, { role: "assistant", text: "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment." }] }));
+      const failText = e.offline ? OFFLINE_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
+      persist((prev) => ({ ...prev, coachChat: [...withUser, { role: "assistant", text: failText }] }));
     } finally {
       setCoachLoading(false);
     }
@@ -2518,12 +2797,14 @@ export default function App() {
     return state.logs.workouts.slice().reverse().find((w) => w.dayName === dayName) || null;
   }
 
-  function addMeal(meal) {
-    const today = todayISO();
+  // dateISO defaults to today, but a photo analyzed after coming back online
+  // passes the date it was actually captured, so it lands on the right day.
+  function addMeal(meal, dateISO) {
+    const date = dateISO || todayISO();
     persist((prev) => {
       const nutrition = [...prev.logs.nutrition];
-      const idx = nutrition.findIndex((d) => d.date === today);
-      if (idx === -1) nutrition.push({ date: today, meals: [meal] });
+      const idx = nutrition.findIndex((d) => d.date === date);
+      if (idx === -1) nutrition.push({ date, meals: [meal] });
       else nutrition[idx] = { ...nutrition[idx], meals: [...nutrition[idx].meals, meal] };
       return { ...prev, logs: { ...prev.logs, nutrition } };
     });
@@ -2665,7 +2946,7 @@ export default function App() {
           {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
-          {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} />}
+          {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
         </div>
