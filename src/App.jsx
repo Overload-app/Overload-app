@@ -622,6 +622,14 @@ function Login({ onSignUp, onSignIn, onForgotPassword }) {
       <Btn variant="accent" onClick={submit} disabled={busy} style={{ width: "100%", padding: "16px" }}>
         {busy ? "One sec…" : mode === "forgot" ? "Send reset link" : mode === "signup" ? "Create account" : "Sign in"} <ChevronRight size={18} />
       </Btn>
+      {mode === "signup" && (
+        <p style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 12 }}>
+          By creating an account, you agree to our{" "}
+          <a href="/terms.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Terms</a>
+          {" "}and{" "}
+          <a href="/privacy.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Privacy Policy</a>.
+        </p>
+      )}
     </div>
   );
 }
@@ -788,6 +796,12 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
         )}
         <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>
           {trialUsed ? "🔒 Payment secured by Stripe" : "🔒 No card needed for the trial — it just ends after 30 days"}
+        </div>
+        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 6 }}>
+          By subscribing, you agree to our{" "}
+          <a href="/terms.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Terms</a>
+          {" "}and{" "}
+          <a href="/privacy.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Privacy Policy</a>.
         </div>
         <button onClick={refresh} disabled={refreshing} style={{ width: "100%", background: "none", border: "none", color: "#B9BEC6", fontSize: 13, padding: "14px 0 4px", cursor: "pointer" }}>
           {refreshing ? "Checking…" : "Already subscribed? Refresh status"}
@@ -2085,6 +2099,13 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
             <span style={{ fontWeight: 600, fontSize: 13, color: T.ink, textTransform: "capitalize", textAlign: "right" }}>{val}</span>
           </div>
         ))}
+      </Card>
+
+      <TickRule label="Support & legal" />
+      <Card>
+        <a href="mailto:support@overload-app.com" style={{ display: "block", fontSize: 13, color: T.ink, fontWeight: 600, padding: "8px 0", textDecoration: "none" }}>Contact support</a>
+        <a href="/terms.html" target="_blank" rel="noopener noreferrer" style={{ display: "block", fontSize: 13, color: T.ink, fontWeight: 600, padding: "8px 0", textDecoration: "none", borderTop: `1px solid ${T.steel}` }}>Terms of Service</a>
+        <a href="/privacy.html" target="_blank" rel="noopener noreferrer" style={{ display: "block", fontSize: 13, color: T.ink, fontWeight: 600, padding: "8px 0", textDecoration: "none", borderTop: `1px solid ${T.steel}` }}>Privacy Policy</a>
       </Card>
 
       <TickRule label="Reset" />
