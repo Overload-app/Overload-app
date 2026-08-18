@@ -13,6 +13,10 @@ import { supabase } from "./supabaseClient.js";
 /* ============================================================
    DESIGN TOKENS
 ============================================================ */
+// How many past program/target versions to keep for the Coach's undo/revert
+// feature. Higher = less likely someone's true original ever gets evicted.
+const PROGRAM_HISTORY_LIMIT = 30;
+
 const T = {
   ink: "#12161C",
   paper: "#EEF1EF",
@@ -1469,6 +1473,7 @@ User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipmen
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Version history — earlier versions of the program/targets, saved automatically each time you changed them, most recent first (index 0 = the version right before the current one). Use this if the user wants to undo/revert/go back to something earlier: ${JSON.stringify(historySummary)}
+IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_LIMIT} saved versions. If they've made more changes than that over time, their true original (from when they first set up the app) may no longer be in this list — the oldest entry here is simply the oldest one still available, not necessarily their literal original. If the user disputes that a restored version matches what they remember, or if you're restoring to the oldest available entry and they're asking specifically for "the very first" or "original" version, be honest that this history only goes back so far and you can't verify anything earlier than the oldest entry shown — don't confidently assert something is their "true original" when you can't actually know that.
 
 SCOPE: You only discuss this person's training, workouts, exercise technique, nutrition/diet, recovery, and their use of this app. If a message is about anything else — general knowledge, current events, coding, other apps, personal advice unrelated to fitness, or literally anything outside training/nutrition/this app — do NOT answer it, even briefly or partially. Instead, in "reply", write ONE short sentence redirecting them back to fitness/nutrition topics (e.g. "I'm just here for your training and nutrition — happy to help with that!"). Do not explain why in detail, do not apologize at length, do not engage with the off-topic content at all, even to say you can't help with it specifically — keep the redirect generic and brief. Set "program", "todayOverride", and "targets" to null in this case.
 
@@ -2272,7 +2277,7 @@ export default function App() {
           const newHistory = [
             { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
             ...history,
-          ].slice(0, 8);
+          ].slice(0, PROGRAM_HISTORY_LIMIT);
           return {
             ...prev,
             coachChat: withReply,
@@ -2288,7 +2293,7 @@ export default function App() {
           const newHistory = [
             { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
             ...history,
-          ].slice(0, 8);
+          ].slice(0, PROGRAM_HISTORY_LIMIT);
           return {
             ...prev,
             coachChat: withReply,
