@@ -522,7 +522,7 @@ function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
   }
 
   return (
-    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
       <div>
@@ -605,7 +605,7 @@ function Login({ onSignUp, onSignIn, onForgotPassword }) {
   }
 
   return (
-    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
       <div>
@@ -705,7 +705,7 @@ function SetNewPasswordScreen({ onSetPassword }) {
   }
 
   return (
-    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
       <div>
@@ -788,7 +788,7 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
   ];
 
   return (
-    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
       <div>
@@ -907,7 +907,7 @@ function SubscribeOverlay({ account, onClose }) {
 
   return (
     <div className="fullscreen-overlay" style={{ background: T.ink, color: "#fff", zIndex: 65, overflowY: "auto" }}>
-      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, maxWidth: 560, margin: "0 auto" }}>
+      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", maxWidth: 560, margin: "0 auto" }}>
         <div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer", padding: 0, marginBottom: 20 }}><X size={24} /></button>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1050,7 +1050,7 @@ function Onboarding({ onComplete }) {
 
   if (building) {
     return (
-      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, background: T.ink, color: "#fff", textAlign: "center" }}>
+      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff", textAlign: "center" }}>
         <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
         <Loader2 size={36} color={T.charge} className="spin" />
@@ -1063,7 +1063,7 @@ function Onboarding({ onComplete }) {
 
   if (step === -1) {
     return (
-      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: 28, background: T.ink, color: "#fff" }}>
+      <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
         <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
         <div>
@@ -1087,7 +1087,7 @@ function Onboarding({ onComplete }) {
   }
 
   return (
-    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", padding: 24, background: T.paper }}>
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", padding: "calc(24px + env(safe-area-inset-top, 0px)) 24px 24px", background: T.paper }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
       <div style={{ display: "flex", gap: 3, marginBottom: 24, flexWrap: "wrap" }}>
@@ -1597,7 +1597,7 @@ function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit 
   }
 
   return (
-    <div className="coach-panel" style={{ padding: "20px 16px 0" }}>
+    <div className="coach-panel" style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 0" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
