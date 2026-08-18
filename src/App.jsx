@@ -389,119 +389,6 @@ function normalizeProgramTips(program) {
   return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
 }
 
-/* ============================================================
-   EXERCISE IMAGES
-
-   A curated, hand-verified name -> image-slug map (public/exercises/*.jpg,
-   from the free-exercise-db public-domain dataset). Only exercises with a
-   genuinely correct match are included — showing the wrong photo confidently
-   labeled as the right one would be worse than showing no photo at all, so
-   several app exercises (e.g. "Wall Sit", "Y-Raise") are deliberately
-   omitted rather than mapped to a lookalike.
-
-   Programs built from POOLS (the rule-based/offline path) always use these
-   exact names, so those get an exact hit. AI-generated programs may phrase
-   an exercise slightly differently ("Dumbbell Curl" vs "DB Curl", "Pull Up"
-   vs "Pull-Up") — normalizeExerciseName() below absorbs those common,
-   low-risk variations (abbreviations, punctuation, plurals) without doing
-   loose keyword matching that could confidently show the wrong exercise.
-============================================================ */
-const EXERCISE_IMAGE_MAP = {
-  "Ab Wheel Rollout": "ab-wheel-rollout",
-  "Arnold Press": "arnold-press",
-  "Back Squat": "back-squat",
-  "Barbell Bench Press": "barbell-bench-press",
-  "Barbell Curl": "barbell-curl",
-  "Barbell Row": "barbell-row",
-  "Bench Dip": "bench-dip",
-  "Bodyweight Squat": "bodyweight-squat",
-  "Bulgarian Split Squat": "bulgarian-split-squat",
-  "Cable Crunch": "cable-crunch",
-  "Cable Fly": "cable-fly",
-  "Calf Raise": "calf-raise",
-  "Chest-Supported Row": "chest-supported-row",
-  "Chin-Up": "chin-up",
-  "Close-Grip Floor Press": "close-grip-floor-press",
-  "DB Bench Press": "db-bench-press",
-  "DB Calf Raise": "db-calf-raise",
-  "DB Curl": "db-curl",
-  "DB Floor Press": "db-floor-press",
-  "DB Fly": "db-fly",
-  "DB Goblet Squat": "db-goblet-squat",
-  "DB Hammer Curl": "db-hammer-curl",
-  "DB Incline Press": "db-incline-press",
-  "DB Kickback": "db-kickback",
-  "DB Lateral Raise": "db-lateral-raise",
-  "DB Overhead Extension": "db-overhead-extension",
-  "DB Pullover": "db-pullover",
-  "DB Rear Delt Fly": "db-rear-delt-fly",
-  "DB Romanian Deadlift": "db-romanian-deadlift",
-  "DB Row": "db-row",
-  "DB Russian Twist": "db-russian-twist",
-  "DB Shoulder Press": "db-shoulder-press",
-  "DB Side Bend": "db-side-bend",
-  "DB Step-Up": "db-step-up",
-  "DB Walking Lunge": "db-walking-lunge",
-  "Decline Push-Up": "decline-push-up",
-  "Diamond Push-Up": "diamond-push-up",
-  "Face Pull": "face-pull",
-  "Glute Bridge": "glute-bridge",
-  "Hammer Curl": "hammer-curl",
-  "Hanging Leg Raise": "hanging-leg-raise",
-  "Incline DB Curl": "incline-db-curl",
-  "Incline DB Press": "incline-db-press",
-  "Incline Push-Up": "incline-push-up",
-  "Inverted Row": "inverted-row",
-  "Lat Pulldown": "lat-pulldown",
-  "Leg Curl": "leg-curl",
-  "Leg Extension": "leg-extension",
-  "Leg Press": "leg-press",
-  "Leg Raise": "leg-raise",
-  "Mountain Climbers": "mountain-climbers",
-  "Overhead Cable Extension": "overhead-cable-extension",
-  "Overhead Press": "overhead-press",
-  "Pike Push-Up": "pike-push-up",
-  "Plank": "plank",
-  "Plank Shoulder Tap": "plank-shoulder-tap",
-  "Pull-Up": "pull-up",
-  "Rear Delt Fly": "rear-delt-fly",
-  "Renegade Row": "renegade-row",
-  "Reverse Crunch": "reverse-crunch",
-  "Romanian Deadlift": "romanian-deadlift",
-  "Seated Cable Row": "seated-cable-row",
-  "Skull Crusher": "skull-crusher",
-  "Superman Hold": "superman-hold",
-  "Tricep Push-Up": "tricep-push-up",
-  "Tricep Pushdown": "tricep-pushdown",
-  "Walking Lunge": "walking-lunge",
-  "Wall Handstand Hold": "wall-handstand-hold",
-  "Weighted Dip": "weighted-dip",
-  "Wide Push-Up": "wide-push-up",
-};
-
-// Only safe, low-risk normalization — expanding a known abbreviation,
-// stripping punctuation/plurals — never loose keyword/substring matching,
-// since a photo is a much stronger "this is the exercise" claim than a tip.
-function normalizeExerciseName(name) {
-  return name
-    .replace(/\bDumbbell\b/gi, "DB")
-    .replace(/\bpull ?ups?\b/gi, "Pull-Up")
-    .replace(/\bpush ?ups?\b/gi, "Push-Up")
-    .replace(/\bchin ?ups?\b/gi, "Chin-Up")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-const NORMALIZED_IMAGE_MAP = Object.fromEntries(
-  Object.entries(EXERCISE_IMAGE_MAP).map(([name, slug]) => [normalizeExerciseName(name), slug])
-);
-
-function exerciseImageUrl(name) {
-  const slug = EXERCISE_IMAGE_MAP[name] || NORMALIZED_IMAGE_MAP[normalizeExerciseName(name)];
-  return slug ? `/exercises/${slug}.jpg` : null;
-}
-
 const DAY_TEMPLATES = {
   full: [["legs", 2], ["chest", 1], ["back", 1], ["shoulders", 1], ["core", 1]],
   upper: [["chest", 2], ["back", 2], ["shoulders", 1], ["biceps", 1], ["triceps", 1]],
@@ -1622,43 +1509,22 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
       <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {sets.map((ex, exIdx) => (
           <Card key={exIdx} style={{ marginBottom: 12 }}>
-            <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              {exerciseImageUrl(ex.name) && (
-                <img
-                  src={exerciseImageUrl(ex.name)}
-                  alt=""
-                  loading="lazy"
-                  onClick={() => toggleTips(ex.name)}
-                  style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover", flexShrink: 0, cursor: "pointer", border: `1px solid ${T.steel}` }}
-                />
-              )}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                  <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{ex.name}</h3>
-                  <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>{ex.reps} reps · {ex.rest}s rest</span>
-                </div>
-                {lastFor(ex.name) && (
-                  <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
-                )}
-                <button
-                  onClick={() => toggleTips(ex.name)}
-                  style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
-                >
-                  <Info size={13} /> How to do it
-                  <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-                </button>
-              </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{ex.name}</h3>
+              <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{ex.reps} reps · {ex.rest}s rest</span>
             </div>
+            {lastFor(ex.name) && (
+              <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
+            )}
+            <button
+              onClick={() => toggleTips(ex.name)}
+              style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+            >
+              <Info size={13} /> How to do it
+              <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+            </button>
             {expandedTips[ex.name] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
-                {exerciseImageUrl(ex.name) && (
-                  <img
-                    src={exerciseImageUrl(ex.name)}
-                    alt={ex.name}
-                    loading="lazy"
-                    style={{ width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 8, marginBottom: 10 }}
-                  />
-                )}
                 <ul style={{ margin: 0, paddingLeft: 16 }}>
                   {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
                     <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>

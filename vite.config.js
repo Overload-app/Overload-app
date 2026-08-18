@@ -16,7 +16,7 @@ export default defineConfig({
         // Precache the built app shell (JS/CSS/HTML) so the app can open
         // with zero signal — this is what actually makes "offline at the
         // gym" possible, on top of the manifest-based home-screen install.
-        globPatterns: ["**/*.{js,css,html,png,svg,ico,jpg}"],
+        globPatterns: ["**/*.{js,css,html,png,svg,ico}"],
         navigateFallback: "/index.html",
         // Without these, a newly deployed version sits "waiting" until every
         // open tab/instance of the app is fully closed — which on a phone
