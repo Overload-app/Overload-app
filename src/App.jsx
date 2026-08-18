@@ -59,7 +59,7 @@ const SHELL_CSS = `
 
   /* Resume-workout bar: pinned to the bottom of the screen, above the tab
      bar, visible on any tab — same idea as Hevy's persistent resume bar. */
-  .resume-bar { position: fixed; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); z-index: 35; }
+  .resume-bar { position: fixed; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); z-index: 45; }
 
   @media (min-width: 900px) and (min-height: 600px) {
     .app-shell { display: flex; }
@@ -72,7 +72,7 @@ const SHELL_CSS = `
     .app-main { flex: 1; padding-bottom: 40px; }
     .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
     .coach-panel { left: 240px; bottom: 0; }
-    .resume-bar { left: 240px; bottom: 0; }
+    .resume-bar { right: 28px; bottom: 28px; }
   }
 `;
 
@@ -2568,19 +2568,18 @@ export default function App() {
       </div>
 
       {state.inProgressWorkout && !session && (
-        <div
+        <button
           className="resume-bar"
           onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}
-          style={{ background: T.ink, color: "#fff", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", boxShadow: "0 -4px 16px rgba(0,0,0,0.25)" }}
+          style={{ background: T.ink, color: "#fff", border: "none", borderRadius: 999, padding: "10px 18px 10px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", boxShadow: "0 8px 24px rgba(18,22,28,0.4)" }}
         >
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: T.charge, letterSpacing: 1 }}>WORKOUT IN PROGRESS</div>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>{state.program.days[state.inProgressWorkout.dayIdx]?.name}</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.charge, padding: "9px 16px", borderRadius: 8, fontWeight: 700, fontSize: 13 }}>
-            Resume <ChevronRight size={16} />
-          </div>
-        </div>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.charge, flexShrink: 0, animation: "pulseDot 1.4s ease-in-out infinite" }} />
+          <span style={{ textAlign: "left" }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "#B9BEC6", letterSpacing: 1 }}>RESUME</div>
+            <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>{state.program.days[state.inProgressWorkout.dayIdx]?.name}</div>
+          </span>
+          <ChevronRight size={16} color={T.charge} />
+        </button>
       )}
 
       {session && (
