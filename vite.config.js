@@ -18,6 +18,13 @@ export default defineConfig({
         // gym" possible, on top of the manifest-based home-screen install.
         globPatterns: ["**/*.{js,css,html,png,svg,ico}"],
         navigateFallback: "/index.html",
+        // Without these, a newly deployed version sits "waiting" until every
+        // open tab/instance of the app is fully closed — which on a phone
+        // (installed to the home screen) can mean a fix never visibly
+        // arrives. This makes a new service worker take over immediately.
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
             // Supabase reads: try the network first (fresh data when
