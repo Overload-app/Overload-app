@@ -339,25 +339,74 @@ function calcTargets(profile) {
 
 /* ============================================================
    STORAGE (Supabase — real accounts + real database)
+
+   Also mirrors state to localStorage on every write and read, so the app
+   keeps working — reading and logging workouts — with zero connectivity
+   (e.g. mid-workout at the gym), then syncs to Supabase once back online.
 ============================================================ */
+function localStateKey(userId) { return `overload_state_${userId}`; }
+function pendingSyncKey(userId) { return `overload_pending_sync_${userId}`; }
+
+function readLocalState(userId) {
+  try {
+    const raw = localStorage.getItem(localStateKey(userId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    // Corrupt JSON or localStorage unavailable (e.g. private browsing) —
+    // treat it the same as "no local copy" rather than throwing.
+    return null;
+  }
+}
+function writeLocalState(userId, state) {
+  try {
+    localStorage.setItem(localStateKey(userId), JSON.stringify(state));
+  } catch (e) {
+    console.error("writeLocalState failed", e);
+  }
+}
+function hasPendingSync(userId) {
+  try { return localStorage.getItem(pendingSyncKey(userId)) === "1"; } catch (e) { return false; }
+}
+function setPendingSync(userId, pending) {
+  try {
+    if (pending) localStorage.setItem(pendingSyncKey(userId), "1");
+    else localStorage.removeItem(pendingSyncKey(userId));
+  } catch (e) { /* best-effort only */ }
+}
+
 async function loadState(userId, attempt = 0) {
   const { data, error } = await supabase.from("app_state").select("state").eq("user_id", userId).maybeSingle();
   if (error) {
     // A fresh session (e.g. right after a password reset) can occasionally
     // hit an RLS/auth timing hiccup on the very first request — retry a
-    // couple times before concluding this is genuinely a new account.
+    // couple times before concluding this is genuinely offline/unreachable.
     if (attempt < 2) {
       await new Promise((r) => setTimeout(r, 500));
       return loadState(userId, attempt + 1);
     }
-    console.error("loadState failed", error);
-    return null;
+    console.error("loadState failed, falling back to local cache", error);
+    return { state: readLocalState(userId), fromCache: true };
   }
-  return data ? data.state : null;
+  const state = data ? data.state : null;
+  if (state) writeLocalState(userId, state); // keep the local cache fresh whenever the server has a real answer
+  return { state, fromCache: false };
 }
+
+// Always saves locally first (instant, works with zero connectivity), then
+// tries to push to Supabase. Returns whether the server push succeeded so
+// the UI can show a "saved locally, will sync" indicator when it doesn't.
 async function saveState(userId, state) {
-  const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
-  if (error) console.error("saveState failed", error);
+  writeLocalState(userId, state);
+  try {
+    const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    setPendingSync(userId, false);
+    return true;
+  } catch (e) {
+    console.error("saveState failed, will retry once back online", e);
+    setPendingSync(userId, true);
+    return false;
+  }
 }
 async function loadProfile(userId, attempt = 0) {
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
@@ -2132,8 +2181,26 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
   const [coachLoading, setCoachLoading] = useState(false);
+  // "synced" | "offline" (change saved locally, not yet on the server) | "saving"
+  const [syncStatus, setSyncStatus] = useState("synced");
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
+
+  // Retry any unsynced local change as soon as connectivity returns — this
+  // is what turns "saved locally at the gym" into "actually backed up"
+  // without the person having to do anything themselves.
+  useEffect(() => {
+    if (!account) return;
+    async function retryPendingSync() {
+      if (!navigator.onLine || !hasPendingSync(account.id) || !stateRef.current) return;
+      setSyncStatus("saving");
+      const ok = await saveState(account.id, stateRef.current);
+      setSyncStatus(ok ? "synced" : "offline");
+    }
+    retryPendingSync(); // covers reopening the app back online with a pending change already queued
+    window.addEventListener("online", retryPendingSync);
+    return () => window.removeEventListener("online", retryPendingSync);
+  }, [account]);
 
   useEffect(() => {
     (async () => {
@@ -2164,8 +2231,9 @@ export default function App() {
     setAccount({ id: user.id, name: profileRow?.name || user.user_metadata?.name || "", email: user.email });
     setSubscribed(!!profileRow?.subscribed);
     setTrialStartedAt(profileRow?.trial_started_at || null);
-    const loaded = await loadState(user.id);
+    const { state: loaded, fromCache } = await loadState(user.id);
     setState(loaded);
+    setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
 
   async function checkSubscription() {
@@ -2206,11 +2274,17 @@ export default function App() {
   }, [account, subscribed]);
 
   async function persist(updater) {
+    let next;
     setState((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      saveState(account.id, next);
+      next = typeof updater === "function" ? updater(prev) : updater;
       return next;
     });
+    // Outside setState: writeLocalState inside saveState is synchronous and
+    // instant, so the log entry is protected on-device the moment this
+    // runs, regardless of how long (or whether) the server push takes.
+    setSyncStatus("saving");
+    const ok = await saveState(account.id, next);
+    setSyncStatus(ok ? "synced" : "offline");
   }
 
   // Lives at the App level (not inside the Coach tab component) so an in-flight
@@ -2576,6 +2650,12 @@ export default function App() {
       </div>
 
       <div className="app-main" style={{ fontFamily: "'Inter', sans-serif" }}>
+        {syncStatus === "offline" && (
+          <div style={{ background: T.warn, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff", flexShrink: 0, animation: "pulseDot 1.4s ease-in-out infinite" }} />
+            Offline — saved on this device, will sync automatically
+          </div>
+        )}
         {!subscribed && trialActive && (
           <div style={{ background: T.charge, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px" }}>
             {trialDaysLeft(trialStartedAt)} day{trialDaysLeft(trialStartedAt) === 1 ? "" : "s"} left in your free trial — <button onClick={() => setActiveTab("profile")} style={{ background: "none", border: "none", color: "#fff", textDecoration: "underline", cursor: "pointer", fontWeight: 700, fontSize: 12, padding: 0 }}>subscribe anytime</button>

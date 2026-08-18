@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "overload-dev",
+      "runtimeExecutable": "/Users/freddierodgerson/Downloads/physique-coach-web 25/.claude/dev.sh",
+      "runtimeArgs": [],
+      "port": 5173
+    }
+  ]
+}

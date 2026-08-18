@@ -1,6 +1,43 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    VitePWA({
+      registerType: "autoUpdate",
+      // We already ship our own public/manifest.json + apple meta tags in
+      // index.html, so let the plugin use those as-is rather than generating
+      // a second, possibly-conflicting one.
+      manifest: false,
+      includeAssets: ["icon-192.png", "icon-512.png"],
+      workbox: {
+        // Precache the built app shell (JS/CSS/HTML) so the app can open
+        // with zero signal — this is what actually makes "offline at the
+        // gym" possible, on top of the manifest-based home-screen install.
+        globPatterns: ["**/*.{js,css,html,png,svg,ico}"],
+        navigateFallback: "/index.html",
+        runtimeCaching: [
+          {
+            // Supabase reads: try the network first (fresh data when
+            // online), but fall back to the last successful response when
+            // offline instead of failing outright.
+            urlPattern: ({ url }) => url.hostname.endsWith(".supabase.co"),
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "supabase-cache",
+              networkTimeoutSeconds: 4,
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
+      },
+      devOptions: {
+        // Lets `npm run dev` also register a service worker, so offline
+        // behavior can be tested without doing a full production build.
+        enabled: true,
+      },
+    }),
+  ],
 });
