@@ -59,7 +59,7 @@ const SHELL_CSS = `
 
   /* Resume-workout bar: pinned to the bottom of the screen, above the tab
      bar, visible on any tab — same idea as Hevy's persistent resume bar. */
-  .resume-bar { position: fixed; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); z-index: 45; }
+  .resume-bar { position: fixed; right: 16px; bottom: calc(150px + env(safe-area-inset-bottom, 0px)); z-index: 45; }
 
   @media (min-width: 900px) and (min-height: 600px) {
     .app-shell { display: flex; }
@@ -72,7 +72,7 @@ const SHELL_CSS = `
     .app-main { flex: 1; padding-bottom: 40px; }
     .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
     .coach-panel { left: 240px; bottom: 0; }
-    .resume-bar { right: 28px; bottom: 28px; }
+    .resume-bar { right: 28px; bottom: 100px; }
   }
 `;
 
