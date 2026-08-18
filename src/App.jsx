@@ -2551,18 +2551,18 @@ export default function App() {
     return () => clearInterval(interval);
   }, [account, subscribed]);
 
-  async function persist(updater) {
-    let next;
+  function persist(updater) {
     setState((prev) => {
-      next = typeof updater === "function" ? updater(prev) : updater;
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      // Computed and used for the save right here, inside the updater —
+      // React doesn't guarantee this callback runs synchronously right
+      // after setState() is called, so reading "next" from an outer
+      // variable after the fact is not reliable and previously saved
+      // undefined instead of the real data.
+      setSyncStatus("saving");
+      saveState(account.id, next).then((ok) => setSyncStatus(ok ? "synced" : "offline"));
       return next;
     });
-    // Outside setState: writeLocalState inside saveState is synchronous and
-    // instant, so the log entry is protected on-device the moment this
-    // runs, regardless of how long (or whether) the server push takes.
-    setSyncStatus("saving");
-    const ok = await saveState(account.id, next);
-    setSyncStatus(ok ? "synced" : "offline");
   }
 
   // Lives at the App level (not inside the Coach tab component) so an in-flight
