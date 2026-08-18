@@ -1499,6 +1499,7 @@ Rules:
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
 - CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
+- When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" above verbatim — do not recalculate or estimate fresh numbers from scratch. The current targets JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
 - This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
 }
@@ -1681,12 +1682,13 @@ function Fuel({ state, addMeal, removeMeal }) {
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>NUTRITION</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Today's Fuel</h1>
 
+      <TickRule label="Calories & macros" />
       <Card style={{ marginTop: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center" }}>
           <Ring value={totals.cal} max={targets.calories} color={T.charge} size={90} stroke={9}>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 17 }}>{totals.cal}</div>
-              <div style={{ fontSize: 9, color: T.steelDark }}>/ {targets.calories}</div>
+              <div style={{ fontSize: 9, color: T.steelDark }}>/ {targets.calories} cal</div>
             </div>
           </Ring>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2246,6 +2248,19 @@ export default function App() {
       const hasValidTargets = t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
       const hasNewProgram = parsed.program && Array.isArray(parsed.program.days) && !hasOverride;
       const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
+
+      // Diagnostics: flag cases that look like a bug so they're visible in the
+      // console without needing to guess after the fact.
+      if (!parsed.reply || !parsed.reply.trim()) {
+        console.warn("Coach returned an empty reply for message: \"" + trimmed + "\". Full parsed response: " + JSON.stringify(parsed));
+      }
+      if (restoreIdx !== null && !(stateRef.current.programHistory || [])[restoreIdx]) {
+        console.warn("Coach set restoreIndex=" + restoreIdx + " but no matching history entry exists. History length: " + (stateRef.current.programHistory || []).length);
+      }
+      const revertKeywords = /\b(go back|revert|undo|original|before|forget)\b/i;
+      if (revertKeywords.test(trimmed) && restoreIdx === null && !hasNewProgram && !hasValidTargets) {
+        console.warn("Message looked like a revert request but nothing changed (no restoreIndex, program, or targets set). Full parsed response: " + JSON.stringify(parsed));
+      }
 
       persist((prev) => {
         const history = prev.programHistory || [];
