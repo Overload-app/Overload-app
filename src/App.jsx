@@ -1498,6 +1498,7 @@ Rules:
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
+- CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
 - This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
 }
@@ -2237,6 +2238,7 @@ export default function App() {
           todayOverride: null,
         };
       }
+      console.log("Coach response received:", JSON.stringify(parsed));
       const replyText = (parsed.reply && parsed.reply.trim()) || "Done!";
       const withReply = [...withUser, { role: "assistant", text: replyText }];
       const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
