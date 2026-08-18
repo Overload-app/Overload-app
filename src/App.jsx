@@ -1484,7 +1484,7 @@ Worked example — user says "my knees hurt, adjust leg day for today": this is 
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 
-Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
+Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. Even though those three fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
 {"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
@@ -2237,7 +2237,8 @@ export default function App() {
           todayOverride: null,
         };
       }
-      const withReply = [...withUser, { role: "assistant", text: parsed.reply }];
+      const replyText = (parsed.reply && parsed.reply.trim()) || "Done!";
+      const withReply = [...withUser, { role: "assistant", text: replyText }];
       const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
       const t = parsed.targets;
       const hasValidTargets = t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
