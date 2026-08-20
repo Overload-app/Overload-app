@@ -119,7 +119,7 @@ async function claudeChat({ system, messages }) {
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 }
 
-function parseJSONLoose(text) {
+export function parseJSONLoose(text) {
   let clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
   // The model is instructed to return only JSON, but sometimes adds a stray
   // sentence before or after it anyway — pull out just the {...} block
@@ -241,7 +241,7 @@ const INJURY_EXCLUDES = {
   elbows: ["Curl", "Extension", "Skull Crusher", "Kickback", "Tricep"],
 };
 
-function filterPool(pool, injuries) {
+export function filterPool(pool, injuries) {
   if (!injuries || injuries.length === 0 || injuries.includes("none")) return pool;
   const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
   const out = {};
@@ -271,7 +271,7 @@ const EXERCISE_TO_GROUP = Object.fromEntries(
 // Fallback for exercise names that didn't come from POOLS (i.e. AI-written
 // programs) — same conservative spirit as tipsForExercise: only guess when
 // reasonably confident, never force a match.
-function inferMuscleGroup(name) {
+export function inferMuscleGroup(name) {
   const n = name.toLowerCase();
   if (/squat|lunge|deadlift|leg press|leg curl|leg extension|calf|step-?up|glute|split squat|wall sit/.test(n)) return "legs";
   if (/curl/.test(n) && !/leg curl/.test(n)) return "biceps";
@@ -283,7 +283,7 @@ function inferMuscleGroup(name) {
   return null;
 }
 
-function alternativesFor(exerciseName, equipment, injuries) {
+export function alternativesFor(exerciseName, equipment, injuries) {
   const group = EXERCISE_TO_GROUP[exerciseName] || inferMuscleGroup(exerciseName);
   if (!group) return [];
   const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
@@ -423,7 +423,7 @@ const DEFAULT_TIPS = [
   "Prioritize good form over lifting heavier weight.",
 ];
 
-function tipsForExercise(name) {
+export function tipsForExercise(name) {
   const rule = TIP_RULES.find(([pattern]) => pattern.test(name));
   return rule ? rule[1] : DEFAULT_TIPS;
 }
@@ -517,7 +517,7 @@ function splitDisplayName(key) {
   }[key];
 }
 
-function buildProgram(profile) {
+export function buildProgram(profile) {
   const basePool = POOLS[profile.equipment];
   const pool = filterPool(basePool, profile.injuries);
   const cap = capFor(profile);
@@ -542,7 +542,7 @@ function splitGuidanceFor(days) {
 // Combines the preset injury checkboxes with the free-text "other injuries"
 // field into one description for the AI — "none" only shows up if there's
 // truly nothing on either side.
-function injuryDescription(profile) {
+export function injuryDescription(profile) {
   const preset = (profile.injuries || []).filter((i) => i && i !== "none");
   const parts = [...preset.map((i) => i.replace(/_/g, " "))];
   if (profile.otherInjuries && profile.otherInjuries.trim()) parts.push(profile.otherInjuries.trim());
@@ -586,7 +586,7 @@ Rules:
 /* ============================================================
    NUTRITION CALC
 ============================================================ */
-function calcTargets(profile) {
+export function calcTargets(profile) {
   const { sex, age, heightIn, weightLb, activity, goal } = profile;
   const kg = weightLb * 0.453592;
   const cm = heightIn * 2.54;

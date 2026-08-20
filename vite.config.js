@@ -47,4 +47,11 @@ export default defineConfig({
       },
     }),
   ],
+  test: {
+    // Pure-logic tests only (program generation, macro math, exercise
+    // matching) — none of it touches the DOM, so the plain node
+    // environment is enough and keeps `npm test` fast.
+    environment: "node",
+    globals: false,
+  },
 });
