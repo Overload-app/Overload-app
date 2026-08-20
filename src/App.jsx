@@ -770,6 +770,35 @@ function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
   );
 }
 
+function EmailConfirmedScreen({ onBackToLogin }) {
+  return (
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
+      <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 30 }}>
+          <Zap size={20} color={T.charge} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: T.charge, fontWeight: 600 }}>OVERLOAD</span>
+        </div>
+        <div style={{ width: 56, height: 56, borderRadius: 16, background: "rgba(31,158,110,0.15)", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 30 }}>
+          <Check size={26} color={T.good} />
+        </div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, lineHeight: 1.15, margin: "18px 0 10px", fontWeight: 700 }}>
+          Email confirmed
+        </h1>
+        <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 14, lineHeight: 1.6, maxWidth: 360 }}>
+          Your account is active. Head back and sign in to get started.
+        </p>
+      </div>
+      <div>
+        <Btn variant="accent" onClick={onBackToLogin} style={{ width: "100%", padding: 16 }}>
+          Back to sign in <ChevronRight size={18} />
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 function Login({ onSignUp, onSignIn, onForgotPassword }) {
   const [mode, setMode] = useState("signup"); // "signup" | "signin" | "forgot"
   const [name, setName] = useState("");
@@ -2451,6 +2480,7 @@ export default function App() {
   const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [confirmEmailPending, setConfirmEmailPending] = useState(null);
+  const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -2479,6 +2509,30 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      // Clicking the confirmation link in the signup email lands back here
+      // with type=signup in the URL and (by default) a live session already
+      // created. Rather than silently drop the person straight into the
+      // app, show an explicit "email confirmed, sign in" step — clearer for
+      // people following an "add to home screen" walkthrough, and it means
+      // signing in is always a deliberate action rather than something that
+      // happened to them via an email click.
+      const params = new URLSearchParams(window.location.hash.replace(/^#/, "") + "&" + window.location.search.replace(/^\?/, ""));
+      if (params.get("type") === "signup") {
+        window.history.replaceState(null, "", window.location.pathname);
+        try {
+          await supabase.auth.signOut();
+        } catch (e) {
+          // Even if the network call to invalidate the session hiccups, still
+          // show the confirmation screen rather than getting stuck loading —
+          // worst case they're auto-signed-in if they back out to the app,
+          // which is harmless (they'd just need to sign in again next time).
+          console.error("signOut after email confirmation failed", e);
+        }
+        setJustConfirmedEmail(true);
+        setLoading(false);
+        return;
+      }
+
       const { data: { session: sbSession } } = await supabase.auth.getSession();
       if (sbSession?.user) {
         await hydrateAccount(sbSession.user);
@@ -2846,7 +2900,9 @@ export default function App() {
       <div className="auth-screen-outer">
         <style>{FONT_IMPORT}</style>
         <style>{SHELL_CSS}</style>
-        {confirmEmailPending ? (
+        {justConfirmedEmail ? (
+          <EmailConfirmedScreen onBackToLogin={() => setJustConfirmedEmail(false)} />
+        ) : confirmEmailPending ? (
           <ConfirmEmailScreen
             email={confirmEmailPending}
             onResend={resendConfirmation}
