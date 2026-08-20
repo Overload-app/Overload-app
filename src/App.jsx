@@ -539,6 +539,16 @@ function splitGuidanceFor(days) {
   return map[days] || "Choose a split structure appropriate to this many training days.";
 }
 
+// Combines the preset injury checkboxes with the free-text "other injuries"
+// field into one description for the AI — "none" only shows up if there's
+// truly nothing on either side.
+function injuryDescription(profile) {
+  const preset = (profile.injuries || []).filter((i) => i && i !== "none");
+  const parts = [...preset.map((i) => i.replace(/_/g, " "))];
+  if (profile.otherInjuries && profile.otherInjuries.trim()) parts.push(profile.otherInjuries.trim());
+  return parts.length > 0 ? parts.join(", ") : "none";
+}
+
 function buildProgramGenSystem(profile) {
   return `You are a world-class evidence-based strength & physique coach designing a brand-new, fully personalized training program from scratch for a new client. Apply mainstream exercise-science consensus: progressive overload, sensible per-muscle volume landmarks, rep ranges matched to the goal, and adequate recovery between sessions hitting the same muscles.
 
@@ -552,7 +562,7 @@ Client details:
 - Equipment available: ${profile.equipment}
 - Days per week available: ${profile.daysPerWeek}
 - Target session length: ~${profile.sessionLength} minutes
-- Injuries / areas to train around: ${(profile.injuries || []).join(", ") || "none"}
+- Injuries / areas to train around: ${injuryDescription(profile)}
 - Daily activity level outside training: ${profile.activity}
 
 Split structure guidance for ${profile.daysPerWeek} days/week: ${splitGuidanceFor(profile.daysPerWeek)}
@@ -567,7 +577,7 @@ Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, 
 Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
-- Never include exercises that would aggravate: ${(profile.injuries || []).join(", ") || "none — no restrictions"}.
+- Never include exercises that would aggravate: ${injuryDescription(profile)}.
 - Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
 - Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."`;
@@ -1279,6 +1289,7 @@ const QUIZ_STEPS = [
   { key: "sessionLength", q: "How long do you want each workout to be?", type: "choice", options: [[30, "~30 min"], [45, "~45 min"], [60, "~60 min"], [75, "75+ min"]] },
   { key: "activity", q: "How active is your day-to-day (outside training)?", type: "choice", options: [["sedentary", "Desk job, little walking"], ["light", "On my feet sometimes"], ["moderate", "Active job / lots of walking"], ["active", "Physically demanding day"]] },
   { key: "injuries", q: "Any injuries or areas we should train around?", sub: "Select all that apply — we'll avoid exercises that stress these.", type: "multi", options: [["none", "None"], ["knees", "Knees"], ["shoulders", "Shoulders"], ["lower_back", "Lower back"], ["wrists", "Wrists"], ["elbows", "Elbows"]] },
+  { key: "otherInjuries", q: "Any other injuries or areas to be careful with?", sub: "Optional — describe in your own words if it's not covered above.", type: "text", placeholder: "e.g. torn labrum in right shoulder, sciatica" },
 ];
 
 function Onboarding({ onComplete }) {
@@ -1324,6 +1335,7 @@ function Onboarding({ onComplete }) {
       desiredPhysique: answers.desiredPhysique || "balanced, athletic build",
       specificGoals: answers.specificGoals || "",
       injuries: answers.injuries || ["none"],
+      otherInjuries: answers.otherInjuries || "",
       name: "",
     };
     const targets = calcTargets(profile);
@@ -1945,7 +1957,7 @@ function buildCoachSystem(state) {
     calories: h.targets?.calories,
   }));
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
-User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.
+User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
@@ -2485,7 +2497,7 @@ function ExerciseProgress({ logs }) {
   );
 }
 
-function Progress({ state, addWeight }) {
+function Progress({ state, addWeight, removeWeight }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
@@ -2551,6 +2563,26 @@ function Progress({ state, addWeight }) {
           </Btn>
         </div>
       </Card>
+
+      {logs.bodyweight.length > 0 && (
+        <>
+          <TickRule label="Recent entries" />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* Reversed for most-recent-first display, but keeps each entry's
+                real index into logs.bodyweight so deleting removes the right one
+                even though the list order shown here is flipped. */}
+            {logs.bodyweight.map((w, i) => ({ ...w, i })).reverse().slice(0, 10).map((w) => (
+              <Card key={w.i} style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, fontFamily: "'JetBrains Mono', monospace" }}>{w.weight} lb</div>
+                  <div style={{ fontSize: 11, color: T.steelDark }}>{w.date}</div>
+                </div>
+                <button onClick={() => removeWeight(w.i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
+              </Card>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2597,7 +2629,7 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
     ["Equipment", profile.equipment === "full" ? "Full Gym" : profile.equipment === "dumbbell" ? "Dumbbells" : "Bodyweight"],
     ["Training days/wk", profile.daysPerWeek],
     ["Session length", `~${profile.sessionLength} min`],
-    ["Injuries noted", (profile.injuries || ["none"]).join(", ").replace(/_/g, " ")],
+    ["Injuries noted", injuryDescription(profile)],
     ["Height", `${Math.floor(profile.heightIn / 12)}'${profile.heightIn % 12}"`],
     ["Weight on file", `${profile.weightLb} lb`],
     ["Maintenance (TDEE)", `${targets.tdee} cal`],
@@ -3188,6 +3220,10 @@ export default function App() {
     persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: [...prev.logs.bodyweight, { date: todayISO(), weight }] } }));
   }
 
+  function removeWeight(index) {
+    persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: prev.logs.bodyweight.filter((_, i) => i !== index) } }));
+  }
+
   function resetAll() {
     persist(null);
   }
@@ -3315,7 +3351,7 @@ export default function App() {
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
-          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} />}
+          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} />}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
         </div>
 
