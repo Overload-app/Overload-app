@@ -185,6 +185,21 @@ function compressImageToBase64(file, maxDim = 1024, quality = 0.72) {
 
 const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estimate the food and its nutrition. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}";
 
+// One-time smart backfill for the "Find alternative" swap picker, used only
+// when an exercise doesn't already have AI-sourced alternatives baked in
+// (e.g. a program saved before this existed) — new programs get these
+// written directly into the program data, so this live call is the
+// exception, not the normal path. Falls back to the coarser pool-based
+// matching (alternativesFor) at the call site if this fails or is offline.
+async function fetchSimilarExercises(name, equipment, injuries) {
+  const equipDesc = equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment";
+  const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest exactly 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part"). Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
+  const userMsg = `Exercise: ${name}. Available equipment: ${equipDesc}. Injuries/areas to avoid: ${(injuries || []).join(", ") || "none"}.`;
+  const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
+  const parsed = parseJSONLoose(raw);
+  return Array.isArray(parsed.alternatives) ? parsed.alternatives : [];
+}
+
 /* ============================================================
    EXERCISE POOLS
 ============================================================ */
@@ -416,6 +431,12 @@ function tipsForExercise(name) {
 // Fills in tips for any exercise that doesn't already have them (e.g. the AI
 // omitted them, or this is a program saved before this feature existed) —
 // never overwrites tips that are already there.
+// Note: deliberately does NOT backfill missing "alternatives" with the
+// coarser pool-based matching here — an absent/empty alternatives array is
+// the signal WorkoutSession uses to know it should try a smarter live
+// lookup first (falling back to the pool only if offline). Papering over it
+// here would make every exercise look "already handled" and the AI-sourced
+// upgrade would never get a chance to run.
 function withTips(exercises) {
   return (exercises || []).map((ex) => (
     Array.isArray(ex.tips) && ex.tips.length > 0 ? ex : { ...ex, tips: tipsForExercise(ex.name) }
@@ -541,14 +562,15 @@ Design a training split and day-by-day program tailored specifically to this per
 ${profile.specificGoals ? `If they've stated specific performance goals (e.g. a target bench/squat/deadlift number, a bodyweight-strength milestone like a pull-up, a running goal), make sure the relevant lift or movement is programmed directly — include it with a rep/set scheme that actually builds toward that outcome (lower-rep strength work for a numeric lift goal, progressive skill/strength work for a bodyweight milestone), not just buried as one of several accessory options.` : ""}
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
-{"splitName": "<short split name, e.g. 'Push / Pull / Legs'>", "days": [{"name": "<day name, e.g. 'Push Day'>", "exercises": [{"name": "<exercise name>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number, seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}]}]}
+{"splitName": "<short split name, e.g. 'Push / Pull / Legs'>", "days": [{"name": "<day name, e.g. 'Push Day'>", "exercises": [{"name": "<exercise name>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number, seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}
 
 Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
 - Never include exercises that would aggravate: ${(profile.injuries || []).join(", ") || "none — no restrictions"}.
 - Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).
-- Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.`;
+- Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
+- Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."`;
 }
 
 /* ============================================================
@@ -1491,7 +1513,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise }) {
+function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
   const [sets, setSets] = useState(() =>
     initialSets || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -1503,7 +1525,43 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
   const [expandedTips, setExpandedTips] = useState({});
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
+  const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
+  const [pickerLoading, setPickerLoading] = useState(false);
   const intervalRef = useRef(null);
+
+  // Resolves the alternatives list whenever the picker opens for a new
+  // exercise: use what's already baked into the program if present, else
+  // try a one-time live "similar exercises" lookup (caching the result so
+  // it never has to run twice), and only fall back to the coarser
+  // pool-based matching if that's not possible (offline, or the call fails).
+  useEffect(() => {
+    if (swapPickerIdx === null) return;
+    const current = sets[swapPickerIdx];
+    if (Array.isArray(current.alternatives) && current.alternatives.length > 0) {
+      setPickerAlts(current.alternatives);
+      return;
+    }
+    let cancelled = false;
+    setPickerLoading(true);
+    fetchSimilarExercises(current.name, equipment, injuries)
+      .then((alts) => {
+        if (cancelled) return;
+        if (alts.length > 0) {
+          setPickerAlts(alts);
+          onCacheAlternatives(swapPickerIdx, alts);
+        } else {
+          setPickerAlts(alternativesFor(current.name, equipment, injuries));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPickerAlts(alternativesFor(current.name, equipment, injuries));
+      })
+      .finally(() => {
+        if (!cancelled) setPickerLoading(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapPickerIdx]);
 
   // Applies the swap immediately to this in-progress session (so it's
   // reflected right away, mid-workout, without waiting on a re-render from
@@ -1690,7 +1748,7 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
 
       {swapPickerIdx !== null && (() => {
         const current = sets[swapPickerIdx];
-        const alternatives = alternativesFor(current.name, equipment, injuries);
+        const alternatives = pickerAlts;
         function close() { setSwapPickerIdx(null); setSelectedAlt(null); }
         return (
           <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
@@ -1702,7 +1760,11 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
               <button onClick={close} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-              {alternatives.length === 0 ? (
+              {pickerLoading ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 30, fontSize: 13, color: T.steelDark }}>
+                  <Loader2 size={16} className="spin" /> Finding similar exercises…
+                </div>
+              ) : alternatives.length === 0 ? (
                 <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 30 }}>No alternatives available for this exercise with your current equipment.</p>
               ) : selectedAlt ? (
                 <div>
@@ -1906,12 +1968,13 @@ Worked example for nutrition — user says "make my workout and diet focused on 
 Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. Even though those three fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
+- Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - Keep total exercises per day reasonable for a ${p.sessionLength}-minute session.
@@ -2695,9 +2758,9 @@ export default function App() {
     setSubscribed(!!profileRow?.subscribed);
     setTrialStartedAt(profileRow?.trial_started_at || null);
     const { state: loaded, fromCache } = await loadState(user.id);
-    // Backfills tips onto programs saved before this feature existed, so
-    // existing accounts get offline-capable "How to do it" tips immediately
-    // on next load, with no AI call and no need to regenerate the program.
+    // Backfills tips/alternatives onto programs saved before those features
+    // existed, so existing accounts get offline-capable "How to do it" tips
+    // and swap alternatives immediately on next load, no AI call needed.
     setState(loaded && loaded.program ? { ...loaded, program: normalizeProgramTips(loaded.program) } : loaded);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
@@ -2963,10 +3026,12 @@ export default function App() {
     setSession({ dayIdx, resume: !!resume });
   }
 
-  // Swaps one exercise for an alternative from the same muscle group — no
-  // AI call, entirely offline. scope "today" only overrides this session
-  // (cleared automatically when the workout finishes, same as a Coach
-  // one-time swap); "permanent" updates the actual program going forward,
+  // Applies a chosen swap — this step itself is always instant/offline,
+  // regardless of whether the alternatives list it was picked from came
+  // from baked-in AI data, a live smart lookup, or the offline pool
+  // fallback. scope "today" only overrides this session (cleared
+  // automatically when the workout finishes, same as a Coach one-time
+  // swap); "permanent" updates the actual program going forward,
   // snapshotted into history so it's revertible like any other program change.
   function swapExercise(dayIdx, exIdx, newExerciseName, scope) {
     persist((prev) => {
@@ -2987,6 +3052,21 @@ export default function App() {
       ].slice(0, PROGRAM_HISTORY_LIMIT);
       const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
       return { ...prev, program: { ...prev.program, days: newDays }, programHistory: newHistory };
+    });
+  }
+
+  // Caches a one-time smart-lookup result onto the exercise itself, so the
+  // live AI call for "similar exercises" never has to run twice for the
+  // same exercise. Not a "change" worth a history snapshot — just enriching
+  // existing data.
+  function cacheAlternatives(dayIdx, exIdx, alternatives) {
+    persist((prev) => {
+      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
+      const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
+      const newExercises = baseExercises.map((ex, i) => (i === exIdx ? { ...ex, alternatives } : ex));
+      if (hasOverride) return { ...prev, todayOverride: newExercises };
+      const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
+      return { ...prev, program: { ...prev.program, days: newDays } };
     });
   }
 
@@ -3220,6 +3300,7 @@ export default function App() {
           equipment={state.profile.equipment}
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}
+          onCacheAlternatives={(exIdx, alts) => cacheAlternatives(session.dayIdx, exIdx, alts)}
         />
       )}
 
