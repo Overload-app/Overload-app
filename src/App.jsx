@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown, Repeat,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -236,6 +236,43 @@ function filterPool(pool, injuries) {
     out[group] = list;
   });
   return out;
+}
+
+/* ============================================================
+   ALTERNATIVE EXERCISE LOOKUP
+
+   Powers the "Find alternative" swap button during a workout — entirely
+   offline, no AI call, since it's just picking another exercise from the
+   same muscle group the person already has equipment for.
+============================================================ */
+// name -> muscle group, derived directly from POOLS so it can never drift
+// out of sync with the actual exercise lists.
+const EXERCISE_TO_GROUP = Object.fromEntries(
+  Object.values(POOLS).flatMap((pool) =>
+    Object.entries(pool).flatMap(([group, names]) => names.map((name) => [name, group]))
+  )
+);
+
+// Fallback for exercise names that didn't come from POOLS (i.e. AI-written
+// programs) — same conservative spirit as tipsForExercise: only guess when
+// reasonably confident, never force a match.
+function inferMuscleGroup(name) {
+  const n = name.toLowerCase();
+  if (/squat|lunge|deadlift|leg press|leg curl|leg extension|calf|step-?up|glute|split squat|wall sit/.test(n)) return "legs";
+  if (/curl/.test(n) && !/leg curl/.test(n)) return "biceps";
+  if (/pushdown|skull crusher|tricep|overhead.*extension|kickback|dip|diamond push-?up/.test(n)) return "triceps";
+  if (/press|fly|pec deck|push-?up/.test(n) && !/overhead press|shoulder press|leg press/.test(n)) return "chest";
+  if (/overhead press|shoulder press|lateral raise|rear delt|face pull|y-raise|arnold|handstand|pike push-?up/.test(n)) return "shoulders";
+  if (/row|pulldown|pull-?up|chin-?up|pullover/.test(n)) return "back";
+  if (/crunch|plank|leg raise|sit-?up|russian twist|side bend|mountain climber|rollout|superman/.test(n)) return "core";
+  return null;
+}
+
+function alternativesFor(exerciseName, equipment, injuries) {
+  const group = EXERCISE_TO_GROUP[exerciseName] || inferMuscleGroup(exerciseName);
+  if (!group) return [];
+  const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
+  return (pool[group] || []).filter((name) => name !== exerciseName);
 }
 
 function pick(arr, n, offset = 0) {
@@ -1454,7 +1491,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit }) {
+function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise }) {
   const [sets, setSets] = useState(() =>
     initialSets || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -1464,7 +1501,33 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
   const [rest, setRest] = useState(null); // {seconds, total}
   const [confirmExit, setConfirmExit] = useState(false);
   const [expandedTips, setExpandedTips] = useState({});
+  const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
+  const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
   const intervalRef = useRef(null);
+
+  // Applies the swap immediately to this in-progress session (so it's
+  // reflected right away, mid-workout, without waiting on a re-render from
+  // the parent) and separately persists it — "today" only or permanently —
+  // via the callback the parent provides.
+  function applySwap(exIdx, newName, scope) {
+    setSets((s) => {
+      const copy = [...s];
+      const old = copy[exIdx];
+      copy[exIdx] = {
+        name: newName,
+        reps: old.reps,
+        rest: old.rest,
+        tips: tipsForExercise(newName),
+        // A different exercise means previously logged weight/reps for the
+        // old one don't carry over — fresh, empty sets for the new one.
+        logged: Array.from({ length: old.logged.length }, () => ({ weight: "", reps: "", done: false })),
+      };
+      return copy;
+    });
+    onSwapExercise(exIdx, newName, scope);
+    setSwapPickerIdx(null);
+    setSelectedAlt(null);
+  }
 
   // Tips are baked into the exercise data at program-generation time (see
   // normalizeProgramTips/tipsForExercise), so this is just a local toggle —
@@ -1545,13 +1608,21 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
             {lastFor(ex.name) && (
               <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
             )}
-            <button
-              onClick={() => toggleTips(ex.name)}
-              style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
-            >
-              <Info size={13} /> How to do it
-              <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <button
+                onClick={() => toggleTips(ex.name)}
+                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+              >
+                <Info size={13} /> How to do it
+                <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+              </button>
+              <button
+                onClick={() => { setSelectedAlt(null); setSwapPickerIdx(exIdx); }}
+                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+              >
+                <Repeat size={13} /> Find alternative
+              </button>
+            </div>
             {expandedTips[ex.name] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
                 <ul style={{ margin: 0, paddingLeft: 16 }}>
@@ -1616,6 +1687,63 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
           </div>
         </div>
       )}
+
+      {swapPickerIdx !== null && (() => {
+        const current = sets[swapPickerIdx];
+        const alternatives = alternativesFor(current.name, equipment, injuries);
+        function close() { setSwapPickerIdx(null); setSelectedAlt(null); }
+        return (
+          <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+            <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#B9BEC6", letterSpacing: 1, fontWeight: 600 }}>REPLACING</span>
+                <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "2px 0 0" }}>{current.name}</h2>
+              </div>
+              <button onClick={close} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+              {alternatives.length === 0 ? (
+                <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 30 }}>No alternatives available for this exercise with your current equipment.</p>
+              ) : selectedAlt ? (
+                <div>
+                  <Card style={{ marginBottom: 16 }}>
+                    <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{selectedAlt}</h3>
+                    <ul style={{ margin: "8px 0 0", paddingLeft: 16 }}>
+                      {tipsForExercise(selectedAlt).map((tip, i) => (
+                        <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
+                      ))}
+                    </ul>
+                  </Card>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <Btn variant="accent" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "today")}>
+                      Just for today
+                    </Btn>
+                    <Btn variant="ghost" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "permanent")}>
+                      Permanently, going forward
+                    </Btn>
+                    <button onClick={() => setSelectedAlt(null)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 13, cursor: "pointer", padding: "8px 0" }}>
+                      Choose a different exercise
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {alternatives.map((name) => (
+                    <button
+                      key={name}
+                      onClick={() => setSelectedAlt(name)}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: "#fff", border: `1px solid ${T.steel}`, borderRadius: 10, cursor: "pointer", textAlign: "left", fontFamily: "'Inter', sans-serif", fontSize: 14, fontWeight: 600, color: T.ink }}
+                    >
+                      {name}
+                      <ChevronRight size={16} color={T.steelDark} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2835,6 +2963,33 @@ export default function App() {
     setSession({ dayIdx, resume: !!resume });
   }
 
+  // Swaps one exercise for an alternative from the same muscle group — no
+  // AI call, entirely offline. scope "today" only overrides this session
+  // (cleared automatically when the workout finishes, same as a Coach
+  // one-time swap); "permanent" updates the actual program going forward,
+  // snapshotted into history so it's revertible like any other program change.
+  function swapExercise(dayIdx, exIdx, newExerciseName, scope) {
+    persist((prev) => {
+      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
+      const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
+      const newExercises = baseExercises.map((ex, i) =>
+        i === exIdx ? { name: newExerciseName, sets: ex.sets, reps: ex.reps, rest: ex.rest, tips: tipsForExercise(newExerciseName) } : ex
+      );
+
+      if (scope === "today") {
+        return { ...prev, todayOverride: newExercises };
+      }
+
+      const history = prev.programHistory || [];
+      const newHistory = [
+        { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
+        ...history,
+      ].slice(0, PROGRAM_HISTORY_LIMIT);
+      const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
+      return { ...prev, program: { ...prev.program, days: newDays }, programHistory: newHistory };
+    });
+  }
+
   function saveWorkoutProgress(dayIdx, sets) {
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString() } }));
     setSession(null);
@@ -3062,6 +3217,9 @@ export default function App() {
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
           onSaveExit={(sets) => saveWorkoutProgress(session.dayIdx, sets)}
+          equipment={state.profile.equipment}
+          injuries={state.profile.injuries}
+          onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}
         />
       )}
 
