@@ -799,8 +799,8 @@ function EmailConfirmedScreen({ onBackToLogin }) {
   );
 }
 
-function Login({ onSignUp, onSignIn, onForgotPassword }) {
-  const [mode, setMode] = useState("signup"); // "signup" | "signin" | "forgot"
+function Login({ onSignUp, onSignIn, onForgotPassword, initialMode }) {
+  const [mode, setMode] = useState(initialMode || "signup"); // "signup" | "signin" | "forgot"
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -2481,6 +2481,11 @@ export default function App() {
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [confirmEmailPending, setConfirmEmailPending] = useState(null);
   const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
+  // Distinct from justConfirmedEmail (which only controls whether the
+  // confirmation screen itself is showing) — this stays true after they tap
+  // "Back to sign in" so Login knows to default to sign-in mode rather than
+  // the normal sign-up-first default.
+  const [cameFromEmailConfirm, setCameFromEmailConfirm] = useState(false);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -2529,6 +2534,7 @@ export default function App() {
           console.error("signOut after email confirmation failed", e);
         }
         setJustConfirmedEmail(true);
+        setCameFromEmailConfirm(true);
         setLoading(false);
         return;
       }
@@ -2909,7 +2915,7 @@ export default function App() {
             onBackToLogin={() => setConfirmEmailPending(null)}
           />
         ) : (
-          <Login onSignUp={handleSignUp} onSignIn={handleSignIn} onForgotPassword={handleForgotPassword} />
+          <Login onSignUp={handleSignUp} onSignIn={handleSignIn} onForgotPassword={handleForgotPassword} initialMode={cameFromEmailConfirm ? "signin" : undefined} />
         )}
       </div>
     );
