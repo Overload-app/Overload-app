@@ -283,8 +283,12 @@ function inferMuscleGroup(name) {
   return null;
 }
 
+function muscleGroupFor(exerciseName) {
+  return EXERCISE_TO_GROUP[exerciseName] || inferMuscleGroup(exerciseName);
+}
+
 function alternativesFor(exerciseName, equipment, injuries) {
-  const group = EXERCISE_TO_GROUP[exerciseName] || inferMuscleGroup(exerciseName);
+  const group = muscleGroupFor(exerciseName);
   if (!group) return [];
   const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
   return (pool[group] || []).filter((name) => name !== exerciseName);
@@ -745,6 +749,48 @@ function Card({ children, style }) {
     <div style={{ background: T.card, borderRadius: 14, padding: 16, boxShadow: "0 1px 2px rgba(18,22,28,0.06)", border: `1px solid ${T.steel}`, ...style }}>
       {children}
     </div>
+  );
+}
+
+// Simple, consistent body-outline diagram highlighting which muscle group
+// an exercise targets — one shape per group reused across every exercise,
+// so it stays clean rather than another mixed-bag of real photos. Front
+// view (chest/shoulders/biceps/core/legs) or back view (back/triceps),
+// chosen automatically from the group.
+const MUSCLE_GROUP_LABEL = {
+  chest: "Chest", back: "Back", shoulders: "Shoulders", legs: "Legs",
+  biceps: "Biceps", triceps: "Triceps", core: "Core",
+};
+function MuscleDiagram({ group }) {
+  const hi = T.charge;
+  const neutral = T.steel;
+  const isBack = group === "back" || group === "triceps";
+  const c = (region) => (
+    (isBack && region === "back") || (!isBack && region === group) ? hi : neutral
+  );
+  return (
+    <svg viewBox="0 0 200 340" width={72} height={122} role="img" aria-label={`${MUSCLE_GROUP_LABEL[group] || "Muscle"} diagram`}>
+      <circle cx="100" cy="46" r="20" fill={neutral} />
+      <rect x="93" y="64" width="14" height="10" fill={neutral} />
+      {isBack ? (
+        <path d="M56,74 Q100,64 144,74 L138,178 Q100,190 62,178 Z" fill={c("back")} />
+      ) : (
+        <>
+          <path d="M60,74 Q100,66 140,74 L136,130 Q100,140 64,130 Z" fill={c("chest")} />
+          <rect x="72" y="132" width="56" height="46" rx="8" fill={c("core")} />
+        </>
+      )}
+      <ellipse cx="48" cy="80" rx="17" ry="15" fill={c("shoulders")} />
+      <ellipse cx="152" cy="80" rx="17" ry="15" fill={c("shoulders")} />
+      <rect x="28" y="92" width="24" height="55" rx="11" fill={isBack ? c("triceps") : c("biceps")} />
+      <rect x="148" y="92" width="24" height="55" rx="11" fill={isBack ? c("triceps") : c("biceps")} />
+      <rect x="26" y="148" width="20" height="55" rx="9" fill={neutral} />
+      <rect x="154" y="148" width="20" height="55" rx="9" fill={neutral} />
+      <rect x="68" y="180" width="28" height="88" rx="12" fill={c("legs")} />
+      <rect x="104" y="180" width="28" height="88" rx="12" fill={c("legs")} />
+      <rect x="70" y="270" width="24" height="60" rx="9" fill={neutral} />
+      <rect x="106" y="270" width="24" height="60" rx="9" fill={neutral} />
+    </svg>
   );
 }
 
@@ -1659,35 +1705,48 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
       <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {sets.map((ex, exIdx) => (
           <Card key={exIdx} style={{ marginBottom: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{ex.name}</h3>
-              <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{ex.reps} reps · {ex.rest}s rest</span>
-            </div>
-            {lastFor(ex.name) && (
-              <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
-            )}
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <button
-                onClick={() => toggleTips(ex.name)}
-                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
-              >
-                <Info size={13} /> How to do it
-                <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-              </button>
-              <button
-                onClick={() => { setSelectedAlt(null); setSwapPickerIdx(exIdx); }}
-                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
-              >
-                <Repeat size={13} /> Find alternative
-              </button>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <div onClick={() => toggleTips(ex.name)} style={{ flexShrink: 0, cursor: "pointer" }}>
+                <MuscleDiagram group={muscleGroupFor(ex.name)} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{ex.name}</h3>
+                  <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>{ex.reps} reps · {ex.rest}s rest</span>
+                </div>
+                {lastFor(ex.name) && (
+                  <div style={{ fontSize: 12, color: T.charge, marginTop: 4, fontWeight: 600 }}>Last time: {lastFor(ex.name)}</div>
+                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <button
+                    onClick={() => toggleTips(ex.name)}
+                    style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+                  >
+                    <Info size={13} /> How to do it
+                    <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                  </button>
+                  <button
+                    onClick={() => { setSelectedAlt(null); setSwapPickerIdx(exIdx); }}
+                    style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+                  >
+                    <Repeat size={13} /> Find alternative
+                  </button>
+                </div>
+              </div>
             </div>
             {expandedTips[ex.name] && (
-              <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
-                <ul style={{ margin: 0, paddingLeft: 16 }}>
-                  {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
-                    <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
-                  ))}
-                </ul>
+              <div style={{ marginTop: 10, padding: "12px", background: T.paper, borderRadius: 8, display: "flex", gap: 14, alignItems: "flex-start" }}>
+                <MuscleDiagram group={muscleGroupFor(ex.name)} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: T.charge, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
+                    Targets: {MUSCLE_GROUP_LABEL[muscleGroupFor(ex.name)] || "—"}
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
+                      <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
+                    ))}
+                  </ul>
+                </div>
               </div>
             )}
             <div style={{ marginTop: 10 }}>
@@ -1768,13 +1827,16 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
                 <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 30 }}>No alternatives available for this exercise with your current equipment.</p>
               ) : selectedAlt ? (
                 <div>
-                  <Card style={{ marginBottom: 16 }}>
-                    <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{selectedAlt}</h3>
-                    <ul style={{ margin: "8px 0 0", paddingLeft: 16 }}>
-                      {tipsForExercise(selectedAlt).map((tip, i) => (
-                        <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
-                      ))}
-                    </ul>
+                  <Card style={{ marginBottom: 16, display: "flex", gap: 14, alignItems: "flex-start" }}>
+                    <MuscleDiagram group={muscleGroupFor(selectedAlt)} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{selectedAlt}</h3>
+                      <ul style={{ margin: "8px 0 0", paddingLeft: 16 }}>
+                        {tipsForExercise(selectedAlt).map((tip, i) => (
+                          <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
+                        ))}
+                      </ul>
+                    </div>
                   </Card>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <Btn variant="accent" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "today")}>
