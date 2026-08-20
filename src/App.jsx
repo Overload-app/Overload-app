@@ -829,7 +829,7 @@ function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
   );
 }
 
-function EmailConfirmedScreen({ onBackToLogin }) {
+function EmailConfirmedScreen({ onContinue }) {
   return (
     <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
@@ -846,12 +846,12 @@ function EmailConfirmedScreen({ onBackToLogin }) {
           Email confirmed
         </h1>
         <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 14, lineHeight: 1.6, maxWidth: 360 }}>
-          Your account is active. Head back and sign in to get started.
+          Your account is active. If you started signing up on another tab or the home screen, you can just go back there — it'll sign you in on its own.
         </p>
       </div>
       <div>
-        <Btn variant="accent" onClick={onBackToLogin} style={{ width: "100%", padding: 16 }}>
-          Back to sign in <ChevronRight size={18} />
+        <Btn variant="accent" onClick={onContinue} style={{ width: "100%", padding: 16 }}>
+          Continue to Overload <ChevronRight size={18} />
         </Btn>
       </div>
     </div>
@@ -1948,8 +1948,10 @@ function buildCoachSystem(state) {
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${(p.injuries || []).join(",") || "none"}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
-Version history — earlier versions of the program/targets, saved automatically each time you changed them, most recent first (index 0 = the version right before the current one). Use this if the user wants to undo/revert/go back to something earlier: ${JSON.stringify(historySummary)}
-IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_LIMIT} saved versions. If they've made more changes than that over time, their true original (from when they first set up the app) may no longer be in this list — the oldest entry here is simply the oldest one still available, not necessarily their literal original. If the user disputes that a restored version matches what they remember, or if you're restoring to the oldest available entry and they're asking specifically for "the very first" or "original" version, be honest that this history only goes back so far and you can't verify anything earlier than the oldest entry shown — don't confidently assert something is their "true original" when you can't actually know that.
+Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
+
+Version history — MORE RECENT changes only (not the original), saved automatically each time you changed something, most recent first (index 0 = the version right before the current one). Use this for "undo that last change" / "go back to before I did X" type requests, where X is a specific recent change, NOT for "my original / how I started / right after the quiz" — use "restoreOriginal" for that instead, since it's always reliable regardless of history depth: ${JSON.stringify(historySummary)}
+IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_LIMIT} saved versions, so it may not reach back to a specific older change they're describing. If nothing in it plausibly matches, say so honestly rather than guessing at an index.
 
 SCOPE: You only discuss this person's training, workouts, exercise technique, nutrition/diet, recovery, and their use of this app. If a message is about anything else — general knowledge, current events, coding, other apps, personal advice unrelated to fitness, or literally anything outside training/nutrition/this app — do NOT answer it, even briefly or partially. Instead, in "reply", write ONE short sentence redirecting them back to fitness/nutrition topics (e.g. "I'm just here for your training and nutrition — happy to help with that!"). Do not explain why in detail, do not apologize at length, do not engage with the off-topic content at all, even to say you can't help with it specifically — keep the redirect generic and brief. Set "program", "todayOverride", and "targets" to null in this case.
 
@@ -1965,14 +1967,19 @@ Worked example — user says "my knees hurt, adjust leg day for today": this is 
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 
-Worked example for reverting — user says "go back to the original workout and diet, before we switched to muscle focus": look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. Even though those three fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
+Worked example for reverting to a RECENT change — user says "go back to before we switched to muscle focus" (a specific, recent change): look through the version history above to find the entry that matches what they're describing (using dayNames/splitName/calories and the "savedAt" order to judge which one), and set "restoreIndex" to that entry's index. Set "restoreOriginal" to false, and "program", "todayOverride", and "targets" all to null in this case — the app applies the restore itself from the saved snapshot, you don't need to (and shouldn't try to) reconstruct it yourself. If nothing in the history plausibly matches what they're describing, say so honestly in "reply" and ask them to describe what they want instead, rather than guessing.
+
+Worked example for reverting to the ORIGINAL — user says "go back to my original program," "how it was right after the quiz," "undo everything and start over": set "restoreOriginal" to true, and "restoreIndex", "program", "todayOverride", and "targets" all to null — the app restores the permanently-kept original itself. This is the reliable path for "original," unlike "restoreIndex" which can only reach as far back as the rolling history goes.
+
+In both worked examples above, even though most fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
 
 Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
+- "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
@@ -2672,11 +2679,6 @@ export default function App() {
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [confirmEmailPending, setConfirmEmailPending] = useState(null);
   const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
-  // Distinct from justConfirmedEmail (which only controls whether the
-  // confirmation screen itself is showing) — this stays true after they tap
-  // "Back to sign in" so Login knows to default to sign-in mode rather than
-  // the normal sign-up-first default.
-  const [cameFromEmailConfirm, setCameFromEmailConfirm] = useState(false);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
@@ -2707,25 +2709,18 @@ export default function App() {
     (async () => {
       // Clicking the confirmation link in the signup email lands back here
       // with type=signup in the URL and (by default) a live session already
-      // created. Rather than silently drop the person straight into the
-      // app, show an explicit "email confirmed, sign in" step — clearer for
-      // people following an "add to home screen" walkthrough, and it means
-      // signing in is always a deliberate action rather than something that
-      // happened to them via an email click.
+      // created. This tab shows a clean "email confirmed" screen rather than
+      // dropping straight into the app — but crucially keeps the session
+      // alive (no signOut) so that whoever's still on the original "check
+      // your email" tab (same browser, same origin, so it shares this
+      // session via localStorage) picks it up and signs itself in
+      // automatically. That's the point: someone who added the app to
+      // their home screen and confirms via the Mail app shouldn't have to
+      // come back and log in by hand.
       const params = new URLSearchParams(window.location.hash.replace(/^#/, "") + "&" + window.location.search.replace(/^\?/, ""));
       if (params.get("type") === "signup") {
         window.history.replaceState(null, "", window.location.pathname);
-        try {
-          await supabase.auth.signOut();
-        } catch (e) {
-          // Even if the network call to invalidate the session hiccups, still
-          // show the confirmation screen rather than getting stuck loading —
-          // worst case they're auto-signed-in if they back out to the app,
-          // which is harmless (they'd just need to sign in again next time).
-          console.error("signOut after email confirmation failed", e);
-        }
         setJustConfirmedEmail(true);
-        setCameFromEmailConfirm(true);
         setLoading(false);
         return;
       }
@@ -2752,6 +2747,25 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  // While showing "check your email," poll for the session appearing —
+  // this is what actually signs someone in automatically the moment they
+  // confirm via a link opened in a different tab/context (Mail app's
+  // in-app browser, etc.), since that tab shares this browser's session
+  // storage. Without this, confirming would only ever affect whichever tab
+  // the link itself opened, not the one they were originally on.
+  useEffect(() => {
+    if (!confirmEmailPending) return;
+    const interval = setInterval(async () => {
+      const { data: { session: sbSession } } = await supabase.auth.getSession();
+      if (sbSession?.user) {
+        clearInterval(interval);
+        setConfirmEmailPending(null);
+        await hydrateAccount(sbSession.user);
+      }
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [confirmEmailPending]);
+
   async function hydrateAccount(user) {
     const profileRow = await loadProfile(user.id);
     setAccount({ id: user.id, name: profileRow?.name || user.user_metadata?.name || "", email: user.email });
@@ -2761,8 +2775,38 @@ export default function App() {
     // Backfills tips/alternatives onto programs saved before those features
     // existed, so existing accounts get offline-capable "How to do it" tips
     // and swap alternatives immediately on next load, no AI call needed.
-    setState(loaded && loaded.program ? { ...loaded, program: normalizeProgramTips(loaded.program) } : loaded);
+    let finalState = loaded && loaded.program ? { ...loaded, program: normalizeProgramTips(loaded.program) } : loaded;
+
+    // Backfills a permanent originalProgram for accounts created before that
+    // existed — best-effort using the oldest entry still in their recent
+    // history, or the current program itself if they've never changed it
+    // (in which case current genuinely IS the original). Saved directly via
+    // saveState rather than persist(), since account/state React state
+    // isn't guaranteed settled yet at this point in the load sequence.
+    if (finalState && finalState.program && !finalState.originalProgram) {
+      const history = finalState.programHistory || [];
+      const oldest = history.length > 0 ? history[history.length - 1] : null;
+      finalState = {
+        ...finalState,
+        originalProgram: oldest ? oldest.program : finalState.program,
+        originalTargets: oldest ? oldest.targets : finalState.targets,
+      };
+      saveState(user.id, finalState);
+    }
+
+    setState(finalState);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
+  }
+
+  // Used by the "Email confirmed" screen's continue button — the session
+  // was never signed out (see the type=signup handling above), so this just
+  // picks it up and enters the app, same as opening the app normally.
+  async function continueIntoApp() {
+    const { data: { session: sbSession } } = await supabase.auth.getSession();
+    if (sbSession?.user) {
+      await hydrateAccount(sbSession.user);
+    }
+    setJustConfirmedEmail(false);
   }
 
   async function checkSubscription() {
@@ -2877,6 +2921,7 @@ export default function App() {
       const hasValidTargets = t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
       const hasNewProgram = parsed.program && Array.isArray(parsed.program.days) && !hasOverride;
       const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
+      const restoreOriginal = parsed.restoreOriginal === true;
 
       // Diagnostics: flag cases that look like a bug so they're visible in the
       // console without needing to guess after the fact.
@@ -2886,13 +2931,33 @@ export default function App() {
       if (restoreIdx !== null && !(stateRef.current.programHistory || [])[restoreIdx]) {
         console.warn("Coach set restoreIndex=" + restoreIdx + " but no matching history entry exists. History length: " + (stateRef.current.programHistory || []).length);
       }
+      if (restoreOriginal && !stateRef.current.originalProgram) {
+        console.warn("Coach set restoreOriginal=true but this account has no originalProgram saved.");
+      }
       const revertKeywords = /\b(go back|revert|undo|original|before|forget)\b/i;
-      if (revertKeywords.test(trimmed) && restoreIdx === null && !hasNewProgram && !hasValidTargets) {
-        console.warn("Message looked like a revert request but nothing changed (no restoreIndex, program, or targets set). Full parsed response: " + JSON.stringify(parsed));
+      if (revertKeywords.test(trimmed) && restoreIdx === null && !restoreOriginal && !hasNewProgram && !hasValidTargets) {
+        console.warn("Message looked like a revert request but nothing changed (no restoreIndex, restoreOriginal, program, or targets set). Full parsed response: " + JSON.stringify(parsed));
       }
 
       persist((prev) => {
         const history = prev.programHistory || [];
+
+        // Restoring the permanently-kept original — always reliable,
+        // regardless of how deep programHistory goes (or has already rolled
+        // past). Checked first since it's the more specific/intentional ask.
+        if (restoreOriginal && prev.originalProgram) {
+          const newHistory = [
+            { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
+            ...history,
+          ].slice(0, PROGRAM_HISTORY_LIMIT);
+          return {
+            ...prev,
+            coachChat: withReply,
+            program: prev.originalProgram,
+            targets: prev.originalTargets,
+            programHistory: newHistory,
+          };
+        }
 
         // Restoring from a saved snapshot: apply the exact stored program/targets,
         // never something the model reconstructed from memory.
@@ -3012,6 +3077,12 @@ export default function App() {
   function handleOnboarded({ profile, program, targets }) {
     const fresh = {
       profile, program, targets,
+      // Kept forever, separate from programHistory (which only holds the
+      // most recent PROGRAM_HISTORY_LIMIT changes and can age out) — this
+      // is what "back to my original program" restores, guaranteed, no
+      // matter how many changes happen afterward.
+      originalProgram: program,
+      originalTargets: targets,
       logs: { workouts: [], nutrition: [], bodyweight: [{ date: todayISO(), weight: profile.weightLb }] },
       coachChat: DEFAULT_COACH_MESSAGES,
       todayOverride: null,
@@ -3142,7 +3213,7 @@ export default function App() {
         <style>{FONT_IMPORT}</style>
         <style>{SHELL_CSS}</style>
         {justConfirmedEmail ? (
-          <EmailConfirmedScreen onBackToLogin={() => setJustConfirmedEmail(false)} />
+          <EmailConfirmedScreen onContinue={continueIntoApp} />
         ) : confirmEmailPending ? (
           <ConfirmEmailScreen
             email={confirmEmailPending}
@@ -3150,7 +3221,7 @@ export default function App() {
             onBackToLogin={() => setConfirmEmailPending(null)}
           />
         ) : (
-          <Login onSignUp={handleSignUp} onSignIn={handleSignIn} onForgotPassword={handleForgotPassword} initialMode={cameFromEmailConfirm ? "signin" : undefined} />
+          <Login onSignUp={handleSignUp} onSignIn={handleSignIn} onForgotPassword={handleForgotPassword} />
         )}
       </div>
     );
