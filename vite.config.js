@@ -48,10 +48,13 @@ export default defineConfig({
     }),
   ],
   test: {
-    // Pure-logic tests only (program generation, macro math, exercise
-    // matching) — none of it touches the DOM, so the plain node
-    // environment is enough and keeps `npm test` fast.
+    // Plain node by default (fast, no DOM) — component test files opt into
+    // jsdom individually via a `// @vitest-environment jsdom` comment.
     environment: "node",
-    globals: false,
+    // Needed for React Testing Library's automatic cleanup between tests:
+    // it registers itself onto a global afterEach, which only exists when
+    // this is on. App.test.js's explicit `import { ... } from "vitest"`
+    // keeps working unaffected either way.
+    globals: true,
   },
 });

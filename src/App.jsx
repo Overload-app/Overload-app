@@ -806,7 +806,7 @@ function Btn({ children, onClick, variant = "primary", style, disabled }) {
 /* ============================================================
    LOGIN
 ============================================================ */
-function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
+export function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
   const [resending, setResending] = useState(false);
   const [resent, setResent] = useState(false);
   const [error, setError] = useState("");
@@ -860,7 +860,7 @@ function ConfirmEmailScreen({ email, onResend, onBackToLogin }) {
   );
 }
 
-function EmailConfirmedScreen({ onContinue }) {
+export function EmailConfirmedScreen({ onContinue }) {
   return (
     <div className="auth-screen" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "calc(28px + env(safe-area-inset-top, 0px)) 28px 28px", background: T.ink, color: "#fff" }}>
       <style>{FONT_IMPORT}</style>
@@ -889,7 +889,7 @@ function EmailConfirmedScreen({ onContinue }) {
   );
 }
 
-function Login({ onSignUp, onSignIn, onForgotPassword, initialMode }) {
+export function Login({ onSignUp, onSignIn, onForgotPassword, initialMode }) {
   const [mode, setMode] = useState(initialMode || "signup"); // "signup" | "signin" | "forgot"
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -2050,7 +2050,7 @@ const DEFAULT_COACH_MESSAGES = [
   { role: "assistant", text: "Hey — I'm your coach. Ask me to adjust your program: swap an exercise, work around an injury, add volume, change your split, or anything else." },
 ];
 
-function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
+export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
@@ -2537,7 +2537,7 @@ function ExerciseProgress({ logs }) {
   );
 }
 
-function Progress({ state, addWeight, removeWeight }) {
+export function Progress({ state, addWeight, removeWeight }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
@@ -2630,7 +2630,7 @@ function Progress({ state, addWeight, removeWeight }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
