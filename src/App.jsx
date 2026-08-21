@@ -203,7 +203,7 @@ async function fetchSimilarExercises(name, equipment, injuries) {
 /* ============================================================
    EXERCISE POOLS
 ============================================================ */
-const POOLS = {
+export const POOLS = {
   full: {
     chest: ["Barbell Bench Press", "Incline DB Press", "Cable Fly", "Weighted Dip"],
     back: ["Barbell Row", "Lat Pulldown", "Seated Cable Row", "Pull-Up"],
@@ -233,7 +233,7 @@ const POOLS = {
   },
 };
 
-const INJURY_EXCLUDES = {
+export const INJURY_EXCLUDES = {
   knees: ["Squat", "Lunge", "Leg Press", "Leg Extension", "Step-Up", "Split Squat", "Wall Sit"],
   shoulders: ["Overhead Press", "Lateral Raise", "Dip", "Push-Up", "Handstand", "Pike Push-Up", "Rear Delt Fly", "Y-Raise", "Arnold Press"],
   lower_back: ["Deadlift", "Row", "Good Morning"],
@@ -437,12 +437,12 @@ export function tipsForExercise(name) {
 // lookup first (falling back to the pool only if offline). Papering over it
 // here would make every exercise look "already handled" and the AI-sourced
 // upgrade would never get a chance to run.
-function withTips(exercises) {
+export function withTips(exercises) {
   return (exercises || []).map((ex) => (
     Array.isArray(ex.tips) && ex.tips.length > 0 ? ex : { ...ex, tips: tipsForExercise(ex.name) }
   ));
 }
-function normalizeProgramTips(program) {
+export function normalizeProgramTips(program) {
   if (!program) return program;
   return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
 }
@@ -461,15 +461,15 @@ const DAY_TEMPLATES = {
   coreWeakPoint: [["core", 3], ["shoulders", 1], ["legs", 1]],
 };
 
-const GOAL_SCHEME = {
+export const GOAL_SCHEME = {
   lose: { sets: 3, reps: "12-15", rest: 60, label: "Fat Loss" },
   build: { sets: 4, reps: "8-12", rest: 90, label: "Muscle Gain" },
   recomp: { sets: 3, reps: "10-12", rest: 75, label: "Lose Fat & Build Muscle" },
 };
 
-const DURATION_CAP = { 30: 4, 45: 5, 60: 6, 75: 8 };
+export const DURATION_CAP = { 30: 4, 45: 5, 60: 6, 75: 8 };
 
-function capFor(profile) {
+export function capFor(profile) {
   let cap = DURATION_CAP[profile.sessionLength] || 6;
   if (profile.experience === "advanced") cap += 1;
   if (profile.experience === "beginner") cap -= 1;
@@ -491,7 +491,7 @@ function buildDay(kind, pool, goal, cap, offset) {
 // and an advanced lifter training the same number of days per week should not
 // necessarily land on the same split. This mirrors the guidance given to the AI
 // generator and is used as the offline fallback if that call ever fails.
-function splitForDays(days, experience) {
+export function splitForDays(days, experience) {
   if (days <= 3) return { key: "full3", labels: ["Full Body A", "Full Body B", "Full Body C"], kinds: ["full", "full", "full"] };
   if (days === 4) return { key: "ul4", labels: ["Upper A", "Lower A", "Upper B", "Lower B"], kinds: ["upper", "lower", "upper", "lower"] };
   if (days === 5) {
@@ -614,7 +614,7 @@ export function calcTargets(profile) {
 function localStateKey(userId) { return `overload_state_${userId}`; }
 function pendingSyncKey(userId) { return `overload_pending_sync_${userId}`; }
 
-function readLocalState(userId) {
+export function readLocalState(userId) {
   try {
     const raw = localStorage.getItem(localStateKey(userId));
     return raw ? JSON.parse(raw) : null;
@@ -624,17 +624,17 @@ function readLocalState(userId) {
     return null;
   }
 }
-function writeLocalState(userId, state) {
+export function writeLocalState(userId, state) {
   try {
     localStorage.setItem(localStateKey(userId), JSON.stringify(state));
   } catch (e) {
     console.error("writeLocalState failed", e);
   }
 }
-function hasPendingSync(userId) {
+export function hasPendingSync(userId) {
   try { return localStorage.getItem(pendingSyncKey(userId)) === "1"; } catch (e) { return false; }
 }
-function setPendingSync(userId, pending) {
+export function setPendingSync(userId, pending) {
   try {
     if (pending) localStorage.setItem(pendingSyncKey(userId), "1");
     else localStorage.removeItem(pendingSyncKey(userId));
@@ -712,8 +712,29 @@ function trialDaysLeft(startedAt) {
   return Math.max(0, Math.ceil((TRIAL_DAYS * 24 * 60 * 60 * 1000 - elapsed) / (24 * 60 * 60 * 1000)));
 }
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+// Local calendar date as "YYYY-MM-DD" — deliberately NOT toISOString()
+// (which is UTC), since that shifts the day boundary by several hours for
+// anyone not near UTC. A meal logged at 11pm Pacific time should land on
+// that Pacific calendar day, not roll over to "tomorrow" because it's
+// already past midnight UTC.
+export function dateToISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+export function todayISO() {
+  return dateToISO(new Date());
+}
+// The inverse of dateToISO — parses one of our own stored "YYYY-MM-DD"
+// strings back into a Date representing LOCAL midnight of that day.
+// Deliberately not `new Date(dateString)`: per spec, a bare date-only ISO
+// string parses as UTC midnight, which silently shifts to the wrong local
+// calendar day (and even the wrong month, near a month boundary) for
+// anyone not near UTC.
+export function parseISODate(s) {
+  const [y, m, day] = s.split("-").map(Number);
+  return new Date(y, m - 1, day);
 }
 
 /* ============================================================
@@ -936,7 +957,11 @@ function Login({ onSignUp, onSignIn, onForgotPassword, initialMode }) {
           )}
           <div>
             <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Email</label>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" style={inputStyle} />
+            <input
+              value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email"
+              onKeyDown={(e) => e.key === "Enter" && mode === "forgot" && submit()}
+              style={inputStyle}
+            />
           </div>
           {mode !== "forgot" && (
             <div>
@@ -1025,7 +1050,11 @@ function SetNewPasswordScreen({ onSetPassword }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 20 }}>
           <div>
             <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>New password</label>
-            <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" type="password" style={inputStyle} />
+            <input
+              value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" type="password"
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+              style={inputStyle}
+            />
           </div>
           <div>
             <label style={{ fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>Confirm password</label>
@@ -1389,7 +1418,7 @@ function Onboarding({ onComplete }) {
             Your plan,<br />built from<br /><span style={{ color: T.charge }}>your numbers.</span>
           </h1>
           <p style={{ fontFamily: "'Inter', sans-serif", color: "#B9BEC6", fontSize: 15, lineHeight: 1.5, marginTop: 18, maxWidth: 320 }}>
-            A 13-question quiz covers your goals, injuries, physique targets, and schedule. You'll get a full program, calorie & macro targets — and an AI coach on call to fine-tune it any time.
+            A {QUIZ_STEPS.length}-question quiz covers your goals, injuries, physique targets, and schedule. You'll get a full program, calorie & macro targets — and an AI coach on call to fine-tune it any time.
           </p>
         </div>
         <Btn variant="accent" onClick={() => setStep(0)} style={{ width: "100%", padding: "16px" }}>
@@ -1842,7 +1871,18 @@ function Home({ state, setActiveTab, startWorkout }) {
   const today = todayISO();
   const todayMeals = (logs.nutrition.find((d) => d.date === today) || { meals: [] }).meals;
   const cals = todayMeals.reduce((a, m) => a + m.cal, 0);
-  const thisWeek = logs.workouts.filter((w) => (new Date() - new Date(w.date)) / 86400000 < 7).length;
+  // Built from the same last-7-local-calendar-days set logic as weekStreak,
+  // rather than raw Date subtraction — mixing a UTC-parsed date-only string
+  // against a local "now" silently drifts by hours depending on timezone.
+  const thisWeek = (() => {
+    const last7 = new Set();
+    const cursor = new Date();
+    for (let i = 0; i < 7; i++) {
+      last7.add(dateToISO(cursor));
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    return logs.workouts.filter((w) => last7.has(w.date)).length;
+  })();
 
   return (
     <div style={{ padding: "20px 16px 90px" }}>
@@ -2403,7 +2443,7 @@ function monthKey(d) {
 
 function MonthlySummary({ logs }) {
   const now = new Date();
-  const monthWorkouts = logs.workouts.filter((w) => monthKey(new Date(w.date)) === monthKey(now));
+  const monthWorkouts = logs.workouts.filter((w) => monthKey(parseISODate(w.date)) === monthKey(now));
   const totalSets = monthWorkouts.reduce((a, w) => a + w.exercises.reduce((b, e) => b + e.logged.filter((l) => l.done).length, 0), 0);
   const totalVolume = monthWorkouts.reduce(
     (a, w) => a + w.exercises.reduce((b, e) => b + e.logged.reduce((c, l) => c + (l.done && l.weight && l.reps ? Number(l.weight) * Number(l.reps) : 0), 0), 0),
@@ -2504,7 +2544,7 @@ function Progress({ state, addWeight, removeWeight }) {
   const totalWorkouts = logs.workouts.length;
   const weekStreak = (() => {
     const dateSet = new Set(logs.workouts.map((w) => w.date));
-    const toISO = (d) => d.toISOString().slice(0, 10);
+    const toISO = dateToISO; // local calendar date, matching how w.date was stored
     let streak = 0;
     let cursor = new Date();
     for (;;) {
@@ -2593,6 +2633,7 @@ function Progress({ state, addWeight, removeWeight }) {
 function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
+  const [confirmReset, setConfirmReset] = useState(false);
 
   async function openManageSubscription() {
     setPortalLoading(true);
@@ -2693,8 +2734,19 @@ function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActiv
 
       <TickRule label="Reset" />
       <Card>
-        <p style={{ fontSize: 13, color: T.steelDark, marginTop: 0 }}>Retake the quiz to regenerate your program and macro targets from scratch. This clears all logged history for this account.</p>
-        <Btn variant="ghost" onClick={resetAll} style={{ width: "100%" }}><RotateCcw size={16} /> Retake quiz & reset</Btn>
+        <p style={{ fontSize: 13, color: T.steelDark, marginTop: 0 }}>Retake the quiz to regenerate your program and macro targets from scratch. This permanently deletes all logged workouts, bodyweight entries, and coach chat history for this account — it cannot be undone.</p>
+        {confirmReset ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <Btn variant="accent" onClick={resetAll} style={{ width: "100%", background: T.protein }}>
+              Yes, permanently delete everything
+            </Btn>
+            <button onClick={() => setConfirmReset(false)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 13, cursor: "pointer", padding: "6px 0" }}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <Btn variant="ghost" onClick={() => setConfirmReset(true)} style={{ width: "100%" }}><RotateCcw size={16} /> Retake quiz & reset</Btn>
+        )}
       </Card>
     </div>
   );
@@ -3376,7 +3428,11 @@ export default function App() {
         </div>
       </div>
 
-      {state.inProgressWorkout && !session && (
+      {/* Guards against a stale saved workout referencing a day that no
+          longer exists — e.g. the Coach permanently shrunk the program's
+          day count while this was paused. Without this check, resuming it
+          would crash trying to render an undefined day. */}
+      {state.inProgressWorkout && !session && state.program.days[state.inProgressWorkout.dayIdx] && (
         <button
           className="resume-bar"
           onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}
@@ -3391,7 +3447,7 @@ export default function App() {
         </button>
       )}
 
-      {session && (
+      {session && state.program.days[session.dayIdx] && (
         <WorkoutSession
           day={
             Array.isArray(state.todayOverride) && state.todayOverride.length > 0
