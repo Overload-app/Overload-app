@@ -83,7 +83,7 @@ const SHELL_CSS = `
 /* ============================================================
    CLAUDE API HELPERS
 ============================================================ */
-const OFFLINE_MESSAGE = "No internet connection — try again once you're back online.";
+export const OFFLINE_MESSAGE = "No internet connection — try again once you're back online.";
 
 function offlineError() {
   const err = new Error(OFFLINE_MESSAGE);
@@ -91,7 +91,7 @@ function offlineError() {
   return err;
 }
 
-async function claudeChat({ system, messages }) {
+export async function claudeChat({ system, messages }) {
   // Fail fast and with a clear reason rather than letting a doomed request
   // hang — every AI feature in the app (Coach, meal suggestions, photo
   // analysis, program generation) routes through here, so this one check
@@ -136,7 +136,7 @@ export function parseJSONLoose(text) {
 // length limit), the JSON won't parse — but "reply" is always written first
 // and is almost always complete even when the tail of the response wasn't.
 // Pull it out directly with a regex instead of showing the raw broken JSON.
-function extractReplyOnly(text) {
+export function extractReplyOnly(text) {
   const match = text.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (!match) return null;
   try {
@@ -191,7 +191,7 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // written directly into the program data, so this live call is the
 // exception, not the normal path. Falls back to the coarser pool-based
 // matching (alternativesFor) at the call site if this fails or is offline.
-async function fetchSimilarExercises(name, equipment, injuries) {
+export async function fetchSimilarExercises(name, equipment, injuries) {
   const equipDesc = equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment";
   const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest exactly 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part"). Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
   const userMsg = `Exercise: ${name}. Available equipment: ${equipDesc}. Injuries/areas to avoid: ${(injuries || []).join(", ") || "none"}.`;
@@ -290,7 +290,7 @@ export function alternativesFor(exerciseName, equipment, injuries) {
   return (pool[group] || []).filter((name) => name !== exerciseName);
 }
 
-function pick(arr, n, offset = 0) {
+export function pick(arr, n, offset = 0) {
   const rotated = arr.slice(offset % arr.length).concat(arr.slice(0, offset % arr.length));
   return rotated.slice(0, Math.min(n, arr.length));
 }
@@ -476,7 +476,7 @@ export function capFor(profile) {
   return Math.max(3, cap);
 }
 
-function buildDay(kind, pool, goal, cap, offset) {
+export function buildDay(kind, pool, goal, cap, offset) {
   const scheme = GOAL_SCHEME[goal];
   let exercises = [];
   DAY_TEMPLATES[kind].forEach(([group, n]) => {
@@ -506,7 +506,7 @@ export function splitForDays(days, experience) {
   return { key: "ppl6", labels: ["Push A", "Pull A", "Legs A", "Push B", "Pull B", "Legs B"], kinds: ["push", "pull", "legs", "push", "pull", "legs"] };
 }
 
-function splitDisplayName(key) {
+export function splitDisplayName(key) {
   return {
     full3: "Full Body",
     ul4: "Upper / Lower",
@@ -701,12 +701,12 @@ async function loadProfile(userId, attempt = 0) {
 }
 
 const TRIAL_DAYS = 30;
-function isTrialActive(startedAt) {
+export function isTrialActive(startedAt) {
   if (!startedAt) return false;
   const elapsed = Date.now() - new Date(startedAt).getTime();
   return elapsed < TRIAL_DAYS * 24 * 60 * 60 * 1000;
 }
-function trialDaysLeft(startedAt) {
+export function trialDaysLeft(startedAt) {
   if (!startedAt) return 0;
   const elapsed = Date.now() - new Date(startedAt).getTime();
   return Math.max(0, Math.ceil((TRIAL_DAYS * 24 * 60 * 60 * 1000 - elapsed) / (24 * 60 * 60 * 1000)));
@@ -2437,7 +2437,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
 /* ============================================================
    PROGRESS
 ============================================================ */
-function monthKey(d) {
+export function monthKey(d) {
   return `${d.getFullYear()}-${d.getMonth()}`;
 }
 
@@ -2475,7 +2475,7 @@ function MonthlySummary({ logs }) {
   );
 }
 
-function exerciseHistory(logs, name) {
+export function exerciseHistory(logs, name) {
   return logs.workouts
     .filter((w) => w.exercises.some((e) => e.name === name))
     .map((w) => {

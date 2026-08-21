@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   calcTargets,
   parseJSONLoose,
@@ -22,6 +22,17 @@ import {
   DURATION_CAP,
   dateToISO,
   parseISODate,
+  extractReplyOnly,
+  pick,
+  buildDay,
+  splitDisplayName,
+  isTrialActive,
+  trialDaysLeft,
+  monthKey,
+  exerciseHistory,
+  claudeChat,
+  fetchSimilarExercises,
+  OFFLINE_MESSAGE,
 } from "./App.jsx";
 
 // Baseline profile fields calcTargets/buildProgram actually read — kept
@@ -667,5 +678,280 @@ describe("dateToISO / parseISODate (local calendar day helpers)", () => {
 
   test("pads single-digit months and days with a leading zero", () => {
     expect(dateToISO(new Date(2026, 0, 5))).toBe("2026-01-05");
+  });
+});
+
+/* ============================================================
+   COACH JSON RECOVERY (when a response gets cut off / doesn't fully parse)
+============================================================ */
+describe("extractReplyOnly", () => {
+  test("pulls the reply text out of otherwise-broken JSON", () => {
+    const truncated = '{"reply": "Done — your program is updated.", "program": {"splitName": "PP';
+    expect(extractReplyOnly(truncated)).toBe("Done — your program is updated.");
+  });
+
+  test("handles escaped quotes inside the reply text", () => {
+    // The JSON text itself (as an actual string, backslashes and all):
+    // {"reply": "Here's your \"updated\" plan.", "program": null}
+    const raw = '{"reply": "Here\'s your \\"updated\\" plan.", "program": null}';
+    expect(extractReplyOnly(raw)).toBe('Here\'s your "updated" plan.');
+  });
+
+  test("returns null when there's no reply field to find", () => {
+    expect(extractReplyOnly("not json and no reply field at all")).toBeNull();
+  });
+});
+
+/* ============================================================
+   PROGRAM-BUILDING INTERNALS (pick / buildDay)
+============================================================ */
+describe("pick", () => {
+  const arr = ["a", "b", "c", "d"];
+
+  test("returns the first n items with no offset", () => {
+    expect(pick(arr, 2)).toEqual(["a", "b"]);
+  });
+
+  test("rotates by the offset before taking n items", () => {
+    expect(pick(arr, 2, 1)).toEqual(["b", "c"]);
+    expect(pick(arr, 2, 2)).toEqual(["c", "d"]);
+  });
+
+  test("wraps around the end of the array", () => {
+    expect(pick(arr, 2, 3)).toEqual(["d", "a"]);
+  });
+
+  test("offset wraps via modulo for values larger than the array length", () => {
+    expect(pick(arr, 2, 3)).toEqual(pick(arr, 2, 3 + arr.length));
+  });
+
+  test("never returns more items than the array actually has", () => {
+    expect(pick(arr, 10)).toHaveLength(arr.length);
+  });
+
+  test("requesting 0 items returns an empty array", () => {
+    expect(pick(arr, 0)).toEqual([]);
+  });
+});
+
+describe("buildDay", () => {
+  const pool = {
+    legs: ["Squat", "RDL", "Leg Press", "Leg Curl", "Calf Raise"],
+    chest: ["Bench Press"],
+    back: ["Row"],
+    shoulders: ["Overhead Press"],
+    core: ["Plank"],
+  };
+
+  test("produces exercises with the sets/reps/rest for the given goal", () => {
+    const day = buildDay("full", pool, "build", 10, 0);
+    const scheme = GOAL_SCHEME.build;
+    for (const ex of day) {
+      expect(ex.sets).toBe(scheme.sets);
+      expect(ex.reps).toBe(scheme.reps);
+      expect(ex.rest).toBe(scheme.rest);
+    }
+  });
+
+  test("never exceeds the given cap", () => {
+    const day = buildDay("full", pool, "recomp", 2, 0);
+    expect(day.length).toBeLessThanOrEqual(2);
+  });
+
+  test("a higher cap allows more exercises (up to what the template requests)", () => {
+    const small = buildDay("full", pool, "recomp", 2, 0);
+    const large = buildDay("full", pool, "recomp", 10, 0);
+    expect(large.length).toBeGreaterThan(small.length);
+  });
+});
+
+describe("splitDisplayName", () => {
+  test("maps every real split key to a non-empty display name", () => {
+    for (const key of ["full3", "ul4", "ppl_ul5", "ppl6", "bodypart5", "bodypart6"]) {
+      const name = splitDisplayName(key);
+      expect(typeof name).toBe("string");
+      expect(name.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("splitForDays always produces a key that splitDisplayName recognizes", () => {
+    for (const days of [3, 4, 5, 6]) {
+      for (const experience of ["beginner", "intermediate", "advanced"]) {
+        const split = splitForDays(days, experience);
+        expect(splitDisplayName(split.key)).toBeTruthy();
+      }
+    }
+  });
+});
+
+/* ============================================================
+   TRIAL LOGIC
+============================================================ */
+describe("isTrialActive / trialDaysLeft", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  test("no start date means no active trial and zero days left", () => {
+    expect(isTrialActive(null)).toBe(false);
+    expect(isTrialActive(undefined)).toBe(false);
+    expect(trialDaysLeft(null)).toBe(0);
+  });
+
+  test("a trial started just now is active with ~30 days left", () => {
+    const now = new Date().toISOString();
+    expect(isTrialActive(now)).toBe(true);
+    expect(trialDaysLeft(now)).toBe(30);
+  });
+
+  test("a trial started 29 days ago is still active with 1 day left", () => {
+    const startedAt = new Date(Date.now() - 29 * DAY).toISOString();
+    expect(isTrialActive(startedAt)).toBe(true);
+    expect(trialDaysLeft(startedAt)).toBe(1);
+  });
+
+  test("a trial started exactly 30 days ago has ended", () => {
+    const startedAt = new Date(Date.now() - 30 * DAY).toISOString();
+    expect(isTrialActive(startedAt)).toBe(false);
+  });
+
+  test("a trial started 45 days ago has ended, with zero (not negative) days left", () => {
+    const startedAt = new Date(Date.now() - 45 * DAY).toISOString();
+    expect(isTrialActive(startedAt)).toBe(false);
+    expect(trialDaysLeft(startedAt)).toBe(0);
+  });
+});
+
+/* ============================================================
+   PROGRESS TAB HELPERS
+============================================================ */
+describe("monthKey", () => {
+  test("same month, different days, produces the same key", () => {
+    expect(monthKey(new Date(2026, 2, 1))).toBe(monthKey(new Date(2026, 2, 28)));
+  });
+
+  test("different months produce different keys, including across a year boundary", () => {
+    expect(monthKey(new Date(2026, 0, 15))).not.toBe(monthKey(new Date(2026, 1, 15)));
+    expect(monthKey(new Date(2025, 11, 31))).not.toBe(monthKey(new Date(2026, 0, 1)));
+  });
+});
+
+describe("exerciseHistory", () => {
+  const logs = {
+    workouts: [
+      { date: "2026-01-01", exercises: [{ name: "Back Squat", logged: [{ weight: "135", reps: "8", done: true }, { weight: "155", reps: "5", done: true }] }] },
+      { date: "2026-01-08", exercises: [{ name: "Back Squat", logged: [{ weight: "165", reps: "5", done: true }] }] },
+      { date: "2026-01-08", exercises: [{ name: "Bench Press", logged: [{ weight: "", reps: "", done: false }] }] },
+    ],
+  };
+
+  test("returns one entry per workout that included the exercise, in date order", () => {
+    const history = exerciseHistory(logs, "Back Squat");
+    expect(history).toHaveLength(2);
+    expect(history[0].date).toBe("2026-01-01");
+    expect(history[1].date).toBe("2026-01-08");
+  });
+
+  test("picks the heaviest logged set as that day's top set", () => {
+    const history = exerciseHistory(logs, "Back Squat");
+    expect(history[0].weight).toBe(155); // heavier of the two sets logged that day
+  });
+
+  test("skips workouts where the exercise was present but nothing was actually logged", () => {
+    const history = exerciseHistory(logs, "Bench Press");
+    expect(history).toHaveLength(0);
+  });
+
+  test("returns an empty array for an exercise never logged", () => {
+    expect(exerciseHistory(logs, "Never Done This")).toEqual([]);
+  });
+});
+
+/* ============================================================
+   claudeChat — offline detection (the mechanism every AI feature in the
+   app relies on: Coach, meal suggestions/photos, program generation,
+   "find similar exercises"). Mocks navigator/fetch to test all three
+   real-world paths without hitting the network.
+============================================================ */
+describe("claudeChat", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("fails fast with an offline error when navigator.onLine is false — never calls fetch", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(claudeChat({ system: "s", messages: [] })).rejects.toMatchObject({ offline: true, message: OFFLINE_MESSAGE });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("treats a fetch()-level failure (DNS, connection refused) as offline too, even if navigator.onLine lied", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+    await expect(claudeChat({ system: "s", messages: [] })).rejects.toMatchObject({ offline: true });
+  });
+
+  test("a real HTTP error from the server is NOT treated as an offline error", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: { message: "Internal server error" } }),
+    }));
+
+    let caught;
+    try {
+      await claudeChat({ system: "s", messages: [] });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught.offline).toBeUndefined();
+    expect(caught.message).toBe("Internal server error");
+  });
+
+  test("on success, joins only the text content blocks from the response", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "hello" }, { type: "tool_use" }, { type: "text", text: "world" }] }),
+    }));
+
+    const result = await claudeChat({ system: "s", messages: [] });
+    expect(result).toBe("hello\nworld");
+  });
+});
+
+describe("fetchSimilarExercises", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("extracts the alternatives array from a well-formed response", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Leg Press", "Hack Squat", "Goblet Squat"]}' }] }),
+    }));
+
+    const alts = await fetchSimilarExercises("Back Squat", "full", []);
+    expect(alts).toEqual(["Leg Press", "Hack Squat", "Goblet Squat"]);
+  });
+
+  test("returns an empty array rather than throwing if the response is missing the field", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: '{"somethingElse": true}' }] }),
+    }));
+
+    expect(await fetchSimilarExercises("Back Squat", "full", [])).toEqual([]);
+  });
+
+  test("propagates the offline error when there's no connection, for the caller to fall back on", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    vi.stubGlobal("fetch", vi.fn());
+
+    await expect(fetchSimilarExercises("Back Squat", "full", [])).rejects.toMatchObject({ offline: true });
   });
 });
