@@ -2349,9 +2349,17 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       )}
 
       {!showForm && (
-        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <Btn variant="primary" style={{ flex: 1 }} onClick={() => setShowForm(true)}><Plus size={16} /> Add meal</Btn>
-          <Btn variant="ghost" style={{ flex: 1 }} onClick={() => fileInputRef.current?.click()}><Camera size={16} /> Photo</Btn>
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn variant="primary" style={{ flex: 1 }} onClick={() => setShowForm(true)}><Plus size={16} /> Add meal</Btn>
+            <Btn variant="ghost" style={{ flex: 1 }} onClick={() => fileInputRef.current?.click()}><Camera size={16} /> Photo</Btn>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 5, marginTop: 8 }}>
+            <Info size={12} color={T.steelDark} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ fontSize: 11, color: T.steelDark, lineHeight: 1.4 }}>
+              Photo scanning uses AI and is usually close, but not exact — always worth a quick double-check.
+            </span>
+          </div>
         </div>
       )}
       <input ref={fileInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handlePhoto} />
