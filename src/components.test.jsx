@@ -11,7 +11,7 @@ import { describe, test, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -296,7 +296,10 @@ describe("<Coach />", () => {
   });
 
   test("shows the remaining daily message count once it's low", () => {
-    setup({ coachUsage: { date: new Date().toISOString().slice(0, 10), count: 25 } });
+    // Use the app's own todayISO() (local calendar day), not toISOString()
+    // (UTC) — the component compares against todayISO(), so this avoids a
+    // flaky mismatch near midnight depending on timezone.
+    setup({ coachUsage: { date: todayISO(), count: 25 } });
     expect(screen.getByText(/5 messages left today/)).toBeInTheDocument();
   });
 });

@@ -2378,6 +2378,12 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         <Card style={{ marginTop: 12 }}>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.ink }}>{photoResult.name}</div>
           {photoResult.note && <div style={{ fontSize: 12, color: T.steelDark, marginTop: 2 }}>{photoResult.note}</div>}
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, padding: "8px 10px", background: T.paper, borderRadius: 8 }}>
+            <Info size={13} color={T.steelDark} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span style={{ fontSize: 11, color: T.steelDark, lineHeight: 1.4 }}>
+              AI estimate — usually close, but not exact. Double-check the numbers below (especially for sauces, oils, and portion size) before logging.
+            </span>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, margin: "10px 0" }}>
             {[["cal", "Calories"], ["protein", "Protein (g)"], ["carb", "Carbs (g)"], ["fat", "Fat (g)"]].map(([k, lab]) => (
               <div key={k}>
