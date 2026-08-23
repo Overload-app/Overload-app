@@ -19,7 +19,7 @@ import {
   POOLS,
   INJURY_EXCLUDES,
   GOAL_SCHEME,
-  DURATION_CAP,
+  secondsPerExercise,
   dateToISO,
   parseISODate,
   extractReplyOnly,
@@ -409,31 +409,43 @@ describe("splitForDays", () => {
   });
 });
 
-describe("capFor", () => {
-  test("beginners get one fewer exercise per day than the base duration cap", () => {
-    expect(capFor({ sessionLength: 60, experience: "beginner" })).toBe(DURATION_CAP[60] - 1);
+describe("secondsPerExercise / capFor", () => {
+  // The actual bug this formula fixes, found from real beta-tester
+  // feedback: a "30-minute" program taking way longer in practice, because
+  // rest time BETWEEN SETS wasn't factored into how many exercises fit.
+  test("a higher-volume goal (more sets, longer rest) takes meaningfully longer per exercise", () => {
+    expect(secondsPerExercise("build")).toBeGreaterThan(secondsPerExercise("lose"));
   });
 
-  test("advanced lifters get one more exercise per day than the base duration cap", () => {
-    expect(capFor({ sessionLength: 60, experience: "advanced" })).toBe(DURATION_CAP[60] + 1);
+  test("beginners get one fewer exercise per day than the base cap for their goal", () => {
+    const base = capFor({ sessionLength: 60, goal: "recomp", experience: "intermediate" });
+    expect(capFor({ sessionLength: 60, goal: "recomp", experience: "beginner" })).toBe(base - 1);
   });
 
-  test("intermediate uses the base duration cap unmodified", () => {
-    expect(capFor({ sessionLength: 60, experience: "intermediate" })).toBe(DURATION_CAP[60]);
+  test("advanced lifters get one more exercise per day than the base cap for their goal", () => {
+    const base = capFor({ sessionLength: 60, goal: "recomp", experience: "intermediate" });
+    expect(capFor({ sessionLength: 60, goal: "recomp", experience: "advanced" })).toBe(base + 1);
   });
 
-  test("never drops below 3 exercises even for a short session and a beginner", () => {
-    expect(capFor({ sessionLength: 30, experience: "beginner" })).toBeGreaterThanOrEqual(3);
+  test("never drops below 3 exercises even for a short session, a beginner, and a high-volume goal", () => {
+    expect(capFor({ sessionLength: 30, goal: "build", experience: "beginner" })).toBeGreaterThanOrEqual(3);
   });
 
-  test("unknown session length falls back to a default of 6 (before experience adjustment)", () => {
-    expect(capFor({ sessionLength: 9999, experience: "intermediate" })).toBe(6);
+  test("a missing goal falls back to a sensible default rather than throwing", () => {
+    expect(() => capFor({ sessionLength: 60, experience: "intermediate" })).not.toThrow();
+    expect(capFor({ sessionLength: 60, experience: "intermediate" })).toBeGreaterThanOrEqual(3);
   });
 
-  test("longer sessions allow strictly more exercises than shorter ones, same experience", () => {
-    const short = capFor({ sessionLength: 30, experience: "intermediate" });
-    const long = capFor({ sessionLength: 75, experience: "intermediate" });
+  test("longer sessions allow strictly more exercises than shorter ones, same goal and experience", () => {
+    const short = capFor({ sessionLength: 30, goal: "recomp", experience: "intermediate" });
+    const long = capFor({ sessionLength: 75, goal: "recomp", experience: "intermediate" });
     expect(long).toBeGreaterThan(short);
+  });
+
+  test("the same session length allows fewer (or equal) exercises for a higher-volume goal", () => {
+    const buildCap = capFor({ sessionLength: 60, goal: "build", experience: "intermediate" });
+    const loseCap = capFor({ sessionLength: 60, goal: "lose", experience: "intermediate" });
+    expect(buildCap).toBeLessThanOrEqual(loseCap);
   });
 });
 

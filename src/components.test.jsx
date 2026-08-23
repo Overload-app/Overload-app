@@ -11,7 +11,7 @@ import { describe, test, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -333,5 +333,73 @@ describe("<EmailConfirmedScreen />", () => {
     render(<EmailConfirmedScreen onContinue={onContinue} />);
     await user.click(screen.getByText("Continue to Overload"));
     expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ============================================================
+   WORKOUT SESSION — rest timer per-set behavior
+   Directly reproduces real beta-tester feedback: "when you skip the workout
+   timer, it shuts it off for the rest of the workout." This test settles
+   whether that's an actual bug or a UX/discoverability issue by literally
+   performing the reported sequence: complete a set, skip its rest timer,
+   then complete a DIFFERENT set and check whether a new timer starts.
+============================================================ */
+describe("<WorkoutSession /> rest timer", () => {
+  function setup() {
+    const day = {
+      name: "Full Body A",
+      exercises: [
+        { name: "Back Squat", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] },
+        { name: "Bench Press", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] },
+      ],
+    };
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+  }
+
+  test("marking a set done starts the rest timer", async () => {
+    const user = userEvent.setup();
+    setup();
+    expect(screen.queryByText("RESTING")).not.toBeInTheDocument();
+    const [squatCheck] = screen.getAllByLabelText("Mark set 1 done and start rest timer");
+    await user.click(squatCheck);
+    expect(screen.getByText("RESTING")).toBeInTheDocument();
+  });
+
+  test("skipping the rest timer only clears THIS set's timer — completing a different set still starts a new one", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    // Complete set 1 (Back Squat) — timer starts.
+    const [squatCheck, benchCheck] = screen.getAllByLabelText("Mark set 1 done and start rest timer");
+    await user.click(squatCheck);
+    expect(screen.getByText("RESTING")).toBeInTheDocument();
+
+    // Skip it.
+    await user.click(screen.getByText(/Skip/));
+    expect(screen.queryByText("RESTING")).not.toBeInTheDocument();
+
+    // Complete the OTHER exercise's set — a fresh timer must start. If this
+    // fails, skipping really did disable the timer for the rest of the
+    // workout, confirming a real bug rather than just a UX gap.
+    await user.click(benchCheck);
+    expect(screen.getByText("RESTING")).toBeInTheDocument();
+  });
+
+  test("unchecking a completed set does not start a rest timer", async () => {
+    const user = userEvent.setup();
+    setup();
+    const [squatCheck] = screen.getAllByLabelText("Mark set 1 done and start rest timer");
+    await user.click(squatCheck); // done -> timer starts
+    await user.click(screen.getByText(/Skip/)); // clear it
+    // Now the button's label has flipped to the "done" variant.
+    const undoBtn = screen.getAllByLabelText(/tap to undo/)[0];
+    await user.click(undoBtn); // done -> not done
+    expect(screen.queryByText("RESTING")).not.toBeInTheDocument();
   });
 });

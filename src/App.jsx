@@ -22,7 +22,12 @@ const T = {
   paper: "#EEF1EF",
   card: "#FFFFFF",
   steel: "#DADFE0",
-  steelDark: "#AEB6B8",
+  // Real contrast failure found from beta-tester feedback ("some grey text
+  // can't actually be seen") — the old #AEB6B8 was only 2.06:1 against
+  // white, less than half WCAG AA's 4.5:1 minimum for normal text. This is
+  // used for secondary/label text all over the app (timestamps, sub-labels,
+  // "how to do it" tips, etc.), so a single token fix covers it everywhere.
+  steelDark: "#5B6470",
   charge: "#4E4AF2",
   chargeDeep: "#332FD0",
   protein: "#E0483E",
@@ -467,10 +472,22 @@ export const GOAL_SCHEME = {
   recomp: { sets: 3, reps: "10-12", rest: 75, label: "Lose Fat & Build Muscle" },
 };
 
-export const DURATION_CAP = { 30: 4, 45: 5, 60: 6, 75: 8 };
+// Real time per exercise, not a guess: actual working time per set, plus
+// the FULL rest period between sets (this used to be ignored, which is
+// exactly why a "30-minute" program could quietly run 45-60+ minutes —
+// "build" alone means 4 sets x 90s rest = 6 minutes of rest on ONE
+// exercise before any lifting or transition time), plus realistic time to
+// move to/set up the next exercise.
+const WORK_SECONDS_PER_SET = 40;
+const TRANSITION_SECONDS_PER_EXERCISE = 75;
+
+export function secondsPerExercise(goal) {
+  const scheme = GOAL_SCHEME[goal] || GOAL_SCHEME.recomp;
+  return scheme.sets * (WORK_SECONDS_PER_SET + scheme.rest) + TRANSITION_SECONDS_PER_EXERCISE;
+}
 
 export function capFor(profile) {
-  let cap = DURATION_CAP[profile.sessionLength] || 6;
+  let cap = Math.floor((profile.sessionLength * 60) / secondsPerExercise(profile.goal));
   if (profile.experience === "advanced") cap += 1;
   if (profile.experience === "beginner") cap -= 1;
   return Math.max(3, cap);
@@ -568,7 +585,9 @@ Client details:
 Split structure guidance for ${profile.daysPerWeek} days/week: ${splitGuidanceFor(profile.daysPerWeek)}
 IMPORTANT: Do not default to an Upper/Lower split out of habit. Actually weigh which valid structure for this day count best serves THIS person's experience level and desired physique, and choose that one — different clients with the same day count should be able to land on different splits if their goals differ. If their desired physique calls out specific areas (e.g. "bigger arms", "glutes", "wider back"), prefer a split structure that lets you dedicate real, undiluted volume to that area rather than folding it into a generic day.
 
-Design a training split and day-by-day program tailored specifically to this person — not a generic template. Weight exercise selection and volume toward their stated desired physique while staying balanced, joint-friendly, and appropriate for their experience level. Choose sets/reps/rest per exercise suited to their goal. Keep each day's exercise count realistic for the target session length (roughly one exercise per 6-8 minutes including warm-up and rest).
+Design a training split and day-by-day program tailored specifically to this person — not a generic template. Weight exercise selection and volume toward their stated desired physique while staying balanced, joint-friendly, and appropriate for their experience level. Choose sets/reps/rest per exercise suited to their goal.
+
+HARD CEILING, not a suggestion: no more than ${capFor(profile)} exercises on any day. Going over this is the single most common way a "${profile.sessionLength}-minute" program actually takes way longer than that in real life — people underestimate how much rest between SETS adds up (this person's goal means ~${GOAL_SCHEME[profile.goal]?.sets ?? 3} sets x ${GOAL_SCHEME[profile.goal]?.rest ?? 75}s rest on every single exercise, before any actual lifting or moving-to-the-next-station time). If you're tempted to add "just one more" exercise to cover something, cut a less important one instead — staying at or under ${capFor(profile)} matters more than covering every muscle group in one session.
 ${profile.specificGoals ? `If they've stated specific performance goals (e.g. a target bench/squat/deadlift number, a bodyweight-strength milestone like a pull-up, a running goal), make sure the relevant lift or movement is programmed directly — include it with a rep/set scheme that actually builds toward that outcome (lower-rep strength work for a numeric lift goal, progressive skill/strength work for a bodyweight milestone), not just buried as one of several accessory options.` : ""}
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
@@ -1005,7 +1024,7 @@ export function Login({ onSignUp, onSignIn, onForgotPassword, initialMode }) {
         {busy ? "One sec…" : mode === "forgot" ? "Send reset link" : mode === "signup" ? "Create account" : "Sign in"} <ChevronRight size={18} />
       </Btn>
       {mode === "signup" && (
-        <p style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 12 }}>
+        <p style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 12 }}>
           By creating an account, you agree to our{" "}
           <a href="/terms.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Terms</a>
           {" "}and{" "}
@@ -1180,10 +1199,10 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
             {trialLoading ? "Starting…" : "Start 30-day free trial instead"}
           </Btn>
         )}
-        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>
+        <div style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 10 }}>
           {trialUsed ? "🔒 Payment secured by Stripe" : "🔒 No card needed for the trial — it just ends after 30 days"}
         </div>
-        <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 6 }}>
+        <div style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 6 }}>
           By subscribing, you agree to our{" "}
           <a href="/terms.html" target="_blank" rel="noopener noreferrer" style={{ color: "#9CA3AF" }}>Terms</a>
           {" "}and{" "}
@@ -1192,7 +1211,7 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
         <button onClick={refresh} disabled={refreshing} style={{ width: "100%", background: "none", border: "none", color: "#B9BEC6", fontSize: 13, padding: "14px 0 4px", cursor: "pointer" }}>
           {refreshing ? "Checking…" : "Already subscribed? Refresh status"}
         </button>
-        <button onClick={onLogout} style={{ width: "100%", background: "none", border: "none", color: "#6B7280", fontSize: 12, padding: "4px 0", cursor: "pointer" }}>
+        <button onClick={onLogout} style={{ width: "100%", background: "none", border: "none", color: "#9CA3AF", fontSize: 12, padding: "4px 0", cursor: "pointer" }}>
           Log out
         </button>
       </div>
@@ -1293,7 +1312,7 @@ function SubscribeOverlay({ account, onClose }) {
           <Btn variant="accent" onClick={startCheckout} disabled={loading} style={{ width: "100%", padding: 16 }}>
             {loading ? "Redirecting…" : "Subscribe now"} <ChevronRight size={18} />
           </Btn>
-          <div style={{ textAlign: "center", fontSize: 11, color: "#6B7280", marginTop: 10 }}>🔒 Payment secured by Stripe</div>
+          <div style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 10 }}>🔒 Payment secured by Stripe</div>
         </div>
       </div>
     </div>
@@ -1554,7 +1573,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
+export function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
   const [sets, setSets] = useState(() =>
     initialSets || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -1651,19 +1670,25 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
     });
   }
 
+  // Real bug found from beta-tester feedback ("skip turns the timer off for
+  // the rest of the workout"): this used to read a "should I start a rest
+  // timer" flag from a variable set inside the setSets() updater, right
+  // after calling setSets() — React doesn't guarantee that updater runs
+  // synchronously, so the flag could still read as stale/false, silently
+  // skipping the new timer. Same root cause as the earlier persist() bug —
+  // fixed the same way, by triggering the side effect from inside the
+  // updater itself, where the computed value is always current.
   function toggleDone(exIdx, setIdx) {
-    let willStartRest = false;
     setSets((s) => {
       const copy = s.map((e) => ({ ...e, logged: e.logged.map((l) => ({ ...l })) }));
       const newVal = !copy[exIdx].logged[setIdx].done;
       copy[exIdx].logged[setIdx].done = newVal;
-      if (newVal) willStartRest = true;
+      if (newVal) {
+        const restSeconds = copy[exIdx].rest;
+        setRest({ seconds: restSeconds, total: restSeconds });
+      }
       return copy;
     });
-    if (willStartRest) {
-      const restSeconds = sets[exIdx].rest;
-      setRest({ seconds: restSeconds, total: restSeconds });
-    }
   }
 
   function lastFor(name) {
@@ -1698,6 +1723,16 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
         )}
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        {/* Direct answer to real beta-tester confusion: she didn't realize
+            the checkmark both logs the set AND starts a rest timer. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.card, border: `1px solid ${T.steel}`, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+          <div style={{ width: 24, height: 24, borderRadius: 6, background: T.steel, color: "#fff", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Check size={14} />
+          </div>
+          <span style={{ fontSize: 12, color: T.steelDark, lineHeight: 1.4 }}>
+            Enter your weight and reps, then tap the checkmark to log that set and start your rest timer.
+          </span>
+        </div>
         {sets.map((ex, exIdx) => (
           <Card key={exIdx} style={{ marginBottom: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -1747,6 +1782,7 @@ function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCan
                   />
                   <button
                     onClick={() => toggleDone(exIdx, setIdx)}
+                    aria-label={l.done ? `Set ${setIdx + 1} done, tap to undo` : `Mark set ${setIdx + 1} done and start rest timer`}
                     style={{
                       width: 34, height: 34, borderRadius: 8, border: "none", flexShrink: 0,
                       background: l.done ? T.good : T.steel, color: "#fff", cursor: "pointer",
@@ -1940,7 +1976,7 @@ function Home({ state, setActiveTab, startWorkout }) {
   );
 }
 
-function Train({ state, startWorkout }) {
+function Train({ state, startWorkout, setActiveTab }) {
   const { program, logs } = state;
   const nextIdx = logs.workouts.length % program.days.length;
   return (
@@ -1948,6 +1984,19 @@ function Train({ state, startWorkout }) {
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>YOUR PROGRAM</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>{program.splitName}</h1>
       <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>{program.days.length}-day rotating split · tap a day to log it</p>
+
+      {/* Direct answer to real beta-tester confusion: she wanted a
+          different split but didn't know she could just ask for one. */}
+      <button
+        onClick={() => setActiveTab("coach")}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "#EEEDFF", border: "none", borderRadius: 10, padding: "10px 12px", marginTop: 10, cursor: "pointer", width: "100%", textAlign: "left" }}
+      >
+        <Sparkles size={14} color={T.charge} style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12, color: T.chargeDeep, fontWeight: 600, flex: 1 }}>
+          Don't like this split, or want different exercises? Just tell your Coach — tap here.
+        </span>
+        <ChevronRight size={14} color={T.chargeDeep} style={{ flexShrink: 0 }} />
+      </button>
 
       <TickRule label="Sessions" />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -3395,7 +3444,7 @@ export default function App() {
             );
           })}
         </div>
-        <button onClick={handleLogout} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 12px", borderRadius: 10, border: "none", cursor: "pointer", background: "transparent", color: "#6B7280", fontSize: 13, textAlign: "left" }}>
+        <button onClick={handleLogout} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 12px", borderRadius: 10, border: "none", cursor: "pointer", background: "transparent", color: "#9CA3AF", fontSize: 13, textAlign: "left" }}>
           <LogOut size={17} /> Log out
         </button>
       </div>
@@ -3414,7 +3463,7 @@ export default function App() {
         )}
         <div className="app-main-inner">
           {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
-          {activeTab === "train" && <Train state={state} startWorkout={startWorkout} />}
+          {activeTab === "train" && <Train state={state} startWorkout={startWorkout} setActiveTab={setActiveTab} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} />}
