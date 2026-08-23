@@ -151,6 +151,33 @@ export function extractReplyOnly(text) {
   }
 }
 
+// What the Coach's parsed JSON response actually DOES, independent of what its
+// "reply" text claims — shared by the fallback-reply text below and by the
+// persist logic that applies the change, so the two can never disagree about
+// whether a given turn was a real, lasting change.
+export function coachResponseFlags(parsed) {
+  const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
+  const t = parsed.targets;
+  const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
+  const hasNewProgram = !!(parsed.program && Array.isArray(parsed.program.days) && !hasOverride);
+  const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
+  const restoreOriginal = parsed.restoreOriginal === true;
+  const madeChange = hasOverride || hasValidTargets || hasNewProgram || restoreOriginal || restoreIdx !== null;
+  return { hasOverride, hasValidTargets, hasNewProgram, restoreIdx, restoreOriginal, madeChange };
+}
+
+// Falling back to a confident "Done!" whenever the model left "reply" blank
+// used to be misleading on exactly the turn where it mattered most: if the
+// response ALSO didn't set program/todayOverride/targets/restore, nothing
+// actually changed, and "Done!" told the user otherwise anyway — a plausible
+// root cause for a report like "the coach said done but the exercise I asked
+// to remove is still there." Only claim success by default when a real
+// change is actually present in this response.
+export function coachReplyText(parsed, madeChange) {
+  return (parsed.reply && parsed.reply.trim())
+    || (madeChange ? "Done!" : "Hmm, I didn't quite catch that — mind rephrasing what you'd like changed?");
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -450,6 +477,28 @@ export function withTips(exercises) {
 export function normalizeProgramTips(program) {
   if (!program) return program;
   return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
+}
+
+// The AI writes each day's own name freely (e.g. "Push (Chest/Triceps/Shoulders)"
+// or "Push A") AND used to write a separate free-text splitName describing the
+// pattern as a whole — a second copy of the same fact, in the model's own words,
+// that can quietly drift out of sync after a few back-and-forth chat edits (a
+// user swapping/removing an exercise, renaming a day) even though the day list
+// itself stayed correct the whole time. Deriving the label straight from the
+// day names instead of trusting a second AI-written field means there's only
+// one source of truth, so the label can never say something the schedule
+// doesn't actually match. Mirrors the naming convention splitDisplayName()
+// already uses for the offline path (e.g. "Push / Pull / Legs", not
+// "Push A / Pull A / Legs A / Push B / Pull B / Legs B").
+export function deriveSplitName(days) {
+  const categories = (days || [])
+    .map((d) => {
+      let name = (d.name || "").split(/[\(\-–—]/)[0].trim();
+      name = name.replace(/\s+[A-Za-z]$/, ""); // drop a trailing "A"/"B" day-letter suffix
+      return name;
+    })
+    .filter(Boolean);
+  return [...new Set(categories)].join(" / ");
 }
 
 const DAY_TEMPLATES = {
@@ -1398,7 +1447,7 @@ function Onboarding({ onComplete }) {
       });
       const parsed = parseJSONLoose(raw);
       if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
-        program = { splitName: parsed.splitName || program.splitName, days: parsed.days };
+        program = { splitName: deriveSplitName(parsed.days) || program.splitName, days: parsed.days };
       }
     } catch (e) {
       // Fall back silently to the rule-based program below.
@@ -2078,6 +2127,7 @@ Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, 
 {"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
 
 Rules:
+- For a PERMANENT change (case 1 above), always build the new "days" by editing the exact "Current program JSON" given above — never reconstruct the program from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the "days" you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
 - Only include exercises doable with their equipment (${p.equipment}).
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
@@ -3061,14 +3111,9 @@ export default function App() {
         };
       }
       console.log("Coach response received:", JSON.stringify(parsed));
-      const replyText = (parsed.reply && parsed.reply.trim()) || "Done!";
+      const { hasOverride, hasValidTargets, hasNewProgram, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);
+      const replyText = coachReplyText(parsed, madeChange);
       const withReply = [...withUser, { role: "assistant", text: replyText }];
-      const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
-      const t = parsed.targets;
-      const hasValidTargets = t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
-      const hasNewProgram = parsed.program && Array.isArray(parsed.program.days) && !hasOverride;
-      const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
-      const restoreOriginal = parsed.restoreOriginal === true;
 
       // Diagnostics: flag cases that look like a bug so they're visible in the
       // console without needing to guess after the fact.
@@ -3133,7 +3178,7 @@ export default function App() {
           return {
             ...prev,
             coachChat: withReply,
-            program: hasNewProgram ? normalizeProgramTips({ splitName: parsed.program.splitName || prev.program.splitName, days: parsed.program.days }) : prev.program,
+            program: hasNewProgram ? normalizeProgramTips({ splitName: deriveSplitName(parsed.program.days) || prev.program.splitName, days: parsed.program.days }) : prev.program,
             todayOverride: hasOverride ? withTips(parsed.todayOverride) : prev.todayOverride,
             targets: hasValidTargets
               ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }

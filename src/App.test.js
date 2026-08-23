@@ -12,6 +12,9 @@ import {
   capFor,
   withTips,
   normalizeProgramTips,
+  deriveSplitName,
+  coachResponseFlags,
+  coachReplyText,
   readLocalState,
   writeLocalState,
   hasPendingSync,
@@ -590,6 +593,93 @@ describe("normalizeProgramTips", () => {
     const result = normalizeProgramTips(program);
     expect(result.splitName).toBe("PPL");
     expect(result.days[0].name).toBe("Push");
+  });
+});
+
+// Regression coverage for a real beta-report: the Coach chat AI edited a
+// user's program across several turns (removing an exercise, renaming a day)
+// and the program's own splitName field — a second, freely-written copy of
+// the same fact — drifted out of sync with the actual day list, even though
+// the days themselves stayed correct the whole time. The AI eventually had to
+// notice and "fix" its own stale label. Deriving the label from the day names
+// instead of trusting the AI's separate splitName field removes that failure
+// mode entirely: there is only one source of truth, so the label can never
+// disagree with the schedule.
+describe("deriveSplitName", () => {
+  test("collapses verbose AI-authored day names into a concise pattern, matching splitDisplayName's convention", () => {
+    const days = [
+      { name: "Push (Chest/Triceps/Shoulders)" },
+      { name: "Pull (Back/Biceps)" },
+      { name: "Legs (Knee-Friendly)" },
+      { name: "Push (Shoulders/Chest Volume)" },
+      { name: "Pull (Back/Biceps + Conditioning)" },
+    ];
+    expect(deriveSplitName(days)).toBe("Push / Pull / Legs");
+  });
+
+  test("strips the offline path's trailing day-letter suffix ('Push A' / 'Push B') the same way", () => {
+    const days = [
+      { name: "Push A" }, { name: "Pull A" }, { name: "Legs A" },
+      { name: "Push B" }, { name: "Pull B" }, { name: "Legs B" },
+    ];
+    expect(deriveSplitName(days)).toBe("Push / Pull / Legs");
+  });
+
+  test("never disagrees with the actual day list, however the days get edited later", () => {
+    // Simulates the exact failure from the transcript: whatever the model's
+    // own free-text splitName claims, the derived label always tracks the
+    // real, current days.
+    const days = [{ name: "Push" }, { name: "Pull" }, { name: "Legs" }, { name: "Push" }, { name: "Pull" }];
+    expect(deriveSplitName(days)).toBe("Push / Pull / Legs");
+  });
+
+  test("handles an empty or missing day list without throwing", () => {
+    expect(deriveSplitName([])).toBe("");
+    expect(deriveSplitName(undefined)).toBe("");
+  });
+});
+
+// Regression coverage for a real beta report: the coach confidently said
+// "Done!" after being asked to permanently remove an exercise, but the
+// exercise was still there afterward. One concrete way that can happen in
+// code (as opposed to the model simply generating wrong content): the parsed
+// JSON response left "reply" blank/missing on a turn where nothing else in
+// the response changed either — previously papered over with a hardcoded
+// "Done!" regardless.
+describe("coachResponseFlags / coachReplyText", () => {
+  test("a response with a real program change is flagged as a change", () => {
+    const parsed = { reply: "Done!", program: { splitName: "PPL", days: [{ name: "Push", exercises: [] }] }, todayOverride: null };
+    const flags = coachResponseFlags(parsed);
+    expect(flags.hasNewProgram).toBe(true);
+    expect(flags.madeChange).toBe(true);
+  });
+
+  test("a response with nothing set (no program, override, targets, or restore) is not a change", () => {
+    const parsed = { reply: "Sure, happy to help with that question.", program: null, todayOverride: null, targets: null };
+    expect(coachResponseFlags(parsed).madeChange).toBe(false);
+  });
+
+  test("todayOverride takes precedence over a stray program field, matching the one-time-swap contract", () => {
+    const parsed = { program: { days: [{ name: "Legs", exercises: [] }] }, todayOverride: [{ name: "Leg Extension" }] };
+    const flags = coachResponseFlags(parsed);
+    expect(flags.hasOverride).toBe(true);
+    expect(flags.hasNewProgram).toBe(false);
+  });
+
+  test("a blank reply on a turn with a real change still falls back to a confident Done!", () => {
+    const parsed = { reply: "", program: { days: [{ name: "Push", exercises: [] }] } };
+    expect(coachReplyText(parsed, true)).toBe("Done!");
+  });
+
+  test("a blank reply on a no-op turn does NOT falsely claim success — this is the fix for the bug report", () => {
+    const parsed = { reply: "", program: null, todayOverride: null };
+    const text = coachReplyText(parsed, false);
+    expect(text).not.toBe("Done!");
+    expect(text.toLowerCase()).toContain("rephras");
+  });
+
+  test("a real reply from the model always wins over either fallback", () => {
+    expect(coachReplyText({ reply: "Removed battle ropes from every day." }, true)).toBe("Removed battle ropes from every day.");
   });
 });
 
