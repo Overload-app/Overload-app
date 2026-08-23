@@ -430,13 +430,17 @@ describe("secondsPerExercise / capFor", () => {
     expect(capFor({ sessionLength: 60, goal: "recomp", experience: "advanced" })).toBe(base + 1);
   });
 
-  test("never drops below 3 exercises even for a short session, a beginner, and a high-volume goal", () => {
-    expect(capFor({ sessionLength: 30, goal: "build", experience: "beginner" })).toBeGreaterThanOrEqual(3);
+  test("never drops below 2 exercises even for a short session, a beginner, and a high-volume goal", () => {
+    // The floor used to be 3, but 3 exercises of a rest-heavy goal like
+    // "build" cannot actually fit in a short session — forcing a 3rd
+    // exercise guaranteed the exact kind of overrun real testers reported.
+    // 2 focused exercises is a legitimate, honestly-timed session instead.
+    expect(capFor({ sessionLength: 30, goal: "build", experience: "beginner" })).toBeGreaterThanOrEqual(2);
   });
 
   test("a missing goal falls back to a sensible default rather than throwing", () => {
     expect(() => capFor({ sessionLength: 60, experience: "intermediate" })).not.toThrow();
-    expect(capFor({ sessionLength: 60, experience: "intermediate" })).toBeGreaterThanOrEqual(3);
+    expect(capFor({ sessionLength: 60, experience: "intermediate" })).toBeGreaterThanOrEqual(2);
   });
 
   test("longer sessions allow strictly more exercises than shorter ones, same goal and experience", () => {
@@ -449,6 +453,27 @@ describe("secondsPerExercise / capFor", () => {
     const buildCap = capFor({ sessionLength: 60, goal: "build", experience: "intermediate" });
     const loseCap = capFor({ sessionLength: 60, goal: "lose", experience: "intermediate" });
     expect(buildCap).toBeLessThanOrEqual(loseCap);
+  });
+
+  // Pins the actual real-world calibration behind the constants: two real
+  // beta reports (build/30min running ~50min, and recomp/60min running
+  // ~90min) showed the old formula underestimating real execution time by
+  // roughly 50-70%, consistently across both a short and a long session.
+  // These lock in that the modeled total (cap * secondsPerExercise) now
+  // lands close to what the person actually asked for, instead of close to
+  // the old, too-optimistic number.
+  test("a 30-min build session's modeled total lands close to 30 minutes, not the old ~30-min-that-became-50", () => {
+    const profile = { sessionLength: 30, goal: "build", experience: "intermediate" };
+    const modeledSeconds = capFor(profile) * secondsPerExercise(profile.goal);
+    expect(modeledSeconds / 60).toBeGreaterThanOrEqual(25);
+    expect(modeledSeconds / 60).toBeLessThanOrEqual(38);
+  });
+
+  test("a 60-min recomp session's modeled total lands close to 60 minutes, not the old ~60-min-that-became-90", () => {
+    const profile = { sessionLength: 60, goal: "recomp", experience: "intermediate" };
+    const modeledSeconds = capFor(profile) * secondsPerExercise(profile.goal);
+    expect(modeledSeconds / 60).toBeGreaterThanOrEqual(50);
+    expect(modeledSeconds / 60).toBeLessThanOrEqual(70);
   });
 });
 

@@ -521,25 +521,41 @@ export const GOAL_SCHEME = {
   recomp: { sets: 3, reps: "10-12", rest: 75, label: "Lose Fat & Build Muscle" },
 };
 
-// Real time per exercise, not a guess: actual working time per set, plus
-// the FULL rest period between sets (this used to be ignored, which is
-// exactly why a "30-minute" program could quietly run 45-60+ minutes —
-// "build" alone means 4 sets x 90s rest = 6 minutes of rest on ONE
-// exercise before any lifting or transition time), plus realistic time to
-// move to/set up the next exercise.
-const WORK_SECONDS_PER_SET = 40;
-const TRANSITION_SECONDS_PER_EXERCISE = 75;
+// Real time per exercise, not a guess: actual working time per set, plus the
+// FULL rest period between sets ("build" alone means 4 sets x 90s rest = 6
+// minutes of rest on ONE exercise before any lifting or transition time),
+// plus realistic time to move to/set up the next exercise — then scaled by
+// REALISTIC_OVERHEAD_MULTIPLIER below. That multiplier exists because a first
+// pass at this formula (no multiplier, WORK=40s, TRANSITION=75s) still ran
+// consistently short against real beta reports: a 30-min "build" session
+// actually took ~50 min (67% over), and a 60-min "recomp" session actually
+// took ~90 min (50% over) — both a similar, large margin, not just noise.
+// That gap isn't explained by nudging one constant, since a fixed change to
+// TRANSITION alone would have to differ wildly between the two goals to
+// match both reports — it's warm-up sets before working sets on compound
+// lifts, real equipment setup/walking time in an actual gym (not an empty
+// one), and rest that runs a bit past what a timer prescribes, bundled into
+// one honest overhead factor instead of pretending any single number here is
+// precise.
+const WORK_SECONDS_PER_SET = 45;
+const TRANSITION_SECONDS_PER_EXERCISE = 100;
+const REALISTIC_OVERHEAD_MULTIPLIER = 1.4;
 
 export function secondsPerExercise(goal) {
   const scheme = GOAL_SCHEME[goal] || GOAL_SCHEME.recomp;
-  return scheme.sets * (WORK_SECONDS_PER_SET + scheme.rest) + TRANSITION_SECONDS_PER_EXERCISE;
+  return Math.round((scheme.sets * (WORK_SECONDS_PER_SET + scheme.rest) + TRANSITION_SECONDS_PER_EXERCISE) * REALISTIC_OVERHEAD_MULTIPLIER);
 }
 
 export function capFor(profile) {
   let cap = Math.floor((profile.sessionLength * 60) / secondsPerExercise(profile.goal));
   if (profile.experience === "advanced") cap += 1;
   if (profile.experience === "beginner") cap -= 1;
-  return Math.max(3, cap);
+  // A floor of 3 forced a real overrun on the tightest realistic combination
+  // (a short session + a set/rest-heavy goal like muscle-building): 3
+  // exercises at ~15 min each cannot fit in 30 minutes no matter how the
+  // exercises are chosen. 2 focused, fully-rested exercises is a legitimate
+  // efficient session and actually fits; forcing a 3rd never did.
+  return Math.max(2, cap);
 }
 
 export function buildDay(kind, pool, goal, cap, offset) {
