@@ -1993,7 +1993,7 @@ function Train({ state, startWorkout, setActiveTab }) {
       >
         <Sparkles size={14} color={T.charge} style={{ flexShrink: 0 }} />
         <span style={{ fontSize: 12, color: T.chargeDeep, fontWeight: 600, flex: 1 }}>
-          Don't like this split, or want different exercises? Just tell your Coach — tap here.
+          Don't like this split, want different exercises, workouts too long or too short, or any other issues? Just tell your Coach — tap here.
         </span>
         <ChevronRight size={14} color={T.chargeDeep} style={{ flexShrink: 0 }} />
       </button>
