@@ -244,10 +244,20 @@ export async function fetchExerciseGif(name) {
   if (!navigator.onLine) return null;
   try {
     const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.gifUrl || null;
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      // Logged, not swallowed — "no GIF" always has an honest reason
+      // (bad/missing key, quota, no match), and it should be visible in
+      // the browser console without needing Vercel dashboard access.
+      console.warn(`Exercise GIF lookup failed for "${name}": ${res.status}`, data?.error, data?.detail);
+      return null;
+    }
+    if (data?.matchCount === 0) {
+      console.warn(`Exercise GIF lookup: no WorkoutX match for "${name}"`);
+    }
+    return data?.gifUrl || null;
   } catch (e) {
+    console.warn(`Exercise GIF lookup threw for "${name}":`, e.message);
     return null;
   }
 }
