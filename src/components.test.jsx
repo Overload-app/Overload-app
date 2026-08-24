@@ -302,6 +302,20 @@ describe("<Coach />", () => {
     setup({ coachUsage: { date: todayISO(), count: 25 } });
     expect(screen.getByText(/5 messages left today/)).toBeInTheDocument();
   });
+
+  test("shows quick-action prompt chips only in the empty state, and tapping one sends it", async () => {
+    const user = userEvent.setup();
+    const { onSend } = setup({ messages: [] });
+    const chip = screen.getByText("Swap squat for leg press");
+    expect(chip).toBeInTheDocument();
+    await user.click(chip);
+    expect(onSend).toHaveBeenCalledWith("Swap squat for leg press");
+  });
+
+  test("quick-action chips disappear once a real conversation exists", () => {
+    setup({ messages: [{ role: "user", text: "hi" }, { role: "assistant", text: "hey" }] });
+    expect(screen.queryByText("Swap squat for leg press")).not.toBeInTheDocument();
+  });
 });
 
 /* ============================================================

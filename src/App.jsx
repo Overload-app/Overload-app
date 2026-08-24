@@ -18,8 +18,16 @@ import { supabase } from "./supabaseClient.js";
 const PROGRAM_HISTORY_LIMIT = 30;
 
 const T = {
-  ink: "#12161C",
-  paper: "#EEF1EF",
+  // Design refresh: background/sidebar/accent tokens moved to the requested
+  // values (off-white background, near-black sidebar, vibrant-violet
+  // accent). All three are close enough to the previous values that nothing
+  // downstream needed re-tuning: paper got lighter (contrast against it can
+  // only improve), ink is still near-black either way, and the new charge
+  // still clears white-on-charge button contrast (5.7:1) and the new
+  // chargeDeep still clears text-on-lavender contrast (7.2:1) — verified
+  // with the same WCAG math used for steelDark below, not just eyeballed.
+  ink: "#0D0E15",
+  paper: "#F3F4F6",
   card: "#FFFFFF",
   steel: "#DADFE0",
   // Real contrast failure found from beta-tester feedback ("some grey text
@@ -28,8 +36,8 @@ const T = {
   // used for secondary/label text all over the app (timestamps, sub-labels,
   // "how to do it" tips, etc.), so a single token fix covers it everywhere.
   steelDark: "#5B6470",
-  charge: "#4E4AF2",
-  chargeDeep: "#332FD0",
+  charge: "#5B46F6",
+  chargeDeep: "#4531C7",
   protein: "#E0483E",
   carb: "#E8A23D",
   fat: "#3E8FE0",
@@ -889,7 +897,13 @@ function Card({ children, style, onClick }) {
 }
 
 function Btn({ children, onClick, variant = "primary", style, disabled }) {
+  // boxSizing explicit (not just relying on the global `*` rule) so every
+  // variant renders the exact same height/padding regardless of whether it
+  // adds a border — ghost's 1px border is subtracted from its content box
+  // rather than adding to the button's outer size, so e.g. Fuel's "+ Add
+  // meal" (primary) and "Photo" (ghost) buttons stay pixel-identical.
   const base = {
+    boxSizing: "border-box",
     border: "none", borderRadius: 10, padding: "12px 16px", fontFamily: "'Inter', sans-serif",
     fontWeight: 600, fontSize: 14, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
     display: "flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "transform 0.1s",
@@ -2231,14 +2245,17 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
             {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
           </h1>
         </div>
+        {/* Light info chips with a border, not a solid dark fill — a dark
+            filled pill reads as a primary action button (like "Start
+            workout" below), which these two stat readouts aren't. */}
         <div style={{ display: "flex", gap: 8 }}>
-          <div style={{ background: T.ink, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
-            <div style={{ color: T.charge, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{targets.calories}</div>
-            <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>CAL GOAL</div>
+          <div style={{ background: "#E9EBEF", border: `1px solid ${T.steel}`, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
+            <div style={{ color: T.ink, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{targets.calories}</div>
+            <div style={{ color: T.steelDark, fontSize: 9, fontWeight: 700 }}>CAL GOAL</div>
           </div>
-          <div style={{ background: T.ink, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
-            <div style={{ color: T.charge, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{thisWeek}/{profile.daysPerWeek}</div>
-            <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>WORKOUTS WK</div>
+          <div style={{ background: "#E9EBEF", border: `1px solid ${T.steel}`, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
+            <div style={{ color: T.ink, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{thisWeek}/{profile.daysPerWeek}</div>
+            <div style={{ color: T.steelDark, fontSize: 9, fontWeight: 700 }}>WORKOUTS WK</div>
           </div>
         </div>
       </div>
@@ -2292,9 +2309,13 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             {/* Leads with "remaining" as the headline number — "0 / 2645"
-                read at a glance like a zero goal, not zero eaten yet. */}
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: T.ink }}>{Math.max(0, targets.calories - cals).toLocaleString()}<span style={{ fontSize: 15, color: T.steelDark }}> cal left</span></div>
-            <div style={{ fontSize: 13, color: T.steelDark, marginTop: 2 }}>{cals.toLocaleString()} consumed of {targets.calories.toLocaleString()}</div>
+                read at a glance like a zero goal, not zero eaten yet — but
+                collapsed to one line: the target is already implied by
+                "left," so restating "of 2,645" again below it was redundant. */}
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, color: T.ink }}>
+              {Math.max(0, targets.calories - cals).toLocaleString()}<span style={{ fontSize: 14, fontWeight: 600, color: T.steelDark }}> cal left</span>
+              <span style={{ fontSize: 12, fontWeight: 500, color: T.steelDark, marginLeft: 6 }}>· {cals.toLocaleString()} consumed</span>
+            </div>
           </div>
           <Ring value={cals} max={targets.calories} color={T.charge} size={64} stroke={7}>
             <Flame size={22} color={T.charge} />
@@ -2343,40 +2364,53 @@ function Train({ state, startWorkout, setActiveTab }) {
       <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>{program.days.length}-day rotating split · choose a session to start</p>
 
       {/* Direct answer to real beta-tester confusion: she wanted a
-          different split but didn't know she could just ask for one. */}
+          different split but didn't know she could just ask for one.
+          Deliberately a plain text link, not a filled button — this is a
+          secondary hint, and should carry noticeably less visual weight
+          than the actual session cards below it. */}
       <button
         onClick={() => setActiveTab("coach")}
-        style={{ display: "flex", alignItems: "center", gap: 6, background: "#EEEDFF", border: "none", borderRadius: 10, padding: "10px 12px", marginTop: 10, cursor: "pointer", width: "100%", textAlign: "left" }}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", borderBottom: `1px solid ${T.steel}`, borderRadius: 0, padding: "10px 2px", marginTop: 10, cursor: "pointer", width: "100%", textAlign: "left" }}
       >
-        <Sparkles size={14} color={T.charge} style={{ flexShrink: 0 }} />
-        <span style={{ fontSize: 12, color: T.chargeDeep, fontWeight: 600, flex: 1 }}>
-          Don't like this split, want different exercises, workouts too long or too short, or any other issues? Just tell your Coach — tap here.
+        <Sparkles size={13} color={T.chargeDeep} style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12, color: T.steelDark, fontWeight: 500, flex: 1 }}>
+          Don't like this split, want different exercises, workouts too long or too short, or any other issues? <span style={{ color: T.chargeDeep, fontWeight: 600, textDecoration: "underline" }}>Just tell your Coach.</span>
         </span>
-        <ChevronRight size={14} color={T.chargeDeep} style={{ flexShrink: 0 }} />
       </button>
 
       <TickRule label="Sessions" />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {program.days.map((day, i) => (
-          <Card
-            key={i}
-            onClick={() => startWorkout(i)}
-            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: i === nextIdx ? `2px solid ${T.charge}` : `1px solid ${T.steel}` }}
-          >
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, margin: 0, color: T.ink }}>{day.name}</h3>
-                {i === nextIdx && <span style={{ background: "#EEEDFF", color: T.charge, fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>NEXT</span>}
+        {program.days.map((day, i) => {
+          const isNext = i === nextIdx;
+          return (
+            <Card
+              key={i}
+              onClick={() => startWorkout(i)}
+              style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                border: isNext ? `2px solid ${T.charge}` : `1px solid ${T.steel}`,
+                // A tinted background + ambient shadow on top of the existing
+                // accent border and NEXT pill — the plain border alone didn't
+                // stand out enough against the other session cards.
+                background: isNext ? "#F5F3FF" : T.card,
+                boxShadow: isNext ? "0 8px 24px rgba(91,70,246,0.18)" : "0 1px 2px rgba(18,22,28,0.06)",
+              }}
+            >
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, margin: 0, color: T.ink }}>{day.name}</h3>
+                  {isNext && <span style={{ background: T.charge, color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>NEXT</span>}
+                </div>
+                <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{day.exercises.map((e) => e.name).join(" · ")}</div>
               </div>
-              <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{day.exercises.map((e) => e.name).join(" · ")}</div>
-            </div>
-            {/* Decorative now — the whole card is the click target (was just
-                this small arrow before, an easy miss on mobile). */}
-            <div style={{ background: T.ink, borderRadius: 10, width: 40, height: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <ChevronRight size={18} color="#fff" />
-            </div>
-          </Card>
-        ))}
+              {/* Decorative now — the whole card is the click target (was just
+                  this small arrow before, an easy miss on mobile). */}
+              <div style={{ background: T.ink, borderRadius: 10, width: 40, height: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <ChevronRight size={18} color="#fff" />
+              </div>
+            </Card>
+          );
+        })}
       </div>
 
       <TickRule label="History" />
@@ -2385,11 +2419,15 @@ function Train({ state, startWorkout, setActiveTab }) {
         {logs.workouts.slice().reverse().slice(0, 8).map((w, i) => {
           const duration = formatDuration(w.durationSec);
           const exCount = (w.exercises || []).length;
+          // "Aug 23" instead of the raw stored ISO string "2026-08-23" —
+          // still the numeric/mono date treatment used elsewhere in the
+          // app, just no longer literal database formatting leaking through.
+          const dateLabel = parseISODate(w.date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
           return (
             <Card key={i} style={{ padding: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{w.dayName}</span>
-                <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{w.date}</span>
+                <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{dateLabel}</span>
               </div>
               <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>
                 {[duration, `${exCount} exercise${exCount === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}
@@ -2470,10 +2508,23 @@ const DEFAULT_COACH_MESSAGES = [
   { role: "assistant", text: "Hey — I'm your coach. Ask me to adjust your program: swap an exercise, work around an injury, add volume, change your split, or anything else." },
 ];
 
+// Ready-to-send examples for the empty-state quick-action chips — concrete
+// enough to tap and go, covering the three kinds of requests Coach
+// actually handles differently (a swap, an injury adjustment, a duration
+// change), so a first-time visitor sees real capability, not just a blank
+// input box.
+const COACH_QUICK_PROMPTS = [
+  "Swap squat for leg press",
+  "I have a shoulder injury",
+  "Shorten my workouts to 30 minutes",
+  "Change my split",
+];
+
 export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
+  const isEmpty = !messages || messages.length === 0;
   const list = messages && messages.length > 0 ? messages : DEFAULT_COACH_MESSAGES;
   const today = todayISO();
   const usedToday = coachUsage && coachUsage.date === today ? coachUsage.count : 0;
@@ -2517,27 +2568,62 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
           </div>
         )}
       </div>
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 10 }}>
-        {list.map((m, i) => (
-          <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "85%" }}>
-            <div style={{
-              background: m.role === "user" ? T.charge : T.card, color: m.role === "user" ? "#fff" : T.ink,
-              border: m.role === "user" ? "none" : `1px solid ${T.steel}`,
-              padding: "10px 14px", borderRadius: 14,
-              borderBottomRightRadius: m.role === "user" ? 4 : 14,
-              borderBottomLeftRadius: m.role === "user" ? 14 : 4,
-              fontSize: 14, lineHeight: 1.4,
-            }}>
-              {m.text}
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", paddingBottom: 10,
+          // A dedicated centered intro instead of a single chat bubble
+          // floating at the top of an otherwise-empty screen — the blank
+          // space below it used to make the tab feel unstyled/unfinished.
+          ...(isEmpty ? { alignItems: "center", justifyContent: "center", textAlign: "center", gap: 10 } : { gap: 10 }),
+        }}
+      >
+        {isEmpty ? (
+          <>
+            <div style={{ width: 56, height: 56, borderRadius: 16, background: "#EEEDFF", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Sparkles size={26} color={T.charge} />
             </div>
-          </div>
-        ))}
+            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, fontWeight: 700, color: T.ink, margin: 0 }}>Hey — I'm your coach.</h2>
+            <p style={{ fontSize: 13, color: T.steelDark, maxWidth: 260, lineHeight: 1.5, margin: 0 }}>
+              Ask me to adjust your program, work around an injury, add volume, change your split, or anything else.
+            </p>
+          </>
+        ) : (
+          list.map((m, i) => (
+            <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "85%" }}>
+              <div style={{
+                background: m.role === "user" ? T.charge : T.card, color: m.role === "user" ? "#fff" : T.ink,
+                border: m.role === "user" ? "none" : `1px solid ${T.steel}`,
+                padding: "10px 14px", borderRadius: 14,
+                borderBottomRightRadius: m.role === "user" ? 4 : 14,
+                borderBottomLeftRadius: m.role === "user" ? 14 : 4,
+                fontSize: 14, lineHeight: 1.4,
+              }}>
+                {m.text}
+              </div>
+            </div>
+          ))
+        )}
         {loading && (
           <div style={{ alignSelf: "flex-start", color: T.steelDark, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
             <Loader2 size={14} className="spin" /> Coach is thinking…
           </div>
         )}
       </div>
+      {isEmpty && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 0 12px" }}>
+          {COACH_QUICK_PROMPTS.map((p) => (
+            <button
+              key={p}
+              onClick={() => onSend(p)}
+              disabled={loading}
+              style={{ background: "#fff", border: `1px solid ${T.steel}`, borderRadius: 20, padding: "8px 12px", fontSize: 12, fontWeight: 600, color: T.ink, cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1 }}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, padding: "10px 0 16px" }}>
         <input
           value={input} onChange={(e) => setInput(e.target.value)}
@@ -2555,16 +2641,23 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
 /* ============================================================
    FUEL
 ============================================================ */
-function MacroBar({ label, val, max, color }) {
+// icon matches the size/weight of the icon StatChip uses for the same
+// macro on Home, so "Protein/Carbs/Fat" reads as the same visual language
+// on both screens instead of two unrelated designs. Sized up from the
+// original (11px label, 6px bar) — the val/max numbers were cramped.
+function MacroBar({ label, val, max, color, icon }) {
   const pct = Math.min(100, (val / Math.max(1, max)) * 100);
   return (
-    <div style={{ width: 130 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
-        <span style={{ color: T.ink, fontWeight: 600 }}>{label}</span>
-        <span style={{ color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{val}/{max}g</span>
+    <div style={{ width: 140 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6, color: T.ink, fontWeight: 600 }}>
+          {icon}
+          {label}
+        </span>
+        <span style={{ color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{val}/{max}g</span>
       </div>
-      <div style={{ height: 6, background: T.steel, borderRadius: 3 }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 3, transition: "width 0.4s" }} />
+      <div style={{ height: 8, background: T.steel, borderRadius: 4 }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.4s" }} />
       </div>
     </div>
   );
@@ -2721,7 +2814,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>Log meals and track calories & macros toward your targets.</p>
 
       <TickRule label="Calories & macros" />
-      <Card style={{ marginTop: 14 }}>
+      <Card style={{ marginTop: 14, padding: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center" }}>
           <Ring value={totals.cal} max={targets.calories} color={T.charge} size={90} stroke={9}>
             <div style={{ textAlign: "center" }}>
@@ -2730,9 +2823,11 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
             </div>
           </Ring>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <MacroBar label="Protein" val={totals.protein} max={targets.protein} color={T.protein} />
-            <MacroBar label="Carbs" val={totals.carb} max={targets.carbs} color={T.carb} />
-            <MacroBar label="Fat" val={totals.fat} max={targets.fat} color={T.fat} />
+            {/* Same 16px icon size as Home's macro StatChips, so the two
+                screens read as one consistent design language. */}
+            <MacroBar label="Protein" val={totals.protein} max={targets.protein} color={T.protein} icon={<Beef size={16} color={T.protein} />} />
+            <MacroBar label="Carbs" val={totals.carb} max={targets.carbs} color={T.carb} icon={<Wheat size={16} color={T.carb} />} />
+            <MacroBar label="Fat" val={totals.fat} max={targets.fat} color={T.fat} icon={<Droplet size={16} color={T.fat} />} />
           </div>
         </div>
       </Card>
@@ -3081,7 +3176,14 @@ function ExerciseProgress({ logs }) {
   useEffect(() => { if (!selected && names[0]) setSelected(names[0]); }, [names.length]);
 
   if (names.length === 0) {
-    return <Card><p style={{ color: T.steelDark, fontSize: 13, margin: 0 }}>Log a workout to start tracking exercise progress.</p></Card>;
+    return (
+      <Card style={{ textAlign: "center", padding: "24px 16px" }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px" }}>
+          <TrendingUp size={20} color={T.steelDark} />
+        </div>
+        <p style={{ color: T.steelDark, fontSize: 13, margin: 0 }}>Log a workout to start tracking exercise progress.</p>
+      </Card>
+    );
   }
 
   const history = exerciseHistory(logs, selected);
@@ -3117,7 +3219,12 @@ function ExerciseProgress({ logs }) {
           </div>
         </>
       ) : (
-        <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", padding: "10px 0" }}>Log this exercise at least twice to see a trend.</p>
+        <div style={{ textAlign: "center", padding: "16px 0" }}>
+          <div style={{ width: 40, height: 40, borderRadius: 10, background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px" }}>
+            <TrendingUp size={18} color={T.steelDark} />
+          </div>
+          <p style={{ color: T.steelDark, fontSize: 13, margin: 0 }}>Log this exercise at least twice to see a trend.</p>
+        </div>
       )}
     </Card>
   );
@@ -3176,13 +3283,24 @@ export function Progress({ state, addWeight, removeWeight }) {
             </LineChart>
           </ResponsiveContainer>
         ) : (
-          <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", padding: "20px 0" }}>Log at least 2 weigh-ins to see your trend.</p>
+          // An icon, not just bare text, so an empty chart card doesn't
+          // read as broken/unfinished — same treatment as other empty
+          // states could use across the app.
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px" }}>
+              <Scale size={20} color={T.steelDark} />
+            </div>
+            <p style={{ color: T.steelDark, fontSize: 13, margin: 0 }}>Log at least 2 weigh-ins to see your trend.</p>
+          </div>
         )}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <input
-            placeholder={`Weight (lb) — last: ${profile.weightLb}`} type="number" value={entry}
+            placeholder={`Weight (lb) · last ${profile.weightLb}`} type="number" value={entry}
             onChange={(e) => setEntry(e.target.value)}
-            style={{ flex: 1, padding: 12, borderRadius: 8, border: `1.5px solid ${T.steel}`, boxSizing: "border-box", fontFamily: "'JetBrains Mono', monospace" }}
+            // Standard UI typography, not the raw monospace/code font — this
+            // is a normal text entry field, not a numeric readout like a
+            // stat chip or timer.
+            style={{ flex: 1, padding: 12, borderRadius: 8, border: `1.5px solid ${T.steel}`, boxSizing: "border-box", fontFamily: "'Inter', sans-serif", fontSize: 15 }}
           />
           <Btn variant="accent" onClick={() => { if (entry) { addWeight(Number(entry)); setEntry(""); } }}>
             <Scale size={16} /> Log
@@ -3985,7 +4103,10 @@ export default function App() {
           // review flagged the old version as the single most attention-
           // grabbing element on the page, which fights against the app
           // otherwise feeling premium/calm rather than pushy about billing.
-          <div style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 12, fontWeight: 600, textAlign: "center", padding: "8px 16px" }}>
+          <div style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 12, fontWeight: 600, textAlign: "center", padding: "6px 16px" }}>
+            {/* chargeDeep on this tint verifies at 7.2:1 — well above WCAG
+                AA's 4.5:1 for normal text, and the button text is bold on
+                top of that. */}
             {trialDaysLeft(trialStartedAt)} day{trialDaysLeft(trialStartedAt) === 1 ? "" : "s"} left in your trial · <button onClick={() => setActiveTab("profile")} style={{ background: "none", border: "none", color: T.chargeDeep, textDecoration: "underline", cursor: "pointer", fontWeight: 700, fontSize: 12, padding: 0 }}>Subscribe anytime</button>
           </div>
         )}
