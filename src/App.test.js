@@ -12,6 +12,7 @@ import {
   capFor,
   capForProgram,
   isUnilateral,
+  fetchExerciseGif,
   withTips,
   normalizeProgramTips,
   deriveSplitName,
@@ -1510,6 +1511,38 @@ describe("claudeChat", () => {
 
     const result = await claudeChat({ system: "s", messages: [] });
     expect(result).toBe("hello\nworld");
+  });
+});
+
+describe("fetchExerciseGif", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("returns null and never calls fetch when offline", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    expect(await fetchExerciseGif("Back Squat")).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("returns the gifUrl on a successful lookup", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) }));
+    expect(await fetchExerciseGif("Back Squat")).toBe("https://api.workoutxapp.com/v1/gifs/0201.gif");
+  });
+
+  test("returns null (not a throw) for a non-200 response — quota exhausted, not found, etc.", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+    expect(await fetchExerciseGif("Some Made-Up Exercise")).toBeNull();
+  });
+
+  test("returns null (not a throw) if fetch itself rejects", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    expect(await fetchExerciseGif("Back Squat")).toBeNull();
   });
 });
 

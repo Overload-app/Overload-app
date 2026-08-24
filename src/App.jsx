@@ -231,6 +231,27 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // written directly into the program data, so this live call is the
 // exception, not the normal path. Falls back to the coarser pool-based
 // matching (alternativesFor) at the call site if this fails or is offline.
+// One-time lookup for the mid-workout "How to do it" demo GIF, powered by
+// WorkoutX's exercise database (free tier: 500 requests/month, so this is
+// deliberately lazy — only called the first time someone actually opens
+// the tips section for a given exercise, never eagerly at program-
+// generation time, and the result gets cached onto the exercise itself so
+// the same exercise never costs a second request). Returns null (not a
+// thrown error) for "no GIF available" in every case — offline, not
+// found, quota exhausted — so the UI can show one honest fallback message
+// ("Instructional video unavailable") regardless of which of those it was.
+export async function fetchExerciseGif(name) {
+  if (!navigator.onLine) return null;
+  try {
+    const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.gifUrl || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 export async function fetchSimilarExercises(name, equipment, injuries) {
   const equipDesc = equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment";
   const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest exactly 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part"). Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
@@ -1841,7 +1862,7 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, onCacheGif, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -1889,8 +1910,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const elapsedSeconds = resumedAt ? accumulateActiveSeconds(priorActiveSeconds, resumedAt, Date.now()) : 0;
   const [confirmExit, setConfirmExit] = useState(false);
   const [expandedTips, setExpandedTips] = useState({});
+  const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
+  const [showCustomAlt, setShowCustomAlt] = useState(false); // "none of these" typed-in-your-own mode
+  const [customAlt, setCustomAlt] = useState("");
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
   const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
@@ -1967,8 +1991,28 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   // Tips are baked into the exercise data at program-generation time (see
   // normalizeProgramTips/tipsForExercise), so this is just a local toggle —
   // no AI call, no loading state, works with zero signal at the gym.
-  function toggleTips(name) {
+  // Demo GIF lookup is lazy and one-time per exercise, ever — only fires
+  // the first time someone actually opens "How to do it" for it (never at
+  // program-generation time, and never again once cached), since the free
+  // WorkoutX tier is a shared 500 requests/month, not per-user.
+  // ex.gifUrl: undefined = never checked, null = checked and none found,
+  // a string = the real URL.
+  function toggleTips(exIdx, name) {
     setExpandedTips((e) => ({ ...e, [name]: !e[name] }));
+    const ex = sets[exIdx];
+    if (ex.gifUrl === undefined && !gifLoading[name]) {
+      setGifLoading((g) => ({ ...g, [name]: true }));
+      fetchExerciseGif(name).then((gifUrl) => {
+        // Two writes, deliberately: the local `sets` array is what THIS
+        // session actually renders from, and it's a separate copy from
+        // the parent's program data by this point — persisting via
+        // onCacheGif alone would only show up on the NEXT workout, not
+        // this one (the same staleness class as the earlier resume bug).
+        setSets((s) => s.map((e2, i) => (i === exIdx ? { ...e2, gifUrl } : e2)));
+        onCacheGif?.(exIdx, gifUrl);
+        setGifLoading((g) => ({ ...g, [name]: false }));
+      });
+    }
   }
 
   useEffect(() => {
@@ -2102,14 +2146,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <button
-                onClick={() => toggleTips(ex.name)}
+                onClick={() => toggleTips(exIdx, ex.name)}
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
               >
                 <Info size={13} /> How to do it
                 <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
               </button>
               <button
-                onClick={() => { setSelectedAlt(null); setSwapPickerIdx(exIdx); }}
+                onClick={() => { setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setSwapPickerIdx(exIdx); }}
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
               >
                 <Repeat size={13} /> Find alternative
@@ -2123,6 +2167,20 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
             </div>
             {expandedTips[ex.name] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
+                {gifLoading[ex.name] ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.steelDark, marginBottom: 8 }}>
+                    <Loader2 size={13} className="spin" /> Loading demo…
+                  </div>
+                ) : ex.gifUrl ? (
+                  <img
+                    src={ex.gifUrl} alt={`${ex.name} demonstration`}
+                    style={{ width: "100%", maxWidth: 260, borderRadius: 8, display: "block", marginBottom: 8 }}
+                  />
+                ) : ex.gifUrl === null ? (
+                  <div style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic", marginBottom: 8 }}>
+                    Instructional video unavailable for this exercise.
+                  </div>
+                ) : null}
                 <ul style={{ margin: 0, paddingLeft: 16 }}>
                   {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
                     <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
@@ -2206,7 +2264,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       {swapPickerIdx !== null && (() => {
         const current = sets[swapPickerIdx];
         const alternatives = pickerAlts;
-        function close() { setSwapPickerIdx(null); setSelectedAlt(null); }
+        function close() { setSwapPickerIdx(null); setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); }
         return (
           <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
             <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -2221,8 +2279,6 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 30, fontSize: 13, color: T.steelDark }}>
                   <Loader2 size={16} className="spin" /> Finding similar exercises…
                 </div>
-              ) : alternatives.length === 0 ? (
-                <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 30 }}>No alternatives available for this exercise with your current equipment.</p>
               ) : selectedAlt ? (
                 <div>
                   <Card style={{ marginBottom: 16 }}>
@@ -2247,6 +2303,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {alternatives.length === 0 && (
+                    <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", margin: "10px 0" }}>No alternatives available for this exercise with your current equipment.</p>
+                  )}
                   {alternatives.map((name) => (
                     <button
                       key={name}
@@ -2257,6 +2316,32 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                       <ChevronRight size={16} color={T.steelDark} />
                     </button>
                   ))}
+                  {/* Real gap: the picker used to just dead-end here with
+                      "no alternatives available" and nothing else to do.
+                      Whether the list is empty or just doesn't have what
+                      they want, they can always type their own. */}
+                  {showCustomAlt ? (
+                    <div style={{ padding: 14, background: "#fff", border: `1px solid ${T.steel}`, borderRadius: 10 }}>
+                      <label style={{ fontSize: 12, fontWeight: 600, color: T.steelDark, display: "block", marginBottom: 6 }}>
+                        Enter the exercise you'd like instead
+                      </label>
+                      <input
+                        value={customAlt} onChange={(e) => setCustomAlt(e.target.value)}
+                        placeholder="e.g. Cable Fly" autoFocus
+                        style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 15, boxSizing: "border-box", marginBottom: 10 }}
+                      />
+                      <Btn variant="accent" style={{ width: "100%" }} disabled={!customAlt.trim()} onClick={() => setSelectedAlt(customAlt.trim())}>
+                        Use this exercise
+                      </Btn>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowCustomAlt(true)}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "14px 16px", background: "none", border: `1.5px dashed ${T.steel}`, borderRadius: 10, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 600, color: T.steelDark }}
+                    >
+                      None of these — request my own
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -4173,6 +4258,21 @@ export default function App() {
     });
   }
 
+  // Same shape as cacheAlternatives — caches the WorkoutX demo GIF lookup
+  // onto the exercise permanently (gifUrl: a real URL string, or null for
+  // "checked, none available") so it's a one-time cost per exercise ever,
+  // not per workout session.
+  function cacheGif(dayIdx, exIdx, gifUrl) {
+    persist((prev) => {
+      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
+      const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
+      const newExercises = baseExercises.map((ex, i) => (i === exIdx ? { ...ex, gifUrl } : ex));
+      if (hasOverride) return { ...prev, todayOverride: newExercises };
+      const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
+      return { ...prev, program: { ...prev.program, days: newDays } };
+    });
+  }
+
   function saveWorkoutProgress(dayIdx, sets) {
     const activeSeconds = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
@@ -4436,6 +4536,7 @@ export default function App() {
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}
           onCacheAlternatives={(exIdx, alts) => cacheAlternatives(session.dayIdx, exIdx, alts)}
+          onCacheGif={(exIdx, gifUrl) => cacheGif(session.dayIdx, exIdx, gifUrl)}
         />
       )}
 

@@ -7,7 +7,7 @@
 // bug logic tests structurally can't catch (e.g. a button wired to the
 // wrong handler, a confirm dialog that doesn't actually block the action,
 // an index bug in a delete button).
-import { describe, test, expect, vi } from "vitest";
+import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -791,6 +791,118 @@ describe("<WorkoutSession /> logging UX: pre-fill and quick increment", () => {
     );
     await user.click(screen.getByLabelText("Add 5 pounds to set 1"));
     expect(screen.getByPlaceholderText("lb").value).toBe("5");
+  });
+});
+
+describe("<WorkoutSession /> demo GIF lookup", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setup(onCacheGif = vi.fn()) {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()} onCacheGif={onCacheGif}
+      />
+    );
+    return user;
+  }
+
+  test("opening 'How to do it' for the first time shows the GIF once the lookup resolves, and caches it", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) }));
+    const onCacheGif = vi.fn();
+    const user = setup(onCacheGif);
+
+    await user.click(screen.getByText("How to do it"));
+    const img = await screen.findByAltText("Back Squat demonstration");
+    expect(img.src).toBe("https://api.workoutxapp.com/v1/gifs/0201.gif");
+    expect(onCacheGif).toHaveBeenCalledWith(0, "https://api.workoutxapp.com/v1/gifs/0201.gif");
+  });
+
+  test("no GIF available shows the honest fallback message, not a broken image or silence", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+    const user = setup();
+
+    await user.click(screen.getByText("How to do it"));
+    expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
+  });
+
+  test("closing and reopening 'How to do it' does not re-fetch — the result is cached locally too, not just persisted", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) });
+    vi.stubGlobal("fetch", fetchSpy);
+    const user = setup();
+
+    await user.click(screen.getByText("How to do it")); // open — triggers the fetch
+    await screen.findByAltText("Back Squat demonstration");
+    await user.click(screen.getByText("How to do it")); // close
+    await user.click(screen.getByText("How to do it")); // reopen
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("<WorkoutSession /> 'find alternative' — request my own exercise", () => {
+  const day = {
+    name: "Full Body A",
+    exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"], alternatives: ["Incline Dumbbell Press", "Cable Fly"] }],
+  };
+
+  function setup(onSwapExercise = vi.fn()) {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={onSwapExercise} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return { user, onSwapExercise };
+  }
+
+  test("'None of these' reveals a text field, separate from the suggested alternatives", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("Find alternative"));
+    expect(screen.getByText("Incline Dumbbell Press")).toBeInTheDocument();
+    await user.click(screen.getByText("None of these — request my own"));
+    expect(screen.getByPlaceholderText("e.g. Cable Fly")).toBeInTheDocument();
+  });
+
+  test("typing a custom exercise and using it goes to the same confirm screen as picking a suggestion", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("Find alternative"));
+    await user.click(screen.getByText("None of these — request my own"));
+    await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
+    await user.click(screen.getByText("Use this exercise"));
+    // Same confirm screen every alternative goes through — today/permanent choice.
+    expect(screen.getByText("Just for today")).toBeInTheDocument();
+    expect(screen.getByText("Permanently, going forward")).toBeInTheDocument();
+  });
+
+  test("confirming a custom exercise calls onSwapExercise with the typed name", async () => {
+    const { user, onSwapExercise } = setup();
+    await user.click(screen.getByText("Find alternative"));
+    await user.click(screen.getByText("None of these — request my own"));
+    await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
+    await user.click(screen.getByText("Use this exercise"));
+    await user.click(screen.getByText("Just for today"));
+    expect(onSwapExercise).toHaveBeenCalledWith(0, "Landmine Press", "today");
+  });
+
+  test("'Use this exercise' is disabled until something is typed", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("Find alternative"));
+    await user.click(screen.getByText("None of these — request my own"));
+    expect(screen.getByText("Use this exercise")).toBeDisabled();
+    await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
+    expect(screen.getByText("Use this exercise")).not.toBeDisabled();
   });
 });
 
