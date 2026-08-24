@@ -33,6 +33,8 @@ import {
   trialDaysLeft,
   monthKey,
   exerciseHistory,
+  exercisePR,
+  exerciseLastSession,
   claudeChat,
   fetchSimilarExercises,
   OFFLINE_MESSAGE,
@@ -1003,6 +1005,51 @@ describe("exerciseHistory", () => {
 
   test("returns an empty array for an exercise never logged", () => {
     expect(exerciseHistory(logs, "Never Done This")).toEqual([]);
+  });
+});
+
+// Powers the mid-workout "History & PR" view (WorkoutSession's ExerciseDetailSheet).
+describe("exercisePR", () => {
+  const logs = {
+    workouts: [
+      { date: "2026-01-01", exercises: [{ name: "Back Squat", logged: [{ weight: "135", reps: "8", done: true }, { weight: "155", reps: "5", done: true }] }] },
+      { date: "2026-01-08", exercises: [{ name: "Back Squat", logged: [{ weight: "165", reps: "5", done: true }] }] },
+      { date: "2026-01-15", exercises: [{ name: "Back Squat", logged: [{ weight: "165", reps: "3", done: true }] }] },
+    ],
+  };
+
+  test("returns the heaviest set ever logged, across all workouts, not just the most recent", () => {
+    expect(exercisePR(logs, "Back Squat")).toEqual({ date: "2026-01-08", dateLabel: "01-08", weight: 165, reps: 5 });
+  });
+
+  test("ties on weight are broken by more reps — that's the harder set to have actually beaten", () => {
+    // Both 2026-01-08 and 2026-01-15 hit 165lb; 01-08's 5 reps beats 01-15's 3.
+    const pr = exercisePR(logs, "Back Squat");
+    expect(pr.reps).toBe(5);
+  });
+
+  test("returns null for an exercise with no logged history", () => {
+    expect(exercisePR(logs, "Never Done This")).toBeNull();
+  });
+});
+
+describe("exerciseLastSession", () => {
+  const logs = {
+    workouts: [
+      { date: "2026-01-01", exercises: [{ name: "Back Squat", logged: [{ weight: "135", reps: "8", done: true }] }] },
+      { date: "2026-01-15", exercises: [{ name: "Back Squat", logged: [{ weight: "165", reps: "5", done: true }, { weight: "175", reps: "3", done: true }] }] },
+      { date: "2026-01-08", exercises: [{ name: "Back Squat", logged: [{ weight: "150", reps: "6", done: true }] }] },
+    ],
+  };
+
+  test("uses the most recent date, not array order, and returns every logged set from it", () => {
+    const last = exerciseLastSession(logs, "Back Squat");
+    expect(last.date).toBe("2026-01-15");
+    expect(last.sets).toEqual([{ weight: 165, reps: 5 }, { weight: 175, reps: 3 }]);
+  });
+
+  test("returns null for an exercise never logged", () => {
+    expect(exerciseLastSession(logs, "Never Done This")).toBeNull();
   });
 });
 

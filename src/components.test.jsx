@@ -404,6 +404,63 @@ describe("<WorkoutSession /> rest timer", () => {
   });
 });
 
+describe("<WorkoutSession /> History & PR", () => {
+  const day = {
+    name: "Full Body A",
+    exercises: [
+      { name: "Back Squat", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] },
+      { name: "Bench Press", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] },
+    ],
+  };
+  const logs = {
+    workouts: [
+      { date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "185", reps: "5", done: true }] }] },
+      { date: "2026-08-15", exercises: [{ name: "Back Squat", logged: [{ weight: "195", reps: "5", done: true }, { weight: "205", reps: "3", done: true }] }] },
+    ],
+  };
+
+  function setup(logsOverride = logs) {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={logsOverride} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return user;
+  }
+
+  test("opening it for an exercise with history shows the PR and every set from the last session", async () => {
+    const user = setup();
+    const [squatHistoryBtn] = screen.getAllByText("History & PR");
+    await user.click(squatHistoryBtn);
+
+    // PR is the heaviest set ever (205lb x3), not just the latest session's total.
+    // It happens to also be a set from the last session, so it's expected twice:
+    // once in the PR card, once in the last-session set breakdown.
+    expect(screen.getAllByText("205lb × 3")).toHaveLength(2);
+    // Last session (08-15) logged two sets — both should be listed individually.
+    expect(screen.getByText("195lb × 5")).toBeInTheDocument();
+  });
+
+  test("opening it for an exercise never logged before shows a plain empty state, not a crash", async () => {
+    const user = setup();
+    const [, benchHistoryBtn] = screen.getAllByText("History & PR");
+    await user.click(benchHistoryBtn);
+    expect(screen.getByText(/No history yet/)).toBeInTheDocument();
+  });
+
+  test("closing the sheet returns to the workout", async () => {
+    const user = setup();
+    const [squatHistoryBtn] = screen.getAllByText("History & PR");
+    await user.click(squatHistoryBtn);
+    expect(screen.getByText("PERSONAL RECORD")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Close exercise history"));
+    expect(screen.queryByText("PERSONAL RECORD")).not.toBeInTheDocument();
+  });
+});
+
 describe("OnboardingSummary", () => {
   const profile = { goal: "build", daysPerWeek: 4, sessionLength: 45 };
   const program = {

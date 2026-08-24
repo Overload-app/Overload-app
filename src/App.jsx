@@ -1739,7 +1739,7 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-export function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
   const [sets, setSets] = useState(() =>
     initialSets || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -1753,6 +1753,7 @@ export function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
   const intervalRef = useRef(null);
 
   // Resolves the alternatives list whenever the picker opens for a new
@@ -1922,6 +1923,12 @@ export function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish
               >
                 <Repeat size={13} /> Find alternative
               </button>
+              <button
+                onClick={() => setDetailFor(ex.name)}
+                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+              >
+                <TrendingUp size={13} /> History & PR
+              </button>
             </div>
             {expandedTips[ex.name] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
@@ -2049,6 +2056,87 @@ export function WorkoutSession({ day, isOverride, lastLog, initialSets, onFinish
           </div>
         );
       })()}
+
+      {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} onClose={() => setDetailFor(null)} />}
+    </div>
+  );
+}
+
+// Mid-workout "how have I actually done on this before" view — a personal
+// record and a real set-by-set breakdown of the last time it was logged,
+// plus a lightweight trend, all built from the same real logged history the
+// rest of the app already tracks (nothing new to enter). Deliberately not a
+// long scrollable session-by-session log like most lifting-tracker apps'
+// exercise history — the goal here is "what do I need to beat today," at a
+// glance, mid-set, not a full log to read.
+function ExerciseDetailSheet({ name, logs, onClose }) {
+  const pr = exercisePR(logs, name);
+  const lastSession = exerciseLastSession(logs, name);
+  const trend = exerciseHistory(logs, name).slice(-6); // oldest -> newest, most recent 6
+  const maxWeight = trend.length > 0 ? Math.max(...trend.map((h) => h.weight)) : 0;
+
+  return (
+    <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#B9BEC6", letterSpacing: 1, fontWeight: 600 }}>HISTORY & PR</span>
+          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "2px 0 0" }}>{name}</h2>
+        </div>
+        <button onClick={onClose} aria-label="Close exercise history" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        {!pr ? (
+          <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 30 }}>No history yet for this exercise — today's log will start it.</p>
+        ) : (
+          <>
+            <Card style={{ background: T.ink, border: "none", marginBottom: 12, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: "rgba(78,74,242,0.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Award size={20} color={T.charge} />
+              </div>
+              <div>
+                <div style={{ color: "#B9BEC6", fontSize: 10, fontWeight: 700, letterSpacing: 1 }}>PERSONAL RECORD</div>
+                <div style={{ color: "#fff", fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700 }}>{pr.weight}lb × {pr.reps}</div>
+              </div>
+            </Card>
+
+            {lastSession && (
+              <>
+                <TickRule label={`Last time · ${lastSession.date}`} />
+                <Card style={{ marginBottom: 12 }}>
+                  {lastSession.sets.map((s, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+                      <span style={{ fontSize: 11, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>SET {i + 1}</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>{s.weight}lb × {s.reps}</span>
+                    </div>
+                  ))}
+                </Card>
+              </>
+            )}
+
+            {trend.length > 1 && (
+              <>
+                <TickRule label="Trend" />
+                <Card>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 64 }}>
+                    {trend.map((h, i) => (
+                      <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                        <span style={{ fontSize: 9, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", marginBottom: 3 }}>{h.weight}</span>
+                        <div style={{ width: "100%", maxWidth: 22, borderRadius: 4, background: i === trend.length - 1 ? T.charge : T.steel, height: `${Math.max(14, (h.weight / maxWeight) * 100)}%` }} />
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                    {trend.map((h, i) => (
+                      <span key={i} style={{ flex: 1, fontSize: 9, color: T.steelDark, textAlign: "center" }}>{h.dateLabel}</span>
+                    ))}
+                  </div>
+                </Card>
+              </>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -2731,6 +2819,34 @@ export function exerciseHistory(logs, name) {
     })
     .filter(Boolean)
     .sort((a, b) => (a.date > b.date ? 1 : -1));
+}
+
+// The full set-by-set breakdown from the most recent time this exercise was
+// actually logged, across ANY program day — broader than "last time THIS
+// specific day was done" (used elsewhere for the in-workout "Last time: Xlb
+// x Y" hint), since the same exercise can appear on more than one day, or a
+// swap can mean the day itself has changed since. Powers the mid-workout
+// exercise detail view's "last time" breakdown.
+export function exerciseLastSession(logs, name) {
+  const matches = logs.workouts
+    .filter((w) => w.exercises.some((e) => e.name === name))
+    .sort((a, b) => (a.date > b.date ? -1 : 1)); // most recent first
+  if (matches.length === 0) return null;
+  const w = matches[0];
+  const ex = w.exercises.find((e) => e.name === name);
+  const loggedSets = ex.logged.filter((l) => l.weight && l.reps);
+  if (loggedSets.length === 0) return null;
+  return { date: w.date, sets: loggedSets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) };
+}
+
+// The heaviest set ever logged for this exercise — ties broken by more reps
+// at that weight, since that's still the harder set to have actually beaten.
+export function exercisePR(logs, name) {
+  const history = exerciseHistory(logs, name);
+  if (history.length === 0) return null;
+  return history.reduce((best, h) => (
+    h.weight > best.weight || (h.weight === best.weight && h.reps > best.reps) ? h : best
+  ), history[0]);
 }
 
 function ExerciseProgress({ logs }) {
@@ -3695,6 +3811,7 @@ export default function App() {
           }
           isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
+          logs={state.logs}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
