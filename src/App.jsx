@@ -1517,11 +1517,14 @@ const QUIZ_STEPS = [
   { key: "daysPerWeek", q: "How many days a week can you train?", type: "choice", options: [[3, "3 days"], [4, "4 days"], [5, "5 days"], [6, "6 days"]] },
   { key: "sessionLength", q: "How long do you want each workout to be?", type: "choice", options: [[30, "~30 min"], [45, "~45 min"], [60, "~60 min"], [75, "75+ min"]] },
   { key: "activity", q: "How active is your day-to-day (outside training)?", type: "choice", options: [["sedentary", "Desk job, little walking"], ["light", "On my feet sometimes"], ["moderate", "Active job / lots of walking"], ["active", "Physically demanding day"]] },
-  { key: "injuries", q: "Any injuries or areas we should train around?", sub: "Select all that apply — we'll avoid exercises that stress these.", type: "multi", options: [["none", "None"], ["knees", "Knees"], ["shoulders", "Shoulders"], ["lower_back", "Lower back"], ["wrists", "Wrists"], ["elbows", "Elbows"]] },
-  { key: "otherInjuries", q: "Any other injuries or areas to be careful with?", sub: "Optional — describe in your own words if it's not covered above.", type: "text", placeholder: "e.g. torn labrum in right shoulder, sciatica" },
+  // "Other" lives as a checkbox right in this step (revealing an inline text
+  // box when picked) rather than as its own separate quiz question — no
+  // reason to make someone click Next just to say "nothing else" when they
+  // could just leave a checkbox unchecked.
+  { key: "injuries", q: "Any injuries or areas we should train around?", sub: "Select all that apply — we'll avoid exercises that stress these.", type: "multi", options: [["none", "None"], ["knees", "Knees"], ["shoulders", "Shoulders"], ["lower_back", "Lower back"], ["wrists", "Wrists"], ["elbows", "Elbows"], ["other", "Other"]] },
 ];
 
-function Onboarding({ onComplete }) {
+export function Onboarding({ onComplete }) {
   const [step, setStep] = useState(-1);
   const [answers, setAnswers] = useState({});
   const [feet, setFeet] = useState(5);
@@ -1551,7 +1554,14 @@ function Onboarding({ onComplete }) {
       if (val === "none") next = ["none"];
       else if (arr.includes(val)) next = arr.filter((v) => v !== val);
       else next = [...arr.filter((v) => v !== "none"), val];
-      return { ...a, [key]: next };
+      const result = { ...a, [key]: next };
+      // Unchecking "Other" clears whatever was typed into its inline box —
+      // otherwise leftover text could still show up in the injury summary
+      // even though the checkbox that revealed it is now off.
+      if (key === "injuries" && val === "other" && !next.includes("other")) {
+        result.otherInjuries = "";
+      }
+      return result;
     });
   }
 
@@ -1690,6 +1700,15 @@ function Onboarding({ onComplete }) {
                 </button>
               );
             })}
+            {cur.key === "injuries" && (answers.injuries || []).includes("other") && (
+              <textarea
+                autoFocus
+                placeholder="Describe in your own words — e.g. torn labrum in right shoulder, sciatica"
+                value={answers.otherInjuries ?? ""}
+                onChange={(e) => setAns("otherInjuries", e.target.value)}
+                style={{ width: "100%", marginTop: 4, padding: "14px 16px", fontSize: 15, borderRadius: 12, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", minHeight: 80, boxSizing: "border-box", resize: "vertical" }}
+              />
+            )}
           </div>
         )}
         {cur.type === "number" && (

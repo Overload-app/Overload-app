@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Home, dateToISO, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -968,5 +968,70 @@ describe("<Home /> Coach insight card", () => {
     expect(screen.getByText("Leg Day")).toBeInTheDocument();
     expect(screen.queryByText("Push")).not.toBeInTheDocument();
     expect(screen.getByText("3 exercises")).toBeInTheDocument();
+  });
+});
+
+describe("<Onboarding /> injuries step — 'Other' merged in, not a separate question", () => {
+  // Clicks through every step ahead of injuries (the quiz's last step) with
+  // a minimal valid answer at each — proves there's no longer a separate
+  // "any other injuries" question between it and "Build my plan".
+  async function goToInjuriesStep(user) {
+    await user.click(screen.getByText("Start the quiz"));
+    await user.click(screen.getByText("Male"));
+    await user.click(screen.getByText("Next"));
+    await user.type(screen.getByPlaceholderText("e.g. 28"), "28");
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Next")); // height — defaults are fine
+    await user.type(screen.getByPlaceholderText("e.g. 165"), "180");
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Lose Fat"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Average build, some muscle"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Next")); // desiredPhysique — optional
+    await user.click(screen.getByText("Next")); // specificGoals — optional
+    await user.click(screen.getByText("Beginner (0-1 yr)"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Full Gym"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("3 days"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("~30 min"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Desk job, little walking"));
+    await user.click(screen.getByText("Next"));
+  }
+
+  test("injuries is the final quiz step — no separate 'other injuries' question follows it", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    expect(screen.getByText("Any injuries or areas we should train around?")).toBeInTheDocument();
+    expect(screen.getByText("Build my plan")).toBeInTheDocument(); // only shown on the last step
+  });
+
+  test("selecting 'Other' reveals an inline text box right there, instead of a whole separate step", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    expect(screen.queryByPlaceholderText(/Describe in your own words/)).not.toBeInTheDocument();
+    await user.click(screen.getByText("Other"));
+    expect(screen.getByPlaceholderText(/Describe in your own words/)).toBeInTheDocument();
+  });
+
+  test("unchecking 'Other' clears whatever was typed and hides the box again", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("Other"));
+    const box = screen.getByPlaceholderText(/Describe in your own words/);
+    await user.type(box, "torn labrum");
+    expect(box.value).toBe("torn labrum");
+
+    await user.click(screen.getByText("Other")); // uncheck
+    expect(screen.queryByPlaceholderText(/Describe in your own words/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Other")); // re-check
+    expect(screen.getByPlaceholderText(/Describe in your own words/).value).toBe("");
   });
 });
