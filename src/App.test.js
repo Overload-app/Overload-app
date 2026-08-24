@@ -27,6 +27,8 @@ import {
   INJURY_EXCLUDES,
   GOAL_SCHEME,
   secondsPerExercise,
+  rawSecondsPerExercise,
+  planSetsRest,
   dateToISO,
   parseISODate,
   extractReplyOnly,
@@ -471,21 +473,78 @@ describe("secondsPerExercise / capFor", () => {
   // beta reports (build/30min running ~50min, and recomp/60min running
   // ~90min) showed the old formula underestimating real execution time by
   // roughly 50-70%, consistently across both a short and a long session.
-  // These lock in that the modeled total (cap * secondsPerExercise) now
-  // lands close to what the person actually asked for, instead of close to
-  // the old, too-optimistic number.
+  // These lock in that the modeled total now lands close to what the
+  // person actually asked for. Uses the ADAPTED sets/rest (planSetsRest),
+  // not the goal's unadapted textbook scheme — capFor() itself is now
+  // built on the adapted numbers (a short build session trims sets/rest to
+  // protect exercise count), so multiplying by the un-adapted
+  // secondsPerExercise(goal) would compare apples to oranges.
   test("a 30-min build session's modeled total lands close to 30 minutes, not the old ~30-min-that-became-50", () => {
     const profile = { sessionLength: 30, goal: "build", experience: "intermediate" };
-    const modeledSeconds = capFor(profile) * secondsPerExercise(profile.goal);
-    expect(modeledSeconds / 60).toBeGreaterThanOrEqual(25);
+    const { sets, rest } = planSetsRest(profile);
+    const modeledSeconds = capFor(profile) * rawSecondsPerExercise(sets, rest);
+    expect(modeledSeconds / 60).toBeGreaterThanOrEqual(20);
     expect(modeledSeconds / 60).toBeLessThanOrEqual(38);
   });
 
   test("a 60-min recomp session's modeled total lands close to 60 minutes, not the old ~60-min-that-became-90", () => {
     const profile = { sessionLength: 60, goal: "recomp", experience: "intermediate" };
-    const modeledSeconds = capFor(profile) * secondsPerExercise(profile.goal);
+    const { sets, rest } = planSetsRest(profile);
+    const modeledSeconds = capFor(profile) * rawSecondsPerExercise(sets, rest);
     expect(modeledSeconds / 60).toBeGreaterThanOrEqual(50);
     expect(modeledSeconds / 60).toBeLessThanOrEqual(70);
+  });
+});
+
+// Regression coverage for a real report: a short, set/rest-heavy session
+// used to collapse to as few as 2 exercises — technically fit the time
+// budget, but read as a "ridiculous" workout. planSetsRest() trims rest
+// first, then sets, specifically to protect a real minimum exercise count
+// instead of letting exercise count be the thing that gives.
+describe("planSetsRest", () => {
+  test("a session long enough for the goal's textbook scheme is left completely untouched", () => {
+    const profile = { sessionLength: 60, goal: "recomp", experience: "intermediate" };
+    expect(planSetsRest(profile)).toEqual({ sets: GOAL_SCHEME.recomp.sets, rest: GOAL_SCHEME.recomp.rest });
+  });
+
+  test("a tight session trims rest before ever touching sets", () => {
+    // Just barely too tight for the textbook scheme — trimming rest a
+    // little should be enough without needing to cut sets at all.
+    const profile = { sessionLength: 35, goal: "lose", experience: "intermediate" };
+    const { sets, rest } = planSetsRest(profile);
+    expect(sets).toBe(GOAL_SCHEME.lose.sets);
+    expect(rest).toBeLessThan(GOAL_SCHEME.lose.rest);
+  });
+
+  test("a very tight session trims sets too, once rest alone hits its floor", () => {
+    const profile = { sessionLength: 30, goal: "build", experience: "intermediate" };
+    const { sets, rest } = planSetsRest(profile);
+    expect(rest).toBe(45); // rest floor reached
+    expect(sets).toBeLessThan(GOAL_SCHEME.build.sets);
+    expect(sets).toBeGreaterThanOrEqual(2); // never below the sets floor
+  });
+
+  test("never trims rest below 45s or sets below 2, even for an extremely short session", () => {
+    const { sets, rest } = planSetsRest({ sessionLength: 15, goal: "build", experience: "intermediate" });
+    expect(rest).toBeGreaterThanOrEqual(45);
+    expect(sets).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a 30-min build session now fits at least 4 exercises — it used to collapse to 2", () => {
+    const profile = { sessionLength: 30, goal: "build", experience: "intermediate" };
+    expect(capFor(profile)).toBeGreaterThanOrEqual(4);
+  });
+
+  test("the offline program builder actually bakes the adapted sets/rest into every exercise, not the textbook scheme", () => {
+    const profile = { ...baseProfile, sessionLength: 30, goal: "build", experience: "intermediate", daysPerWeek: 3 };
+    const program = buildProgram(profile);
+    const { sets, rest } = planSetsRest(profile);
+    for (const day of program.days) {
+      for (const ex of day.exercises) {
+        expect(ex.sets).toBe(sets);
+        expect(ex.rest).toBe(rest);
+      }
+    }
   });
 });
 

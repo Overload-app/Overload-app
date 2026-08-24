@@ -587,7 +587,7 @@ const WORK_SECONDS_PER_SET = 45;
 const TRANSITION_SECONDS_PER_EXERCISE = 100;
 const REALISTIC_OVERHEAD_MULTIPLIER = 1.4;
 
-function rawSecondsPerExercise(sets, rest) {
+export function rawSecondsPerExercise(sets, rest) {
   return Math.round((sets * (WORK_SECONDS_PER_SET + rest) + TRANSITION_SECONDS_PER_EXERCISE) * REALISTIC_OVERHEAD_MULTIPLIER);
 }
 
@@ -600,16 +600,50 @@ function capFromSeconds(sessionLength, perExerciseSeconds, experience) {
   let cap = Math.floor((sessionLength * 60) / perExerciseSeconds);
   if (experience === "advanced") cap += 1;
   if (experience === "beginner") cap -= 1;
-  // A floor of 3 forced a real overrun on the tightest realistic combination
-  // (a short session + a set/rest-heavy goal like muscle-building): 3
-  // exercises at ~15 min each cannot fit in 30 minutes no matter how the
-  // exercises are chosen. 2 focused, fully-rested exercises is a legitimate
-  // efficient session and actually fits; forcing a 3rd never did.
+  // Absolute last resort, not the everyday answer — planSetsRest() below
+  // trims sets/rest first specifically so a real session count (4+) fits
+  // without ever reaching this. This only binds for genuinely extreme
+  // combinations (a very short session) where even minimum sets/rest can't
+  // fit 4 — and even then, 2 focused, fully-rested exercises beats forcing
+  // a 3rd/4th that guarantees an overrun.
   return Math.max(2, cap);
 }
 
+// Minimum sensible values — below these, a "set" stops being real training
+// volume and a "rest" stops being real recovery, regardless of how tight
+// the time budget is.
+const MIN_SETS = 2;
+const MIN_REST_SECONDS = 45;
+// Real report: a short session + a set/rest-heavy goal used to collapse to
+// as few as 2 exercises — technically fits the time budget, but reads as a
+// ridiculous "workout." The fix isn't to accept a near-empty session; it's
+// to do what someone actually short on time does at the gym — cut rest
+// first (the single biggest, lowest-cost lever), then sets if that's still
+// not enough — to keep real exercise variety instead. This is a target,
+// not a promise: a session so short even MIN_SETS/MIN_REST_SECONDS can't
+// fit it will still honestly end up below this, rather than pretending.
+const TARGET_MIN_EXERCISES = 4;
+
+// Works backward from "how do I make ${TARGET_MIN_EXERCISES} exercises
+// actually fit" instead of forward from "here's the ideal sets/rest, how
+// many exercises does that leave room for" — the previous approach let
+// exercise count collapse before ever questioning whether the textbook
+// sets/rest was really non-negotiable for a time-constrained session.
+export function planSetsRest(profile) {
+  const scheme = GOAL_SCHEME[profile.goal] || GOAL_SCHEME.recomp;
+  let sets = scheme.sets;
+  let rest = scheme.rest;
+  const fits = () => Math.floor((profile.sessionLength * 60) / rawSecondsPerExercise(sets, rest)) >= TARGET_MIN_EXERCISES;
+
+  while (!fits() && rest > MIN_REST_SECONDS) rest = Math.max(MIN_REST_SECONDS, rest - 10);
+  while (!fits() && sets > MIN_SETS) sets -= 1;
+
+  return { sets, rest };
+}
+
 export function capFor(profile) {
-  return capFromSeconds(profile.sessionLength, secondsPerExercise(profile.goal), profile.experience);
+  const { sets, rest } = planSetsRest(profile);
+  return capFromSeconds(profile.sessionLength, rawSecondsPerExercise(sets, rest), profile.experience);
 }
 
 // Same ceiling math as capFor, but driven by whatever sets/rest a program
@@ -641,12 +675,19 @@ export function capForProgram(program, sessionLength, experience) {
   return capFromSeconds(sessionLength, avgSeconds, experience);
 }
 
-export function buildDay(kind, pool, goal, cap, offset) {
+// sets/rest are optional overrides — when omitted, falls back to the
+// goal's own textbook scheme (kept for buildDay's own existing tests);
+// buildProgram() below always passes planSetsRest()'s adapted values
+// explicitly, so a real generated program actually reflects whatever
+// sets/rest it took to fit a real exercise count, not the un-adapted ideal.
+export function buildDay(kind, pool, goal, cap, offset, sets, rest) {
   const scheme = GOAL_SCHEME[goal];
+  const setsToUse = sets ?? scheme.sets;
+  const restToUse = rest ?? scheme.rest;
   let exercises = [];
   DAY_TEMPLATES[kind].forEach(([group, n]) => {
     pick(pool[group], n, offset).forEach((name) => {
-      exercises.push({ name, sets: scheme.sets, reps: scheme.reps, rest: scheme.rest });
+      exercises.push({ name, sets: setsToUse, reps: scheme.reps, rest: restToUse });
     });
   });
   return exercises.slice(0, cap);
@@ -686,6 +727,7 @@ export function buildProgram(profile) {
   const basePool = POOLS[profile.equipment];
   const pool = filterPool(basePool, profile.injuries);
   const cap = capFor(profile);
+  const { sets, rest } = planSetsRest(profile);
   const split = splitForDays(profile.daysPerWeek, profile.experience);
   // Two days sharing the same "kind" (two "full" days, two "push" days in a
   // PPL x2 split, etc.) need to draw from different points in the pool, or
@@ -701,7 +743,7 @@ export function buildProgram(profile) {
     const kind = split.kinds[i];
     const occurrence = kindOccurrence[kind] || 0;
     kindOccurrence[kind] = occurrence + 1;
-    return { name: label, exercises: buildDay(kind, pool, profile.goal, cap, occurrence) };
+    return { name: label, exercises: buildDay(kind, pool, profile.goal, cap, occurrence, sets, rest) };
   });
   return { splitName: splitDisplayName(split.key), days };
 }
@@ -727,6 +769,7 @@ export function injuryDescription(profile) {
 }
 
 function buildProgramGenSystem(profile) {
+  const { sets: recSets, rest: recRest } = planSetsRest(profile);
   return `You are a world-class evidence-based strength & physique coach designing a brand-new, fully personalized training program from scratch for a new client. Apply mainstream exercise-science consensus: progressive overload, sensible per-muscle volume landmarks, rep ranges matched to the goal, and adequate recovery between sessions hitting the same muscles.
 
 Client details:
@@ -747,7 +790,8 @@ IMPORTANT: Do not default to an Upper/Lower split out of habit. Actually weigh w
 
 Design a training split and day-by-day program tailored specifically to this person — not a generic template. Weight exercise selection and volume toward their stated desired physique while staying balanced, joint-friendly, and appropriate for their experience level. Choose sets/reps/rest per exercise suited to their goal.
 
-HARD CEILING, not a suggestion: no more than ${capFor(profile)} exercises on any day. Going over this is the single most common way a "${profile.sessionLength}-minute" program actually takes way longer than that in real life — people underestimate how much rest between SETS adds up (this person's goal means ~${GOAL_SCHEME[profile.goal]?.sets ?? 3} sets x ${GOAL_SCHEME[profile.goal]?.rest ?? 75}s rest on every single exercise, before any actual lifting or moving-to-the-next-station time). If you're tempted to add "just one more" exercise to cover something, cut a less important one instead — staying at or under ${capFor(profile)} matters more than covering every muscle group in one session.
+TIME BUDGET, worked out for you already — use these numbers as-is, don't recompute your own: for a "${profile.sessionLength}-minute" session, ${recSets} sets x ${recRest}s rest per exercise is what actually fits real exercise variety in the time available (their goal's textbook scheme is ${GOAL_SCHEME[profile.goal]?.sets ?? 3} sets x ${GOAL_SCHEME[profile.goal]?.rest ?? 75}s rest, but that's too much volume-per-exercise for this session length to also cover real variety — rest between SETS is the dominant real-world time cost, so it gets trimmed first, sets only if rest alone isn't enough). Use ${recSets} sets and ${recRest}s rest for every exercise in this program.
+MINIMUM 4 exercises on every day — do not go below this by defaulting back to the textbook sets/rest above; the whole point of the trimmed scheme is to make a real, varied session actually fit. HARD CEILING (not a suggestion) of ${capFor(profile)} exercises on any day, computed from those same numbers — going over is the single most common way a "${profile.sessionLength}-minute" program actually runs way longer than that. If you're tempted to add "just one more" exercise, cut a less important one instead.
 A single-arm or single-leg ("unilateral") exercise — a Bulgarian split squat, a single-arm row, a walking lunge, a step-up — takes roughly TWICE as long as the same sets/rest would for a bilateral exercise, since both sides need training one at a time. If you include one, treat it as costing about two "slots" against the ceiling above, not one, or cut something else to compensate.
 ${profile.specificGoals ? `If they've stated specific performance goals (e.g. a target bench/squat/deadlift number, a bodyweight-strength milestone like a pull-up, a running goal), make sure the relevant lift or movement is programmed directly — include it with a rep/set scheme that actually builds toward that outcome (lower-rep strength work for a numeric lift goal, progressive skill/strength work for a bodyweight milestone), not just buried as one of several accessory options.` : ""}
 
@@ -759,7 +803,7 @@ Rules:
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
 - Spell equipment out in exercise names ("Dumbbell Bench Press," "Barbell Row") rather than gym-jargon abbreviations like "DB" or "BB" — plenty of people using this app are new to lifting and won't know the shorthand.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
-- Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).
+- Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
 - Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."`;
 }
@@ -2786,6 +2830,7 @@ Rules:
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
+- MINIMUM 4 exercises on any day you write into "program" or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.
 - HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one. If they push back that the number doesn't make sense, explain THAT honestly (fixed per-exercise overhead, unilateral exercises costing double, not just set/rest math) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
