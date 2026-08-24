@@ -509,6 +509,23 @@ export function deriveSplitName(days) {
   return [...new Set(categories)].join(" / ");
 }
 
+const MUSCLE_GROUP_LABELS = { legs: "Leg", back: "Back", chest: "Chest", shoulders: "Shoulder", biceps: "Arm", triceps: "Arm", core: "Core" };
+
+// todayOverride is just a flat exercise array with no name field of its
+// own — the active workout screen's title came from the ORIGINAL scheduled
+// day instead ("Push"), which has no way to know it's been swapped out for
+// something else entirely. Real report: asking Coach for a leg session
+// left the header still reading "Push" while every exercise listed was a
+// leg exercise. Deriving the title from what the override actually
+// contains — the same spirit as deriveSplitName() above — means the
+// header can never disagree with what's actually in front of the person.
+export function overrideDayName(exercises) {
+  const groups = (exercises || []).map((e) => inferMuscleGroup(e.name)).filter(Boolean);
+  const labels = [...new Set(groups.map((g) => MUSCLE_GROUP_LABELS[g] || g))];
+  if (labels.length === 0) return "Today's Session";
+  return `${labels.slice(0, 2).join("/")} Day`;
+}
+
 const DAY_TEMPLATES = {
   full: [["legs", 2], ["chest", 1], ["back", 1], ["shoulders", 1], ["core", 1]],
   upper: [["chest", 2], ["back", 2], ["shoulders", 1], ["biceps", 1], ["triceps", 1]],
@@ -1788,20 +1805,33 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 // since saving) get blank logged sets; exercises that are still there by
 // name keep whatever was already logged for them — so real progress
 // survives a save/resume cycle AND a Coach-driven change actually takes.
-export function mergeResumedSets(freshExercises, savedSets) {
+export function mergeResumedSets(freshExercises, savedSets, logs) {
   if (!savedSets) return null;
   const savedByName = new Map(savedSets.map((s) => [s.name, s]));
   return freshExercises.map((ex) => savedByName.get(ex.name) || {
     name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
-    logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
+    logged: seedLoggedSets(ex, logs),
+  });
+}
+
+// Pre-fills a fresh exercise's weight/reps from the last time it was
+// actually logged, instead of starting every set blank — the app already
+// computed and showed this as a "Last time: Xlb x Y" text hint, but still
+// made a person retype it into every single set field. Falls back to blank
+// (exactly the old behavior) when there's no history yet for this exercise.
+export function seedLoggedSets(ex, logs) {
+  const last = logs ? exerciseLastSession(logs, ex.name) : null;
+  return Array.from({ length: ex.sets }, (_, i) => {
+    const prior = last?.sets?.[i];
+    return prior ? { weight: String(prior.weight), reps: String(prior.reps), done: false } : { weight: "", reps: "", done: false };
   });
 }
 
 export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
-    mergeResumedSets(day.exercises, initialSets) || day.exercises.map((ex) => ({
+    mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
-      logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
+      logged: seedLoggedSets(ex, logs),
     }))
   );
   // {endAt: <absolute ms timestamp>, total: <seconds>} — NOT a countdown
@@ -1900,8 +1930,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
         rest: old.rest,
         tips: tipsForExercise(newName),
         // A different exercise means previously logged weight/reps for the
-        // old one don't carry over — fresh, empty sets for the new one.
-        logged: Array.from({ length: old.logged.length }, () => ({ weight: "", reps: "", done: false })),
+        // OLD one don't carry over — but if the NEW one has its own
+        // history, pre-fill from that instead of starting blank.
+        logged: seedLoggedSets({ name: newName, sets: old.logged.length }, logs),
       };
       return copy;
     });
@@ -2075,11 +2106,27 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                   <input
                     type="number" placeholder="lb" value={l.weight}
                     onChange={(e) => updateSet(exIdx, setIdx, "weight", e.target.value)}
+                    // Fields are now often pre-filled from last time — select
+                    // the whole value on focus so tapping in and typing
+                    // immediately overwrites it, instead of appending after
+                    // whatever's already there.
+                    onFocus={(e) => e.target.select()}
                     style={{ flex: 1, minWidth: 0, padding: "10px 6px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 16, boxSizing: "border-box" }}
                   />
+                  {/* Quick bump instead of retyping the whole number — the
+                      common case mid-workout is "same as last time, plus a
+                      bit," not a fresh value. */}
+                  <button
+                    onClick={() => updateSet(exIdx, setIdx, "weight", String((Number(l.weight) || 0) + 5))}
+                    aria-label={`Add 5 pounds to set ${setIdx + 1}`}
+                    style={{ flexShrink: 0, width: 30, height: 34, borderRadius: 8, border: `1.5px solid ${T.steel}`, background: "#fff", color: T.steelDark, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                  >
+                    +5
+                  </button>
                   <input
                     type="number" placeholder="reps" value={l.reps}
                     onChange={(e) => updateSet(exIdx, setIdx, "reps", e.target.value)}
+                    onFocus={(e) => e.target.select()}
                     style={{ flex: 1, minWidth: 0, padding: "10px 6px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 16, boxSizing: "border-box" }}
                   />
                   <button
@@ -2308,7 +2355,14 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   const [insightDismissed, setInsightDismissed] = useState(false);
   const insight = insightDismissed ? null : detectCoachInsight(state);
   const nextIdx = logs.workouts.length % program.days.length;
-  const nextDay = program.days[nextIdx];
+  // Same fix as the active workout screen: a Coach todayOverride swap has
+  // no name of its own, so the preview card must derive one too — showing
+  // the stale scheduled day's name/count here (before they even tap "Start
+  // workout") was the same mismatch, just one screen earlier.
+  const hasTodayOverride = Array.isArray(state.todayOverride) && state.todayOverride.length > 0;
+  const nextDay = hasTodayOverride
+    ? { ...program.days[nextIdx], name: overrideDayName(state.todayOverride), exercises: state.todayOverride }
+    : program.days[nextIdx];
   const today = todayISO();
   const todayMeals = (logs.nutrition.find((d) => d.date === today) || { meals: [] }).meals;
   const cals = todayMeals.reduce((a, m) => a + m.cal, 0);
@@ -2326,8 +2380,13 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   })();
   const progressHighlights = recentProgressHighlights(logs);
 
+  // env(safe-area-inset-top) added to Home/Train/Fuel/Progress/Profile's top
+  // padding — a flat 20px let the eyebrow label ("TODAY", "YOUR PROGRAM",
+  // etc.) sit right under a notch/Dynamic Island/status bar in standalone
+  // PWA mode. Same technique already used by Onboarding, WorkoutSession,
+  // and the Coach panel; those tabs just never got it.
   return (
-    <div style={{ padding: "20px 16px 90px" }}>
+    <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>TODAY</span>
@@ -2448,7 +2507,7 @@ function Train({ state, startWorkout, setActiveTab }) {
   const { program, logs } = state;
   const nextIdx = logs.workouts.length % program.days.length;
   return (
-    <div style={{ padding: "20px 16px 90px" }}>
+    <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>YOUR PROGRAM</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>{program.splitName}</h1>
       <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>{program.days.length}-day rotating split · choose a session to start</p>
@@ -2617,6 +2676,64 @@ const COACH_QUICK_PROMPTS = [
   "Change my split",
 ];
 
+// Coach replies routinely include markdown (**bold** exercise names,
+// numbered/bulleted lists when it lays out a swapped session) since that's
+// natural language for an LLM to produce, but the chat bubble rendered it
+// as raw text — literal asterisks and no real line breaks. A tiny,
+// purpose-built renderer instead of pulling in a full markdown library:
+// this only ever needs to handle **bold**, line breaks, and simple lists,
+// and building React elements directly (never dangerouslySetInnerHTML)
+// means there's no HTML-injection surface from AI-generated text.
+function renderInlineBold(text, keyPrefix) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={`${keyPrefix}-${i}`}>{part.slice(2, -2)}</strong>;
+    }
+    return part ? <span key={`${keyPrefix}-${i}`}>{part}</span> : null;
+  });
+}
+
+function FormattedText({ text }) {
+  if (!text) return null;
+  const blocks = [];
+  let currentList = null; // { type: "ul" | "ol", items: [] }
+  const flushList = () => { if (currentList) { blocks.push(currentList); currentList = null; } };
+
+  text.split("\n").forEach((line) => {
+    const bullet = line.match(/^\s*[-*]\s+(.*)/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)/);
+    if (bullet) {
+      if (!currentList || currentList.type !== "ul") { flushList(); currentList = { type: "ul", items: [] }; }
+      currentList.items.push(bullet[1]);
+    } else if (numbered) {
+      if (!currentList || currentList.type !== "ol") { flushList(); currentList = { type: "ol", items: [] }; }
+      currentList.items.push(numbered[1]);
+    } else {
+      flushList();
+      blocks.push({ type: "p", text: line });
+    }
+  });
+  flushList();
+
+  return (
+    <>
+      {blocks.map((b, i) => {
+        if (b.type === "ul" || b.type === "ol") {
+          const ListTag = b.type;
+          return (
+            <ListTag key={i} style={{ margin: "4px 0", paddingLeft: 18 }}>
+              {b.items.map((item, j) => <li key={j} style={{ marginBottom: 2 }}>{renderInlineBold(item, `${i}-${j}`)}</li>)}
+            </ListTag>
+          );
+        }
+        // An empty line becomes a small gap (a real paragraph break),
+        // rather than collapsing away or rendering a visible empty row.
+        return b.text === "" ? <div key={i} style={{ height: 6 }} /> : <div key={i}>{renderInlineBold(b.text, `${i}`)}</div>;
+      })}
+    </>
+  );
+}
+
 export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -2696,7 +2813,7 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
                 borderBottomLeftRadius: m.role === "user" ? 14 : 4,
                 fontSize: 14, lineHeight: 1.4,
               }}>
-                {m.text}
+                <FormattedText text={m.text} />
               </div>
             </div>
           ))
@@ -2902,7 +3019,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   }
 
   return (
-    <div style={{ padding: "20px 16px 90px" }}>
+    <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>NUTRITION</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Today's Fuel</h1>
       {/* One-line clarity for a first-time visitor landing here from the nav
@@ -3352,7 +3469,7 @@ export function Progress({ state, addWeight, removeWeight }) {
   })();
 
   return (
-    <div style={{ padding: "20px 16px 90px" }}>
+    <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>PROGRESS</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Your Trend</h1>
 
@@ -3477,7 +3594,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
     ["Maintenance (TDEE)", `${targets.tdee} cal`],
   ];
   return (
-    <div style={{ padding: "20px 16px 90px" }}>
+    <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>PROFILE</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Your Setup</h1>
 
@@ -4257,7 +4374,11 @@ export default function App() {
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.charge, flexShrink: 0, animation: "pulseDot 1.4s ease-in-out infinite" }} />
           <span style={{ textAlign: "left" }}>
             <div style={{ fontSize: 9, fontWeight: 700, color: "#B9BEC6", letterSpacing: 1 }}>RESUME</div>
-            <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>{state.program.days[state.inProgressWorkout.dayIdx]?.name}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>
+              {Array.isArray(state.todayOverride) && state.todayOverride.length > 0
+                ? overrideDayName(state.todayOverride)
+                : state.program.days[state.inProgressWorkout.dayIdx]?.name}
+            </div>
           </span>
           <ChevronRight size={16} color={T.charge} />
         </button>
@@ -4267,7 +4388,7 @@ export default function App() {
         <WorkoutSession
           day={
             Array.isArray(state.todayOverride) && state.todayOverride.length > 0
-              ? { ...state.program.days[session.dayIdx], exercises: state.todayOverride }
+              ? { ...state.program.days[session.dayIdx], name: overrideDayName(state.todayOverride), exercises: state.todayOverride }
               : state.program.days[session.dayIdx]
           }
           isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}

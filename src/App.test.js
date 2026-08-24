@@ -14,6 +14,7 @@ import {
   withTips,
   normalizeProgramTips,
   deriveSplitName,
+  overrideDayName,
   coachResponseFlags,
   coachReplyText,
   readLocalState,
@@ -37,6 +38,7 @@ import {
   exercisePR,
   exerciseLastSession,
   mergeResumedSets,
+  seedLoggedSets,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -727,6 +729,28 @@ describe("deriveSplitName", () => {
   });
 });
 
+// Regression coverage for a real report: asking Coach for a one-time leg
+// session left the active workout screen's header still reading "Push"
+// (the originally scheduled day) while every exercise listed was for legs
+// — todayOverride has no name field of its own, so nothing updated the
+// title to match what was actually swapped in.
+describe("overrideDayName", () => {
+  test("derives a title from what the override actually contains, not a stale scheduled-day name", () => {
+    const exercises = [{ name: "Back Squat" }, { name: "Romanian Deadlift" }, { name: "Leg Press" }];
+    expect(overrideDayName(exercises)).toBe("Leg Day");
+  });
+
+  test("combines up to two muscle groups when the override spans more than one", () => {
+    const exercises = [{ name: "Back Squat" }, { name: "Barbell Row" }];
+    expect(overrideDayName(exercises)).toBe("Leg/Back Day");
+  });
+
+  test("falls back to a generic label when nothing in the override is recognizable", () => {
+    expect(overrideDayName([{ name: "Some Weird Machine" }])).toBe("Today's Session");
+    expect(overrideDayName([])).toBe("Today's Session");
+  });
+});
+
 // Regression coverage for a real beta report: the coach confidently said
 // "Done!" after being asked to permanently remove an exercise, but the
 // exercise was still there afterward. One concrete way that can happen in
@@ -1139,6 +1163,36 @@ describe("mergeResumedSets", () => {
 
   test("returns null (so the caller falls back to a fresh build) when there's no saved snapshot", () => {
     expect(mergeResumedSets([{ name: "Squat", sets: 3, reps: "8-12", rest: 90 }], null)).toBeNull();
+  });
+});
+
+describe("seedLoggedSets", () => {
+  const logs = {
+    workouts: [
+      { date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }, { weight: "145", reps: "6", done: true }] }] },
+    ],
+  };
+
+  test("pre-fills weight/reps from the last time this exercise was logged, matched by set position", () => {
+    const seeded = seedLoggedSets({ name: "Bench Press", sets: 2 }, logs);
+    expect(seeded).toEqual([
+      { weight: "135", reps: "8", done: false },
+      { weight: "145", reps: "6", done: false },
+    ]);
+  });
+
+  test("leaves a set slot blank when last time had fewer sets than today's plan", () => {
+    const seeded = seedLoggedSets({ name: "Bench Press", sets: 3 }, logs);
+    expect(seeded[2]).toEqual({ weight: "", reps: "", done: false });
+  });
+
+  test("falls back to blank sets for an exercise with no history at all", () => {
+    const seeded = seedLoggedSets({ name: "Never Done This", sets: 2 }, logs);
+    expect(seeded).toEqual([{ weight: "", reps: "", done: false }, { weight: "", reps: "", done: false }]);
+  });
+
+  test("falls back to blank sets when logs isn't available (e.g. offline)", () => {
+    expect(seedLoggedSets({ name: "Bench Press", sets: 1 }, null)).toEqual([{ weight: "", reps: "", done: false }]);
   });
 });
 

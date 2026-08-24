@@ -316,6 +316,32 @@ describe("<Coach />", () => {
     setup({ messages: [{ role: "user", text: "hi" }, { role: "assistant", text: "hey" }] });
     expect(screen.queryByText("Swap squat for leg press")).not.toBeInTheDocument();
   });
+
+  // Coach replies routinely include markdown (bold exercise names,
+  // numbered lists laying out a swap) — real report: it rendered as raw
+  // text, literal asterisks and no real line breaks.
+  test("renders **bold** markdown as an actual <strong> element, not literal asterisks", () => {
+    const { container } = setup({ messages: [{ role: "user", text: "hi" }, { role: "assistant", text: "Swapped in **Barbell Hip Thrust** for today." }] });
+    const strong = container.querySelector("strong");
+    expect(strong).not.toBeNull();
+    expect(strong.textContent).toBe("Barbell Hip Thrust");
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument();
+  });
+
+  test("renders a numbered list as real <li> elements", () => {
+    const text = "Today's session:\n1. Barbell Hip Thrust\n2. Leg Press\n3. Seated Leg Curl";
+    const { container } = setup({ messages: [{ role: "user", text: "hi" }, { role: "assistant", text } ]});
+    const items = container.querySelectorAll("li");
+    expect(items).toHaveLength(3);
+    expect(items[0].textContent).toBe("Barbell Hip Thrust");
+    expect(container.querySelector("ol")).not.toBeNull();
+  });
+
+  test("renders a bulleted list as a <ul>, distinct from a numbered list", () => {
+    const text = "- Cable Pull-Through\n- Romanian Deadlift";
+    const { container } = setup({ messages: [{ role: "user", text: "hi" }, { role: "assistant", text }] });
+    expect(container.querySelectorAll("ul li")).toHaveLength(2);
+  });
 });
 
 /* ============================================================
@@ -685,6 +711,61 @@ describe("<WorkoutSession /> resuming reflects a Coach change made while saved",
   });
 });
 
+describe("<WorkoutSession /> logging UX: pre-fill and quick increment", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  test("a fresh set starts pre-filled with last time's weight/reps instead of blank", () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] }] };
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={logs} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.getByPlaceholderText("lb").value).toBe("135");
+    expect(screen.getByPlaceholderText("reps").value).toBe("8");
+  });
+
+  test("an exercise with no history starts blank, same as before this feature existed", () => {
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.getByPlaceholderText("lb").value).toBe("");
+  });
+
+  test("the +5 button bumps the current weight by 5 without needing to retype it", async () => {
+    const user = userEvent.setup();
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] }] };
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={logs} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByLabelText("Add 5 pounds to set 1"));
+    expect(screen.getByPlaceholderText("lb").value).toBe("140");
+  });
+
+  test("the +5 button works from blank (treats it as 0) rather than producing NaN", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByLabelText("Add 5 pounds to set 1"));
+    expect(screen.getByPlaceholderText("lb").value).toBe("5");
+  });
+});
+
 describe("<Home /> Coach insight card", () => {
   function baseState(overrides = {}) {
     return {
@@ -732,5 +813,20 @@ describe("<Home /> Coach insight card", () => {
   test("shows no insight card for a healthy state with nothing to flag", () => {
     render(<Home state={baseState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
     expect(screen.queryByText("COACH NOTICED")).not.toBeInTheDocument();
+  });
+
+  // Real report: the "Next workout" preview kept showing the stale
+  // scheduled day (name AND exercise count) after a Coach todayOverride
+  // swap, so a person saw "Push" on Home and found a leg session once
+  // they actually started the workout.
+  test("the next-workout preview reflects a Coach todayOverride, not the stale scheduled day", () => {
+    const state = baseState({
+      program: { splitName: "Push / Pull / Legs", days: [{ name: "Push", exercises: [{ name: "Bench Press" }, { name: "Overhead Press" }] }] },
+      todayOverride: [{ name: "Back Squat" }, { name: "Romanian Deadlift" }, { name: "Leg Press" }],
+    });
+    render(<Home state={state} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    expect(screen.getByText("Leg Day")).toBeInTheDocument();
+    expect(screen.queryByText("Push")).not.toBeInTheDocument();
+    expect(screen.getByText("3 exercises")).toBeInTheDocument();
   });
 });
