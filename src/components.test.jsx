@@ -9,7 +9,7 @@
 // an index bug in a delete button).
 import { describe, test, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Home, dateToISO, todayISO } from "./App.jsx";
 
@@ -570,6 +570,118 @@ describe("OnboardingSummary", () => {
     render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={onContinue} />);
     await user.click(screen.getByText(/Let's go/));
     expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Regression coverage for a real report: backgrounding the app (phone
+// locking, switching apps) paused the rest timer, which then resumed
+// counting down from wherever it left off instead of reflecting real
+// elapsed time. These prove the fix directly: jump the system clock
+// forward WITHOUT firing any interval tick (vi.setSystemTime, unlike
+// vi.advanceTimersByTime, never fires the timer queue) — this is what
+// actually happens when a mobile browser suspends JS execution in the
+// background. A single visibilitychange event (returning to the app)
+// should be enough to show the true value in one jump.
+describe("<WorkoutSession /> timers survive being backgrounded", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Back Squat", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] }] };
+
+  test("the rest timer shows the true remaining time after a background gap, not a stale decremented-by-one value", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+          resumedAt={Date.now()} priorActiveSeconds={0}
+        />
+      );
+      const [squatCheck] = screen.getAllByLabelText("Mark set 1 done and start rest timer");
+      fireEvent.click(squatCheck);
+      expect(screen.getByText("60")).toBeInTheDocument();
+
+      vi.setSystemTime(Date.now() + 45000); // 45 real seconds pass; no interval fires
+      fireEvent(document, new Event("visibilitychange"));
+
+      expect(screen.getByText("15")).toBeInTheDocument();
+      expect(screen.queryByText("59")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("the live elapsed-workout header catches up correctly after a background gap", () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+          resumedAt={start} priorActiveSeconds={0}
+        />
+      );
+      expect(screen.getByText("0:00")).toBeInTheDocument();
+
+      vi.setSystemTime(start + 125000); // 2:05 later, no interval ticks
+      fireEvent(document, new Event("visibilitychange"));
+
+      expect(screen.getByText("2:05")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("counts prior active seconds from a resumed (saved-and-reopened) workout, not just this stretch", () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+          resumedAt={start} priorActiveSeconds={600} // 10 min already logged before this stretch
+        />
+      );
+      expect(screen.getByText("10:00")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("shows no elapsed-time header when resumedAt isn't provided", () => {
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.queryByText("0:00")).not.toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutSession /> resuming reflects a Coach change made while saved", () => {
+  test("resuming with a saved snapshot of the OLD exercise still shows the NEW one from a fresh todayOverride", () => {
+    // day.exercises is what the parent passes in fresh at mount time — by
+    // the point a resume actually happens, this already reflects any
+    // Coach-driven todayOverride/program change made while the workout sat
+    // saved. initialSets is the stale save from before that change.
+    const day = { name: "Leg Day", exercises: [{ name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120, tips: ["a", "b", "c", "d"] }] };
+    const staleSavedSets = [
+      { name: "Trap Bar Deadlift", reps: "6-8", rest: 120, tips: ["a"], logged: [{ weight: "225", reps: "6", done: true }] },
+    ];
+    render(
+      <WorkoutSession
+        day={day} isOverride={true} lastLog={null} logs={{ workouts: [] }} initialSets={staleSavedSets}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Barbell Hip Thrust")).toBeInTheDocument();
+    expect(screen.queryByText("Trap Bar Deadlift")).not.toBeInTheDocument();
   });
 });
 

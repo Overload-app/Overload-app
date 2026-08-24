@@ -10,6 +10,7 @@ import {
   inferMuscleGroup,
   splitForDays,
   capFor,
+  capForProgram,
   withTips,
   normalizeProgramTips,
   deriveSplitName,
@@ -35,6 +36,7 @@ import {
   exerciseHistory,
   exercisePR,
   exerciseLastSession,
+  mergeResumedSets,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -480,6 +482,47 @@ describe("secondsPerExercise / capFor", () => {
     const modeledSeconds = capFor(profile) * secondsPerExercise(profile.goal);
     expect(modeledSeconds / 60).toBeGreaterThanOrEqual(50);
     expect(modeledSeconds / 60).toBeLessThanOrEqual(70);
+  });
+});
+
+// Regression coverage for a real report: a tester reduced their program's
+// sets/rest specifically to fit more exercises, but the Coach kept citing
+// the same exercise-count ceiling as before — because it was computed from
+// profile.goal's static default sets/rest, with no way to reflect that the
+// actual program had since diverged from that default.
+describe("capForProgram (live ceiling from the actual current program)", () => {
+  test("recognizes a real sets/rest reduction the user made — the ceiling goes up, not stays frozen", () => {
+    const heavyProgram = { days: [{ name: "Day 1", exercises: [{ name: "Squat", sets: 4, rest: 90 }] }] };
+    const lightProgram = { days: [{ name: "Day 1", exercises: [{ name: "Squat", sets: 2, rest: 30 }] }] };
+    const heavyCap = capForProgram(heavyProgram, 30, "intermediate");
+    const lightCap = capForProgram(lightProgram, 30, "intermediate");
+    expect(lightCap).toBeGreaterThan(heavyCap);
+  });
+
+  test("averages sets/rest across every exercise in the program, not just the first one", () => {
+    const program = {
+      days: [
+        { name: "Day 1", exercises: [{ name: "A", sets: 2, rest: 30 }, { name: "B", sets: 4, rest: 90 }] },
+      ],
+    };
+    // Average sets=3, rest=60 — matches capFromSeconds fed that average directly.
+    const viaAverage = capForProgram(program, 45, "intermediate");
+    const uniform = capForProgram({ days: [{ name: "Day 1", exercises: [{ name: "A", sets: 3, rest: 60 }] }] }, 45, "intermediate");
+    expect(viaAverage).toBe(uniform);
+  });
+
+  test("returns null when there's no program yet to read real numbers from, so callers can fall back to capFor", () => {
+    expect(capForProgram(null, 30, "intermediate")).toBeNull();
+    expect(capForProgram({ days: [] }, 30, "intermediate")).toBeNull();
+  });
+
+  test("still respects the experience adjustment and the 2-exercise floor", () => {
+    const program = { days: [{ name: "Day 1", exercises: [{ name: "A", sets: 4, rest: 90 }] }] };
+    const beginnerCap = capForProgram(program, 45, "beginner");
+    const advancedCap = capForProgram(program, 45, "advanced");
+    expect(advancedCap).toBeGreaterThan(beginnerCap);
+    // A very short, set/rest-heavy combination still never drops below 2.
+    expect(capForProgram(program, 20, "beginner")).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -1054,6 +1097,48 @@ describe("exerciseLastSession", () => {
 
   test("returns null for an exercise never logged", () => {
     expect(exerciseLastSession(logs, "Never Done This")).toBeNull();
+  });
+});
+
+// Regression coverage for a real report: a user asked Coach to swap an
+// exercise while their workout sat saved-and-exited mid-session; resuming
+// kept showing the OLD exercise no matter how many times Coach "applied"
+// the change, because the saved snapshot fully overrode the current
+// exercise list instead of being merged with it.
+describe("mergeResumedSets", () => {
+  const savedSets = [
+    { name: "Trap Bar Deadlift", reps: "6-8", rest: 120, tips: ["a"], logged: [{ weight: "225", reps: "6", done: true }] },
+    { name: "Leg Press", reps: "8-10", rest: 100, tips: ["b"], logged: [{ weight: "", reps: "", done: false }] },
+  ];
+
+  test("an exercise swapped in since saving (e.g. via Coach todayOverride) replaces the old one, not the reverse", () => {
+    const freshExercises = [
+      { name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120 }, // swapped in place of Trap Bar Deadlift
+      { name: "Leg Press", sets: 1, reps: "8-10", rest: 100 },
+    ];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    const names = merged.map((e) => e.name);
+    expect(names).toEqual(["Barbell Hip Thrust", "Leg Press"]);
+    expect(names).not.toContain("Trap Bar Deadlift");
+  });
+
+  test("the swapped-in exercise starts with blank logged sets, not leftover data from the exercise it replaced", () => {
+    const freshExercises = [{ name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120 }];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    expect(merged[0].logged).toEqual([{ weight: "", reps: "", done: false }]);
+  });
+
+  test("an exercise that's still there by name keeps its already-logged progress", () => {
+    const freshExercises = [
+      { name: "Trap Bar Deadlift", sets: 1, reps: "6-8", rest: 120 },
+      { name: "Leg Press", sets: 1, reps: "8-10", rest: 100 },
+    ];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    expect(merged[0].logged).toEqual([{ weight: "225", reps: "6", done: true }]);
+  });
+
+  test("returns null (so the caller falls back to a fresh build) when there's no saved snapshot", () => {
+    expect(mergeResumedSets([{ name: "Squat", sets: 3, reps: "8-12", rest: 90 }], null)).toBeNull();
   });
 });
 

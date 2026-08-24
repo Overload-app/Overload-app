@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown, Repeat,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown, Repeat, Clock,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -549,21 +549,46 @@ const WORK_SECONDS_PER_SET = 45;
 const TRANSITION_SECONDS_PER_EXERCISE = 100;
 const REALISTIC_OVERHEAD_MULTIPLIER = 1.4;
 
-export function secondsPerExercise(goal) {
-  const scheme = GOAL_SCHEME[goal] || GOAL_SCHEME.recomp;
-  return Math.round((scheme.sets * (WORK_SECONDS_PER_SET + scheme.rest) + TRANSITION_SECONDS_PER_EXERCISE) * REALISTIC_OVERHEAD_MULTIPLIER);
+function rawSecondsPerExercise(sets, rest) {
+  return Math.round((sets * (WORK_SECONDS_PER_SET + rest) + TRANSITION_SECONDS_PER_EXERCISE) * REALISTIC_OVERHEAD_MULTIPLIER);
 }
 
-export function capFor(profile) {
-  let cap = Math.floor((profile.sessionLength * 60) / secondsPerExercise(profile.goal));
-  if (profile.experience === "advanced") cap += 1;
-  if (profile.experience === "beginner") cap -= 1;
+export function secondsPerExercise(goal) {
+  const scheme = GOAL_SCHEME[goal] || GOAL_SCHEME.recomp;
+  return rawSecondsPerExercise(scheme.sets, scheme.rest);
+}
+
+function capFromSeconds(sessionLength, perExerciseSeconds, experience) {
+  let cap = Math.floor((sessionLength * 60) / perExerciseSeconds);
+  if (experience === "advanced") cap += 1;
+  if (experience === "beginner") cap -= 1;
   // A floor of 3 forced a real overrun on the tightest realistic combination
   // (a short session + a set/rest-heavy goal like muscle-building): 3
   // exercises at ~15 min each cannot fit in 30 minutes no matter how the
   // exercises are chosen. 2 focused, fully-rested exercises is a legitimate
   // efficient session and actually fits; forcing a 3rd never did.
   return Math.max(2, cap);
+}
+
+export function capFor(profile) {
+  return capFromSeconds(profile.sessionLength, secondsPerExercise(profile.goal), profile.experience);
+}
+
+// Same ceiling math as capFor, but driven by whatever sets/rest a program
+// ACTUALLY currently uses, not the profile's default goal scheme. Real
+// report: a user asked Coach to cut sets/rest specifically to fit more
+// exercises, but the Coach kept citing the same old ceiling — because
+// capFor(profile) always reads GOAL_SCHEME[profile.goal]'s DEFAULT sets/
+// rest, with no way to know the actual program had since diverged from
+// that default. This derives the ceiling from the real, current program
+// instead, so the number Coach is given can never be stale.
+export function capForProgram(program, sessionLength, experience) {
+  const allExercises = (program?.days || []).flatMap((d) => d.exercises || []);
+  if (allExercises.length === 0) return null;
+  const avgSets = allExercises.reduce((a, e) => a + (Number(e.sets) || 0), 0) / allExercises.length;
+  const avgRest = allExercises.reduce((a, e) => a + (Number(e.rest) || 0), 0) / allExercises.length;
+  if (avgSets <= 0) return null;
+  return capFromSeconds(sessionLength, rawSecondsPerExercise(avgSets, avgRest), experience);
 }
 
 export function buildDay(kind, pool, goal, cap, offset) {
@@ -1753,14 +1778,62 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 /* ============================================================
    WORKOUT SESSION
 ============================================================ */
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives }) {
+// Resuming a saved-and-exited workout used to restore the OLD saved sets
+// wholesale, completely replacing whatever the current exercise list
+// actually is — so any Coach change made while the workout sat saved (a
+// todayOverride swap, a permanent program edit) was silently discarded on
+// resume. Real report: "Legs still has trap bar deadlift" no matter how
+// many times Coach resent the override, because resuming always restored
+// the pre-override snapshot regardless. Fresh exercises (added/swapped
+// since saving) get blank logged sets; exercises that are still there by
+// name keep whatever was already logged for them — so real progress
+// survives a save/resume cycle AND a Coach-driven change actually takes.
+export function mergeResumedSets(freshExercises, savedSets) {
+  if (!savedSets) return null;
+  const savedByName = new Map(savedSets.map((s) => [s.name, s]));
+  return freshExercises.map((ex) => savedByName.get(ex.name) || {
+    name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
+    logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
+  });
+}
+
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
-    initialSets || day.exercises.map((ex) => ({
+    mergeResumedSets(day.exercises, initialSets) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
       logged: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
     }))
   );
-  const [rest, setRest] = useState(null); // {seconds, total}
+  // {endAt: <absolute ms timestamp>, total: <seconds>} — NOT a countdown
+  // decremented once per tick. A real report: backgrounding the app (or the
+  // phone locking) paused the rest timer, which then resumed counting down
+  // from wherever it left off instead of reflecting real elapsed time —
+  // because a tick-based countdown has no idea how much real time actually
+  // passed while its setInterval was throttled/suspended in the background.
+  // Storing a fixed absolute end time and recomputing "seconds left" from
+  // Date.now() every render means the very first tick after returning to
+  // the app immediately shows the true remaining time, background gap and
+  // all — the timer effectively keeps running the whole time, it just isn't
+  // drawn while backgrounded.
+  const [rest, setRest] = useState(null);
+  const [restTick, setRestTick] = useState(0); // bumped to force a re-render; the real value always comes from Date.now() vs rest.endAt, never from this counter
+  const restSecondsLeft = rest ? Math.max(0, Math.round((rest.endAt - Date.now()) / 1000)) : null;
+  // Live "how long have I been at this" display in the header — same
+  // absolute-timestamp technique as the rest timer above (immune to
+  // background throttling), reusing the exact accumulateActiveSeconds()
+  // math the app already uses to save real duration once the workout is
+  // finished, so the live number and the saved one can never disagree.
+  const [elapsedTick, setElapsedTick] = useState(0);
+  useEffect(() => {
+    const tick = () => setElapsedTick((t) => t + 1);
+    const interval = setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
+  const elapsedSeconds = resumedAt ? accumulateActiveSeconds(priorActiveSeconds, resumedAt, Date.now()) : 0;
   const [confirmExit, setConfirmExit] = useState(false);
   const [expandedTips, setExpandedTips] = useState({});
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
@@ -1846,10 +1919,17 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
 
   useEffect(() => {
     if (rest === null) return;
-    intervalRef.current = setInterval(() => {
-      setRest((r) => (r ? { ...r, seconds: r.seconds - 1 } : null));
-    }, 1000);
-    return () => clearInterval(intervalRef.current);
+    const tick = () => setRestTick((t) => t + 1);
+    intervalRef.current = setInterval(tick, 1000);
+    // Forces an immediate recompute the moment the tab/app comes back to
+    // the foreground, rather than waiting up to a full second for the next
+    // natural tick — the number should already be correct either way, this
+    // just makes it visibly catch up instantly instead of lagging.
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(intervalRef.current);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [rest === null]);
 
   function updateSet(exIdx, setIdx, field, val) {
@@ -1875,7 +1955,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       copy[exIdx].logged[setIdx].done = newVal;
       if (newVal) {
         const restSeconds = copy[exIdx].rest;
-        setRest({ seconds: restSeconds, total: restSeconds });
+        setRest({ endAt: Date.now() + restSeconds * 1000, total: restSeconds });
 
         // Real PR check, computed from the same copy the rest-timer read
         // above (the established safe pattern here — never read a value
@@ -1911,6 +1991,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
 
   const totalSets = sets.reduce((a, e) => a + e.logged.length, 0);
   const doneSets = sets.reduce((a, e) => a + e.logged.filter((l) => l.done).length, 0);
+  const elapsedMin = Math.floor(elapsedSeconds / 60);
+  const elapsedSec = elapsedSeconds % 60;
+  const elapsedLabel = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
 
   return (
     <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 50, display: "flex", flexDirection: "column" }}>
@@ -1919,7 +2002,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <button onClick={() => setConfirmExit(true)} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.charge, fontWeight: 700 }}>{doneSets}/{totalSets} SETS</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {resumedAt && (
+              <span style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>
+                <Clock size={12} /> {elapsedLabel}
+              </span>
+            )}
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.charge, fontWeight: 700 }}>{doneSets}/{totalSets} SETS</span>
+          </div>
         </div>
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: "10px 0 0" }}>{day.name}</h2>
         {isOverride && (
@@ -2017,8 +2107,8 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
 
       {rest !== null && (
         <RestTimer
-          seconds={rest.seconds} total={rest.total}
-          onAdd={() => setRest((r) => ({ ...r, seconds: r.seconds + 15, total: r.total + 15 }))}
+          seconds={restSecondsLeft} total={rest.total}
+          onAdd={() => setRest((r) => ({ ...r, endAt: r.endAt + 15000, total: r.total + 15 }))}
           onSkip={() => setRest(null)}
         />
       )}
@@ -2445,6 +2535,13 @@ function Train({ state, startWorkout, setActiveTab }) {
 ============================================================ */
 function buildCoachSystem(state) {
   const p = state.profile;
+  // Derived from what the current program's exercises ACTUALLY use, not
+  // profile.goal's static default sets/rest — a user can ask Coach to
+  // change sets/rest specifically to fit more exercises, and a ceiling
+  // computed from the old defaults would then flatly contradict the
+  // change that was just made. Falls back to the goal-default ceiling only
+  // if there's genuinely no program yet to read real numbers from.
+  const liveCap = capForProgram(state.program, p.sessionLength, p.experience) ?? capFor(p);
   const history = state.programHistory || [];
   const historySummary = history.map((h, i) => ({
     index: i,
@@ -2494,7 +2591,7 @@ Rules:
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
-- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${capFor(p)} exercises. This is the single most common way a "${p.sessionLength}-minute" session actually runs way longer than that in real life — rest between SETS adds up fast (their goal means ~${GOAL_SCHEME[p.goal]?.sets ?? 3} sets x ${GOAL_SCHEME[p.goal]?.rest ?? 75}s rest on every exercise, before any lifting or moving-to-the-next-station time). This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
+- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. If they push back that the number doesn't make sense, explain THAT honestly (fixed per-exercise overhead, not just set/rest math) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
@@ -4176,6 +4273,8 @@ export default function App() {
           isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
           logs={state.logs}
+          resumedAt={session.resumedAt}
+          priorActiveSeconds={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.activeSeconds : 0}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
