@@ -636,6 +636,34 @@ describe("<WorkoutSession /> timers survive being backgrounded", () => {
     }
   });
 
+  // visibilitychange has historically been inconsistent on iOS Safari
+  // standalone PWAs specifically around a screen lock/unlock — pageshow
+  // and window focus are extra fallback triggers for the exact same
+  // recompute, so a lock screen is covered even if one event misbehaves.
+  test.each(["pageshow", "focus"])("a %s event also catches the timer up after a background gap", (eventName) => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+          resumedAt={Date.now()} priorActiveSeconds={0}
+        />
+      );
+      const [squatCheck] = screen.getAllByLabelText("Mark set 1 done and start rest timer");
+      fireEvent.click(squatCheck);
+      expect(screen.getByText("60")).toBeInTheDocument();
+
+      vi.setSystemTime(Date.now() + 45000);
+      fireEvent(window, new Event(eventName));
+
+      expect(screen.getByText("15")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("the live elapsed-workout header catches up correctly after a background gap", () => {
     vi.useFakeTimers();
     try {

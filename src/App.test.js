@@ -11,6 +11,7 @@ import {
   splitForDays,
   capFor,
   capForProgram,
+  isUnilateral,
   withTips,
   normalizeProgramTips,
   deriveSplitName,
@@ -507,7 +508,8 @@ describe("capForProgram (live ceiling from the actual current program)", () => {
         { name: "Day 1", exercises: [{ name: "A", sets: 2, rest: 30 }, { name: "B", sets: 4, rest: 90 }] },
       ],
     };
-    // Average sets=3, rest=60 — matches capFromSeconds fed that average directly.
+    // Landed on by averaging each exercise's own computed time (2,30 and
+    // 4,90), not just reading the first exercise's numbers.
     const viaAverage = capForProgram(program, 45, "intermediate");
     const uniform = capForProgram({ days: [{ name: "Day 1", exercises: [{ name: "A", sets: 3, rest: 60 }] }] }, 45, "intermediate");
     expect(viaAverage).toBe(uniform);
@@ -525,6 +527,33 @@ describe("capForProgram (live ceiling from the actual current program)", () => {
     expect(advancedCap).toBeGreaterThan(beginnerCap);
     // A very short, set/rest-heavy combination still never drops below 2.
     expect(capForProgram(program, 20, "beginner")).toBeGreaterThanOrEqual(2);
+  });
+
+  // A single-arm/single-leg exercise takes roughly double the time of the
+  // same sets/rest done bilaterally (both sides, one at a time) — the
+  // model needs to know that or it underestimates a unilateral-heavy day.
+  test("a unilateral exercise lowers the ceiling vs. the identical sets/rest done bilaterally", () => {
+    const bilateral = { days: [{ name: "Day 1", exercises: [{ name: "Leg Press", sets: 3, rest: 90 }] }] };
+    const unilateral = { days: [{ name: "Day 1", exercises: [{ name: "Bulgarian Split Squat", sets: 3, rest: 90 }] }] };
+    expect(capForProgram(unilateral, 45, "intermediate")).toBeLessThan(capForProgram(bilateral, 45, "intermediate"));
+  });
+});
+
+describe("isUnilateral", () => {
+  test("recognizes common single-arm/single-leg exercise names", () => {
+    for (const name of ["Bulgarian Split Squat", "Single-Arm Dumbbell Row", "Walking Lunge", "Dumbbell Step-Up", "Pistol Squat", "1-Arm Row"]) {
+      expect(isUnilateral(name)).toBe(true);
+    }
+  });
+
+  test("does not flag ordinary bilateral exercises, including ones with 'leg' in the name", () => {
+    for (const name of ["Back Squat", "Leg Press", "Leg Curl", "Leg Extension", "Barbell Row"]) {
+      expect(isUnilateral(name)).toBe(false);
+    }
+  });
+
+  test("handles a missing name without throwing", () => {
+    expect(isUnilateral(undefined)).toBe(false);
   });
 });
 

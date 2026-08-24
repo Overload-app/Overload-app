@@ -245,22 +245,22 @@ export async function fetchSimilarExercises(name, equipment, injuries) {
 ============================================================ */
 export const POOLS = {
   full: {
-    chest: ["Barbell Bench Press", "Incline DB Press", "Cable Fly", "Weighted Dip"],
+    chest: ["Barbell Bench Press", "Incline Dumbbell Press", "Cable Fly", "Weighted Dip"],
     back: ["Barbell Row", "Lat Pulldown", "Seated Cable Row", "Pull-Up"],
-    shoulders: ["Overhead Press", "DB Lateral Raise", "Face Pull", "Rear Delt Fly"],
+    shoulders: ["Overhead Press", "Dumbbell Lateral Raise", "Face Pull", "Rear Delt Fly"],
     legs: ["Back Squat", "Romanian Deadlift", "Leg Press", "Walking Lunge", "Leg Curl", "Leg Extension", "Calf Raise"],
-    biceps: ["Barbell Curl", "Hammer Curl", "Incline DB Curl"],
+    biceps: ["Barbell Curl", "Hammer Curl", "Incline Dumbbell Curl"],
     triceps: ["Tricep Pushdown", "Skull Crusher", "Overhead Cable Extension"],
     core: ["Hanging Leg Raise", "Cable Crunch", "Ab Wheel Rollout", "Plank"],
   },
   dumbbell: {
-    chest: ["DB Bench Press", "DB Incline Press", "DB Fly", "DB Floor Press"],
-    back: ["DB Row", "Renegade Row", "DB Pullover", "Chest-Supported Row"],
-    shoulders: ["DB Shoulder Press", "DB Lateral Raise", "DB Rear Delt Fly", "Arnold Press"],
-    legs: ["DB Goblet Squat", "DB Romanian Deadlift", "DB Walking Lunge", "Bulgarian Split Squat", "DB Step-Up", "DB Calf Raise"],
-    biceps: ["DB Curl", "DB Hammer Curl", "Incline DB Curl"],
-    triceps: ["DB Overhead Extension", "DB Kickback", "Close-Grip Floor Press"],
-    core: ["DB Russian Twist", "DB Side Bend", "Plank", "Reverse Crunch"],
+    chest: ["Dumbbell Bench Press", "Dumbbell Incline Press", "Dumbbell Fly", "Dumbbell Floor Press"],
+    back: ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Chest-Supported Row"],
+    shoulders: ["Dumbbell Shoulder Press", "Dumbbell Lateral Raise", "Dumbbell Rear Delt Fly", "Arnold Press"],
+    legs: ["Dumbbell Goblet Squat", "Dumbbell Romanian Deadlift", "Dumbbell Walking Lunge", "Bulgarian Split Squat", "Dumbbell Step-Up", "Dumbbell Calf Raise"],
+    biceps: ["Dumbbell Curl", "Dumbbell Hammer Curl", "Incline Dumbbell Curl"],
+    triceps: ["Dumbbell Overhead Extension", "Dumbbell Kickback", "Close-Grip Floor Press"],
+    core: ["Dumbbell Russian Twist", "Dumbbell Side Bend", "Plank", "Reverse Crunch"],
   },
   bodyweight: {
     chest: ["Push-Up", "Incline Push-Up", "Decline Push-Up", "Wide Push-Up"],
@@ -599,13 +599,25 @@ export function capFor(profile) {
 // rest, with no way to know the actual program had since diverged from
 // that default. This derives the ceiling from the real, current program
 // instead, so the number Coach is given can never be stale.
+// A single-arm/single-leg exercise takes roughly TWICE as long as its own
+// sets/rest numbers alone suggest — both sides need training, one at a
+// time, not simultaneously — and the duration model otherwise has no way
+// to know that, badly underestimating real time for a day built around
+// unilateral work.
+export function isUnilateral(name) {
+  return /single[- ]arm|single[- ]leg|\b1[- ]arm|\b1[- ]leg|bulgarian split|split squat|pistol squat|step-?up|lunge/i.test(name || "");
+}
+
 export function capForProgram(program, sessionLength, experience) {
   const allExercises = (program?.days || []).flatMap((d) => d.exercises || []);
   if (allExercises.length === 0) return null;
-  const avgSets = allExercises.reduce((a, e) => a + (Number(e.sets) || 0), 0) / allExercises.length;
-  const avgRest = allExercises.reduce((a, e) => a + (Number(e.rest) || 0), 0) / allExercises.length;
-  if (avgSets <= 0) return null;
-  return capFromSeconds(sessionLength, rawSecondsPerExercise(avgSets, avgRest), experience);
+  const perExerciseSeconds = allExercises.map((e) => {
+    const raw = rawSecondsPerExercise(Number(e.sets) || 0, Number(e.rest) || 0);
+    return isUnilateral(e.name) ? raw * 2 : raw;
+  });
+  const avgSeconds = perExerciseSeconds.reduce((a, s) => a + s, 0) / perExerciseSeconds.length;
+  if (avgSeconds <= 0) return null;
+  return capFromSeconds(sessionLength, avgSeconds, experience);
 }
 
 export function buildDay(kind, pool, goal, cap, offset) {
@@ -715,6 +727,7 @@ IMPORTANT: Do not default to an Upper/Lower split out of habit. Actually weigh w
 Design a training split and day-by-day program tailored specifically to this person — not a generic template. Weight exercise selection and volume toward their stated desired physique while staying balanced, joint-friendly, and appropriate for their experience level. Choose sets/reps/rest per exercise suited to their goal.
 
 HARD CEILING, not a suggestion: no more than ${capFor(profile)} exercises on any day. Going over this is the single most common way a "${profile.sessionLength}-minute" program actually takes way longer than that in real life — people underestimate how much rest between SETS adds up (this person's goal means ~${GOAL_SCHEME[profile.goal]?.sets ?? 3} sets x ${GOAL_SCHEME[profile.goal]?.rest ?? 75}s rest on every single exercise, before any actual lifting or moving-to-the-next-station time). If you're tempted to add "just one more" exercise to cover something, cut a less important one instead — staying at or under ${capFor(profile)} matters more than covering every muscle group in one session.
+A single-arm or single-leg ("unilateral") exercise — a Bulgarian split squat, a single-arm row, a walking lunge, a step-up — takes roughly TWICE as long as the same sets/rest would for a bilateral exercise, since both sides need training one at a time. If you include one, treat it as costing about two "slots" against the ceiling above, not one, or cut something else to compensate.
 ${profile.specificGoals ? `If they've stated specific performance goals (e.g. a target bench/squat/deadlift number, a bodyweight-strength milestone like a pull-up, a running goal), make sure the relevant lift or movement is programmed directly — include it with a rep/set scheme that actually builds toward that outcome (lower-rep strength work for a numeric lift goal, progressive skill/strength work for a bodyweight milestone), not just buried as one of several accessory options.` : ""}
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape:
@@ -723,6 +736,7 @@ Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, 
 Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
+- Spell equipment out in exercise names ("Dumbbell Bench Press," "Barbell Row") rather than gym-jargon abbreviations like "DB" or "BB" — plenty of people using this app are new to lifting and won't know the shorthand.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
 - Every exercise needs realistic sets (2-5), a rep range string, and rest in seconds (30-180).
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
@@ -1857,10 +1871,19 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   useEffect(() => {
     const tick = () => setElapsedTick((t) => t + 1);
     const interval = setInterval(tick, 1000);
+    // visibilitychange alone has historically been inconsistent on iOS
+    // Safari standalone PWAs specifically around a screen lock/unlock
+    // (as opposed to switching apps) — pageshow and window focus are
+    // cheap, harmless extra triggers for the same recompute, so a lock
+    // screen is covered even if one event doesn't fire reliably.
     document.addEventListener("visibilitychange", tick);
+    window.addEventListener("pageshow", tick);
+    window.addEventListener("focus", tick);
     return () => {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("pageshow", tick);
+      window.removeEventListener("focus", tick);
     };
   }, []);
   const elapsedSeconds = resumedAt ? accumulateActiveSeconds(priorActiveSeconds, resumedAt, Date.now()) : 0;
@@ -1956,10 +1979,18 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
     // the foreground, rather than waiting up to a full second for the next
     // natural tick — the number should already be correct either way, this
     // just makes it visibly catch up instantly instead of lagging.
+    // visibilitychange alone has historically been inconsistent on iOS
+    // Safari standalone PWAs around a screen lock/unlock specifically (as
+    // opposed to switching apps) — pageshow and window focus are cheap,
+    // harmless extra triggers for the same recompute.
     document.addEventListener("visibilitychange", tick);
+    window.addEventListener("pageshow", tick);
+    window.addEventListener("focus", tick);
     return () => {
       clearInterval(intervalRef.current);
       document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("pageshow", tick);
+      window.removeEventListener("focus", tick);
     };
   }, [rest === null]);
 
@@ -2644,13 +2675,14 @@ Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, 
 Rules:
 - For a PERMANENT change (case 1 above), always build the new "days" by editing the exact "Current program JSON" given above — never reconstruct the program from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the "days" you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
 - Only include exercises doable with their equipment (${p.equipment}).
+- Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
-- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. If they push back that the number doesn't make sense, explain THAT honestly (fixed per-exercise overhead, not just set/rest math) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
+- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one. If they push back that the number doesn't make sense, explain THAT honestly (fixed per-exercise overhead, unilateral exercises costing double, not just set/rest math) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
