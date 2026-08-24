@@ -1754,7 +1754,16 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
   const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
+  const [prCelebration, setPrCelebration] = useState(null); // {name, weight, reps} just beaten, or null
   const intervalRef = useRef(null);
+
+  // Auto-dismiss the PR toast — it's a celebratory nudge, not something that
+  // should need a tap to clear mid-set.
+  useEffect(() => {
+    if (!prCelebration) return;
+    const t = setTimeout(() => setPrCelebration(null), 4000);
+    return () => clearTimeout(t);
+  }, [prCelebration]);
 
   // Resolves the alternatives list whenever the picker opens for a new
   // exercise: use what's already baked into the program if present, else
@@ -1853,6 +1862,22 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       if (newVal) {
         const restSeconds = copy[exIdx].rest;
         setRest({ seconds: restSeconds, total: restSeconds });
+
+        // Real PR check, computed from the same copy the rest-timer read
+        // above (the established safe pattern here — never read a value
+        // back out after setSets instead of inside the updater itself).
+        // exercisePR only sees logs from BEFORE this workout was saved, so
+        // this only fires for a genuine new best, not just "heavier than
+        // an earlier set tonight."
+        const justLogged = copy[exIdx].logged[setIdx];
+        const weight = Number(justLogged.weight);
+        const reps = Number(justLogged.reps);
+        if (logs && weight > 0 && reps > 0) {
+          const priorPR = exercisePR(logs, copy[exIdx].name);
+          if (!priorPR || weight > priorPR.weight || (weight === priorPR.weight && reps > priorPR.reps)) {
+            setPrCelebration({ name: copy[exIdx].name, weight, reps });
+          }
+        }
       }
       return copy;
     });
@@ -2058,6 +2083,26 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       })()}
 
       {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} onClose={() => setDetailFor(null)} />}
+
+      {prCelebration && (
+        <div
+          role="status"
+          style={{
+            position: "fixed", top: "calc(20px + env(safe-area-inset-top, 0px))", left: 16, right: 16, zIndex: 65,
+            display: "flex", alignItems: "center", gap: 10, background: T.charge, color: "#fff", borderRadius: 12,
+            padding: "12px 14px", boxShadow: "0 8px 24px rgba(78,74,242,0.45)",
+          }}
+        >
+          <Award size={20} color="#fff" style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1 }}>NEW PR</div>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>{prCelebration.name} · {prCelebration.weight}lb × {prCelebration.reps}</div>
+          </div>
+          <button onClick={() => setPrCelebration(null)} aria-label="Dismiss PR notification" style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -2154,8 +2199,10 @@ function StatChip({ label, val, color, icon }) {
   );
 }
 
-function Home({ state, setActiveTab, startWorkout }) {
+export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   const { program, targets, logs, profile } = state;
+  const [insightDismissed, setInsightDismissed] = useState(false);
+  const insight = insightDismissed ? null : detectCoachInsight(state);
   const nextIdx = logs.workouts.length % program.days.length;
   const nextDay = program.days[nextIdx];
   const today = todayISO();
@@ -2173,6 +2220,7 @@ function Home({ state, setActiveTab, startWorkout }) {
     }
     return logs.workouts.filter((w) => last7.has(w.date)).length;
   })();
+  const progressHighlights = recentProgressHighlights(logs);
 
   return (
     <div style={{ padding: "20px 16px 90px" }}>
@@ -2194,6 +2242,35 @@ function Home({ state, setActiveTab, startWorkout }) {
           </div>
         </div>
       </div>
+
+      {/* Coach noticing something on its own, instead of only ever reacting
+          when asked — computed straight from real logged data (never a live
+          AI call, so it's instant and can't invent a pattern), and tapping
+          it opens a real Coach conversation rather than silently changing
+          anything by itself. */}
+      {insight && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, background: "#EEEDFF", border: "none", borderRadius: 12, padding: "12px 14px", marginTop: 14 }}>
+          <Sparkles size={16} color={T.charge} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: T.chargeDeep, marginBottom: 3 }}>COACH NOTICED</div>
+            <p style={{ fontSize: 13, color: T.ink, lineHeight: 1.4, margin: "0 0 8px" }}>{insight.message}</p>
+            <div style={{ display: "flex", gap: 14 }}>
+              <button
+                onClick={() => onAskCoach(insight.coachPrompt)}
+                style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}
+              >
+                Ask Coach
+              </button>
+              <button
+                onClick={() => setInsightDismissed(true)}
+                style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: 0 }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <TickRule label="Next workout" />
       <Card style={{ background: T.ink, border: "none" }}>
@@ -2234,6 +2311,24 @@ function Home({ state, setActiveTab, startWorkout }) {
         <StatChip label="Carbs" val={`${targets.carbs}g`} color={T.carb} icon={<Wheat size={16} color={T.carb} />} />
         <StatChip label="Fat" val={`${targets.fat}g`} color={T.fat} icon={<Droplet size={16} color={T.fat} />} />
       </div>
+
+      {/* Only appears when there's real, positive movement to report from the
+          most recent workout — silent otherwise, never "you got weaker." */}
+      {progressHighlights.length > 0 && (
+        <>
+          <TickRule label="Recent progress" />
+          <Card>
+            {progressHighlights.map((h, i) => (
+              <div key={h.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{h.name}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: T.good, display: "flex", alignItems: "center", gap: 4 }}>
+                  <TrendingUp size={13} /> +{h.delta}lb
+                </span>
+              </div>
+            ))}
+          </Card>
+        </>
+      )}
     </div>
   );
 }
@@ -2287,14 +2382,21 @@ function Train({ state, startWorkout, setActiveTab }) {
       <TickRule label="History" />
       {logs.workouts.length === 0 && <p style={{ color: T.steelDark, fontSize: 13 }}>No workouts logged yet.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {logs.workouts.slice().reverse().slice(0, 8).map((w, i) => (
-          <Card key={i} style={{ padding: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{w.dayName}</span>
-              <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{w.date}</span>
-            </div>
-          </Card>
-        ))}
+        {logs.workouts.slice().reverse().slice(0, 8).map((w, i) => {
+          const duration = formatDuration(w.durationSec);
+          const exCount = (w.exercises || []).length;
+          return (
+            <Card key={i} style={{ padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{w.dayName}</span>
+                <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{w.date}</span>
+              </div>
+              <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>
+                {[duration, `${exCount} exercise${exCount === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}
+              </div>
+            </Card>
+          );
+        })}
       </div>
     </div>
   );
@@ -2613,6 +2715,10 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     <div style={{ padding: "20px 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>NUTRITION</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Today's Fuel</h1>
+      {/* One-line clarity for a first-time visitor landing here from the nav
+          bar's bare "Fuel" label — the eyebrow above already says NUTRITION,
+          this spells out what that actually means before any content. */}
+      <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>Log meals and track calories & macros toward your targets.</p>
 
       <TickRule label="Calories & macros" />
       <Card style={{ marginTop: 14 }}>
@@ -2847,6 +2953,126 @@ export function exercisePR(logs, name) {
   return history.reduce((best, h) => (
     h.weight > best.weight || (h.weight === best.weight && h.reps > best.reps) ? h : best
   ), history[0]);
+}
+
+// Active-time-only workout duration: the wall-clock time the workout screen
+// was actually open, deliberately excluding any gap after "save & exit"
+// until it's resumed — saving a workout and finishing it three days later
+// shouldn't count as a three-day-long workout. Pure so the accumulation
+// itself is unit-testable without faking real timers end to end; the caller
+// supplies "now" and the timestamp the current active stretch began.
+export function accumulateActiveSeconds(priorActiveSeconds, resumedAtMs, nowMs) {
+  const thisStretch = Math.max(0, Math.round((nowMs - resumedAtMs) / 1000));
+  return (priorActiveSeconds || 0) + thisStretch;
+}
+
+// Human-readable duration for history/insight copy — "42 min" for anything
+// under an hour, "1h 12m" once it crosses that, never "0 min" for a real
+// (if very short) logged session.
+export function formatDuration(totalSeconds) {
+  if (!totalSeconds || totalSeconds <= 0) return null;
+  const minutes = Math.max(1, Math.round(totalSeconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+// Small, purely positive "you're improving" signal for the Home dashboard —
+// exercises from the most recently finished workout that went up in weight
+// compared to the time before, biggest jump first. Deliberately silent
+// (returns []) when nothing improved, rather than reporting a decline —
+// this is meant to be an occasional nudge, not a full log; a bad session
+// just doesn't get a highlight, it doesn't get called out either.
+export function recentProgressHighlights(logs, limit = 3) {
+  const workouts = logs.workouts;
+  if (!workouts || workouts.length === 0) return [];
+  const last = workouts[workouts.length - 1];
+  const names = Array.from(new Set(last.exercises.map((e) => e.name)));
+  const highlights = names
+    .map((name) => {
+      const history = exerciseHistory(logs, name);
+      if (history.length < 2) return null;
+      const latest = history[history.length - 1];
+      const prev = history[history.length - 2];
+      const delta = latest.weight - prev.weight;
+      if (delta <= 0) return null;
+      return { name, delta, weight: latest.weight, reps: latest.reps };
+    })
+    .filter(Boolean);
+  return highlights.sort((a, b) => b.delta - a.delta).slice(0, limit);
+}
+
+// Deterministic, data-driven "Coach noticed something" signal — computed
+// directly from real logged data, never a live AI call, so it's instant,
+// free, and can never hallucinate a pattern that isn't actually there.
+// Returns at most one insight, prioritized, so it stays an occasional nudge
+// rather than a stream of unsolicited opinions — this app's own dashboard
+// philosophy elsewhere is "don't clutter," this follows the same rule.
+// Tapping the resulting card sends a real message into Coach chat, so any
+// actual program change still goes through the same reviewed, revertible
+// path as any other Coach edit — this only decides WHEN to bring something
+// up, never WHAT to silently change on its own.
+export function detectCoachInsight(state) {
+  const logs = state?.logs;
+  const profile = state?.profile;
+  const program = state?.program;
+  if (!logs || !profile) return null;
+  const workouts = logs.workouts || [];
+
+  // 1. Adherence: meaningfully under their own stated weekly target, but
+  // only once there's enough history logged for that to mean something
+  // (not week one, and not a single missed day misread as a trend).
+  if (workouts.length >= 3 && profile.daysPerWeek) {
+    const last7 = new Set();
+    const cursor = new Date();
+    for (let i = 0; i < 7; i++) {
+      last7.add(dateToISO(cursor));
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    const doneThisWeek = workouts.filter((w) => last7.has(w.date)).length;
+    if (doneThisWeek < profile.daysPerWeek && doneThisWeek <= Math.floor(profile.daysPerWeek / 2) - 1) {
+      return {
+        type: "adherence",
+        message: `You've done ${doneThisWeek}/${profile.daysPerWeek} workouts this week — anything getting in the way, or should we adjust the schedule?`,
+        coachPrompt: `I've only done ${doneThisWeek} of my ${profile.daysPerWeek} planned workouts this week. Can you help me figure out what to do about it?`,
+      };
+    }
+  }
+
+  // 2. Duration overrun: the last few timed sessions consistently ran well
+  // past the session length they actually asked for.
+  const timed = workouts.filter((w) => w.durationSec).slice(-3);
+  if (timed.length >= 2 && profile.sessionLength) {
+    const avgMin = timed.reduce((a, w) => a + w.durationSec, 0) / timed.length / 60;
+    const targetMin = profile.sessionLength;
+    if (avgMin > targetMin * 1.2) {
+      const overBy = Math.round(avgMin - targetMin);
+      return {
+        type: "duration",
+        message: `Your last few sessions have run about ${overBy} min over your ${targetMin}-min target. Want me to trim the exercise count?`,
+        coachPrompt: `My last few workouts have been running about ${overBy} minutes longer than my ${targetMin}-minute target. Can you shorten my sessions so they actually fit?`,
+      };
+    }
+  }
+
+  // 3. Stalled lift: a current-program exercise whose last 3 logged top
+  // sets show no weight increase at all.
+  if (program?.days) {
+    const names = Array.from(new Set(program.days.flatMap((d) => d.exercises.map((e) => e.name))));
+    for (const name of names) {
+      const history = exerciseHistory(logs, name).slice(-3);
+      if (history.length === 3 && history.every((h) => h.weight === history[0].weight)) {
+        return {
+          type: "stalled",
+          message: `Your ${name} has held at ${history[0].weight}lb for ${history.length} sessions in a row — want to try a deload or a rep-range change?`,
+          coachPrompt: `My ${name} has been stuck at ${history[0].weight}lb for a few sessions in a row. Can you help me break through this plateau?`,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 function ExerciseProgress({ logs }) {
@@ -3533,7 +3759,10 @@ export default function App() {
   }
 
   function startWorkout(dayIdx, resume) {
-    setSession({ dayIdx, resume: !!resume });
+    // resumedAt marks the start of THIS active stretch — whether that's a
+    // brand-new workout or picking a saved one back up — so duration only
+    // ever counts time the workout screen was actually open.
+    setSession({ dayIdx, resume: !!resume, resumedAt: Date.now() });
   }
 
   // Applies a chosen swap — this step itself is always instant/offline,
@@ -3581,7 +3810,8 @@ export default function App() {
   }
 
   function saveWorkoutProgress(dayIdx, sets) {
-    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString() } }));
+    const activeSeconds = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
     setSession(null);
   }
 
@@ -3592,7 +3822,8 @@ export default function App() {
 
   function finishWorkout(sets) {
     const day = state.program.days[session.dayIdx];
-    const entry = { date: todayISO(), dayName: day.name, exercises: sets };
+    const durationSec = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
     persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null, inProgressWorkout: null }));
     setSession(null);
     setActiveTab("train");
@@ -3749,12 +3980,24 @@ export default function App() {
           </div>
         )}
         {!subscribed && trialActive && (
-          <div style={{ background: T.charge, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px" }}>
-            {trialDaysLeft(trialStartedAt)} day{trialDaysLeft(trialStartedAt) === 1 ? "" : "s"} left in your free trial — <button onClick={() => setActiveTab("profile")} style={{ background: "none", border: "none", color: "#fff", textDecoration: "underline", cursor: "pointer", fontWeight: 700, fontSize: 12, padding: 0 }}>subscribe anytime</button>
+          // A soft tint (same treatment as the Coach discoverability hint on
+          // Train) rather than a solid full-width charge-purple bar — a beta
+          // review flagged the old version as the single most attention-
+          // grabbing element on the page, which fights against the app
+          // otherwise feeling premium/calm rather than pushy about billing.
+          <div style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 12, fontWeight: 600, textAlign: "center", padding: "8px 16px" }}>
+            {trialDaysLeft(trialStartedAt)} day{trialDaysLeft(trialStartedAt) === 1 ? "" : "s"} left in your trial · <button onClick={() => setActiveTab("profile")} style={{ background: "none", border: "none", color: T.chargeDeep, textDecoration: "underline", cursor: "pointer", fontWeight: 700, fontSize: 12, padding: 0 }}>Subscribe anytime</button>
           </div>
         )}
         <div className="app-main-inner">
-          {activeTab === "home" && <Home state={state} setActiveTab={setActiveTab} startWorkout={startWorkout} />}
+          {activeTab === "home" && (
+            <Home
+              state={state}
+              setActiveTab={setActiveTab}
+              startWorkout={startWorkout}
+              onAskCoach={(prompt) => { setActiveTab("coach"); sendCoachMessage(prompt); }}
+            />
+          )}
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} setActiveTab={setActiveTab} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}

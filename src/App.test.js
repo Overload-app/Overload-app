@@ -35,6 +35,10 @@ import {
   exerciseHistory,
   exercisePR,
   exerciseLastSession,
+  accumulateActiveSeconds,
+  formatDuration,
+  recentProgressHighlights,
+  detectCoachInsight,
   claudeChat,
   fetchSimilarExercises,
   OFFLINE_MESSAGE,
@@ -1050,6 +1054,237 @@ describe("exerciseLastSession", () => {
 
   test("returns null for an exercise never logged", () => {
     expect(exerciseLastSession(logs, "Never Done This")).toBeNull();
+  });
+});
+
+describe("accumulateActiveSeconds", () => {
+  test("adds this stretch's elapsed time to whatever was already accumulated", () => {
+    const resumedAt = 1000;
+    const now = 1000 + 42_000; // 42 real seconds later
+    expect(accumulateActiveSeconds(100, resumedAt, now)).toBe(142);
+  });
+
+  test("a save-and-resume gap of days does not get counted — only time since resumedAt does", () => {
+    const resumedAt = Date.now();
+    const now = resumedAt + 30_000; // 30s of actual active time just now
+    // Even though "prior" already reflects an earlier active stretch from
+    // days ago, the gap itself (the days in between) was never accumulated
+    // in the first place — it was never part of any active stretch.
+    expect(accumulateActiveSeconds(600, resumedAt, now)).toBe(630);
+  });
+
+  test("treats a missing prior value as zero rather than NaN", () => {
+    expect(accumulateActiveSeconds(undefined, 1000, 5000)).toBe(4);
+  });
+
+  test("never goes negative even if clocks are weird", () => {
+    expect(accumulateActiveSeconds(10, 5000, 1000)).toBe(10);
+  });
+});
+
+describe("formatDuration", () => {
+  test("formats under an hour as minutes", () => {
+    expect(formatDuration(42 * 60)).toBe("42 min");
+  });
+
+  test("formats an hour or more as h/m", () => {
+    expect(formatDuration(72 * 60)).toBe("1h 12m");
+  });
+
+  test("omits minutes when it's an exact hour", () => {
+    expect(formatDuration(60 * 60)).toBe("1h");
+  });
+
+  test("rounds a sub-minute duration up to 1 min rather than showing 0", () => {
+    expect(formatDuration(20)).toBe("1 min");
+  });
+
+  test("returns null for zero/missing duration rather than a misleading '0 min'", () => {
+    expect(formatDuration(0)).toBeNull();
+    expect(formatDuration(undefined)).toBeNull();
+  });
+});
+
+describe("recentProgressHighlights", () => {
+  test("reports an exercise from the last workout whose weight went up since the time before", () => {
+    const logs = {
+      workouts: [
+        { date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+        { date: "2026-08-08", exercises: [{ name: "Bench Press", logged: [{ weight: "145", reps: "8", done: true }] }] },
+      ],
+    };
+    const highlights = recentProgressHighlights(logs);
+    expect(highlights).toEqual([{ name: "Bench Press", delta: 10, weight: 145, reps: 8 }]);
+  });
+
+  test("says nothing about an exercise that went down or stayed flat — never reports a decline", () => {
+    const logs = {
+      workouts: [
+        { date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "145", reps: "8", done: true }] }] },
+        { date: "2026-08-08", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+      ],
+    };
+    expect(recentProgressHighlights(logs)).toEqual([]);
+  });
+
+  test("ignores an exercise only logged once — nothing to compare against yet", () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] }] };
+    expect(recentProgressHighlights(logs)).toEqual([]);
+  });
+
+  test("only looks at exercises from the MOST RECENT workout, sorted biggest jump first, capped at the limit", () => {
+    const logs = {
+      workouts: [
+        { date: "2026-08-01", exercises: [
+          { name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] },
+          { name: "Squat", logged: [{ weight: "185", reps: "5", done: true }] },
+          { name: "Row", logged: [{ weight: "95", reps: "10", done: true }] },
+        ] },
+        { date: "2026-08-08", exercises: [
+          { name: "Bench Press", logged: [{ weight: "140", reps: "8", done: true }] }, // +5
+          { name: "Squat", logged: [{ weight: "205", reps: "5", done: true }] }, // +20
+          { name: "Row", logged: [{ weight: "100", reps: "10", done: true }] }, // +5
+        ] },
+      ],
+    };
+    const highlights = recentProgressHighlights(logs, 2);
+    expect(highlights).toHaveLength(2);
+    expect(highlights[0].name).toBe("Squat"); // biggest jump first
+  });
+
+  test("returns an empty array when there are no workouts logged yet", () => {
+    expect(recentProgressHighlights({ workouts: [] })).toEqual([]);
+  });
+});
+
+describe("detectCoachInsight", () => {
+  function daysAgo(n) {
+    return dateToISO(new Date(Date.now() - n * 86400000));
+  }
+
+  test("returns null with no logs/profile at all", () => {
+    expect(detectCoachInsight({})).toBeNull();
+    expect(detectCoachInsight(null)).toBeNull();
+  });
+
+  test("returns null for a healthy state — good adherence, on-time duration, no stalled lift", () => {
+    const state = {
+      profile: { daysPerWeek: 3, sessionLength: 45 },
+      program: { days: [{ name: "Day 1", exercises: [{ name: "Bench Press" }] }] },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), dayName: "Day 1", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }], durationSec: 2600 },
+          { date: daysAgo(3), dayName: "Day 1", exercises: [{ name: "Bench Press", logged: [{ weight: "130", reps: "8", done: true }] }], durationSec: 2500 },
+          { date: daysAgo(5), dayName: "Day 1", exercises: [{ name: "Bench Press", logged: [{ weight: "125", reps: "8", done: true }] }], durationSec: 2500 },
+        ],
+      },
+    };
+    expect(detectCoachInsight(state)).toBeNull();
+  });
+
+  test("flags low adherence once there's enough history to mean something", () => {
+    const state = {
+      profile: { daysPerWeek: 4 },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [] }, // only 1 done this week
+          { date: daysAgo(20), exercises: [] },
+          { date: daysAgo(25), exercises: [] },
+        ],
+      },
+    };
+    const insight = detectCoachInsight(state);
+    expect(insight.type).toBe("adherence");
+    expect(insight.message).toContain("1/4");
+  });
+
+  test("does not flag adherence in week one — not enough history logged yet", () => {
+    const state = { profile: { daysPerWeek: 4 }, logs: { workouts: [{ date: daysAgo(0), exercises: [] }] } };
+    expect(detectCoachInsight(state)).toBeNull();
+  });
+
+  test("flags a consistent duration overrun across the last few timed sessions", () => {
+    const state = {
+      profile: { sessionLength: 30 }, // no daysPerWeek — isolates this from the adherence branch
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [], durationSec: 2700 }, // 45 min
+          { date: daysAgo(8), exercises: [], durationSec: 2700 },
+          { date: daysAgo(15), exercises: [], durationSec: 2700 },
+        ],
+      },
+    };
+    const insight = detectCoachInsight(state);
+    expect(insight.type).toBe("duration");
+    expect(insight.message).toContain("15 min"); // 45 actual - 30 target
+  });
+
+  test("does not flag duration from a single unusually long session", () => {
+    const state = {
+      profile: { sessionLength: 30 },
+      logs: { workouts: [{ date: daysAgo(1), exercises: [], durationSec: 5400 }] }, // only one timed session
+    };
+    expect(detectCoachInsight(state)).toBeNull();
+  });
+
+  test("flags a lift that's held the exact same weight for 3 sessions in a row", () => {
+    const state = {
+      profile: {},
+      program: { days: [{ name: "Day 1", exercises: [{ name: "Bench Press" }] }] },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+          { date: daysAgo(8), exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+          { date: daysAgo(15), exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+        ],
+      },
+    };
+    const insight = detectCoachInsight(state);
+    expect(insight.type).toBe("stalled");
+    expect(insight.message).toContain("Bench Press");
+    expect(insight.message).toContain("135lb");
+  });
+
+  test("does not flag a lift that's still progressing", () => {
+    const state = {
+      profile: {},
+      program: { days: [{ name: "Day 1", exercises: [{ name: "Bench Press" }] }] },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [{ name: "Bench Press", logged: [{ weight: "145", reps: "8", done: true }] }] },
+          { date: daysAgo(8), exercises: [{ name: "Bench Press", logged: [{ weight: "140", reps: "8", done: true }] }] },
+          { date: daysAgo(15), exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+        ],
+      },
+    };
+    expect(detectCoachInsight(state)).toBeNull();
+  });
+
+  test("prioritizes adherence over a duration overrun when both would apply", () => {
+    const state = {
+      profile: { daysPerWeek: 4, sessionLength: 30 },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [], durationSec: 2700 },
+          { date: daysAgo(20), exercises: [], durationSec: 2700 },
+          { date: daysAgo(25), exercises: [], durationSec: 2700 },
+        ],
+      },
+    };
+    expect(detectCoachInsight(state).type).toBe("adherence");
+  });
+
+  // Every insight hands back a ready-to-send Coach message so the "Ask
+  // Coach" button can close the loop into a real, reviewable conversation
+  // rather than the app silently changing anything on its own.
+  test("every insight includes a non-empty coachPrompt to actually send", () => {
+    const state = {
+      profile: { sessionLength: 30 },
+      logs: { workouts: [{ date: daysAgo(1), exercises: [], durationSec: 2700 }, { date: daysAgo(8), exercises: [], durationSec: 2700 }] },
+    };
+    const insight = detectCoachInsight(state);
+    expect(typeof insight.coachPrompt).toBe("string");
+    expect(insight.coachPrompt.length).toBeGreaterThan(0);
   });
 });
 

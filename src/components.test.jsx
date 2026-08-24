@@ -11,7 +11,7 @@ import { describe, test, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Home, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -461,6 +461,62 @@ describe("<WorkoutSession /> History & PR", () => {
   });
 });
 
+describe("<WorkoutSession /> PR celebration", () => {
+  const day = {
+    name: "Full Body A",
+    exercises: [{ name: "Back Squat", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] }],
+  };
+
+  function setup(logsOverride) {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={logsOverride} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return user;
+  }
+
+  test("logging a set heavier than the existing PR shows a celebration toast", async () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "185", reps: "5", done: true }] }] }] };
+    const user = setup(logs);
+    await user.type(screen.getByPlaceholderText("lb"), "205");
+    await user.type(screen.getByPlaceholderText("reps"), "5");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.getByText("NEW PR")).toBeInTheDocument();
+    expect(screen.getByText("Back Squat · 205lb × 5")).toBeInTheDocument();
+  });
+
+  test("logging a set that does NOT beat the existing PR shows no toast", async () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "225", reps: "5", done: true }] }] }] };
+    const user = setup(logs);
+    await user.type(screen.getByPlaceholderText("lb"), "205");
+    await user.type(screen.getByPlaceholderText("reps"), "5");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
+  });
+
+  test("with no logged history at all, any real logged set counts as a new PR", async () => {
+    const user = setup({ workouts: [] });
+    await user.type(screen.getByPlaceholderText("lb"), "135");
+    await user.type(screen.getByPlaceholderText("reps"), "8");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.getByText("NEW PR")).toBeInTheDocument();
+  });
+
+  test("dismissing the toast hides it immediately", async () => {
+    const user = setup({ workouts: [] });
+    await user.type(screen.getByPlaceholderText("lb"), "135");
+    await user.type(screen.getByPlaceholderText("reps"), "8");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.getByText("NEW PR")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Dismiss PR notification"));
+    expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
+  });
+});
+
 describe("OnboardingSummary", () => {
   const profile = { goal: "build", daysPerWeek: 4, sessionLength: 45 };
   const program = {
@@ -500,5 +556,55 @@ describe("OnboardingSummary", () => {
     render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={onContinue} />);
     await user.click(screen.getByText(/Let's go/));
     expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("<Home /> Coach insight card", () => {
+  function baseState(overrides = {}) {
+    return {
+      program: { splitName: "Full Body", days: [{ name: "Full Body A", exercises: [{ name: "Back Squat" }] }] },
+      targets: { calories: 2200, protein: 160, carbs: 220, fat: 70 },
+      logs: { workouts: [], nutrition: [] },
+      profile: { daysPerWeek: 3, sessionLength: 45 },
+      ...overrides,
+    };
+  }
+
+  function lowAdherenceState() {
+    const daysAgo = (n) => dateToISO(new Date(Date.now() - n * 86400000));
+    return baseState({
+      profile: { daysPerWeek: 4, sessionLength: 45 },
+      logs: {
+        workouts: [
+          { date: daysAgo(1), exercises: [] },
+          { date: daysAgo(20), exercises: [] },
+          { date: daysAgo(25), exercises: [] },
+        ],
+        nutrition: [],
+      },
+    });
+  }
+
+  test("shows a Coach insight card when one applies, and Ask Coach sends it through", async () => {
+    const user = userEvent.setup();
+    const onAskCoach = vi.fn();
+    render(<Home state={lowAdherenceState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={onAskCoach} />);
+    expect(screen.getByText("COACH NOTICED")).toBeInTheDocument();
+    await user.click(screen.getByText("Ask Coach"));
+    expect(onAskCoach).toHaveBeenCalledTimes(1);
+    expect(typeof onAskCoach.mock.calls[0][0]).toBe("string");
+  });
+
+  test("dismissing the insight card hides it", async () => {
+    const user = userEvent.setup();
+    render(<Home state={lowAdherenceState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    expect(screen.getByText("COACH NOTICED")).toBeInTheDocument();
+    await user.click(screen.getByText("Dismiss"));
+    expect(screen.queryByText("COACH NOTICED")).not.toBeInTheDocument();
+  });
+
+  test("shows no insight card for a healthy state with nothing to flag", () => {
+    render(<Home state={baseState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    expect(screen.queryByText("COACH NOTICED")).not.toBeInTheDocument();
   });
 });
