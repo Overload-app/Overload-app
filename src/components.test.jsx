@@ -11,7 +11,7 @@ import { describe, test, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -401,5 +401,47 @@ describe("<WorkoutSession /> rest timer", () => {
     const undoBtn = screen.getAllByLabelText(/tap to undo/)[0];
     await user.click(undoBtn); // done -> not done
     expect(screen.queryByText("RESTING")).not.toBeInTheDocument();
+  });
+});
+
+describe("OnboardingSummary", () => {
+  const profile = { goal: "build", daysPerWeek: 4, sessionLength: 45 };
+  const program = {
+    splitName: "Upper / Lower",
+    days: [
+      { name: "Upper A", exercises: [{ name: "Bench Press" }, { name: "Row" }] },
+      { name: "Lower A", exercises: [{ name: "Squat" }] },
+    ],
+  };
+  const targets = { calories: 2600, protein: 180, carbs: 260, fat: 80 };
+
+  test("shows the split name, every day, and each day's exercise count", () => {
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={() => {}} />);
+    expect(screen.getByText("Upper / Lower")).toBeInTheDocument();
+    expect(screen.getByText("Upper A")).toBeInTheDocument();
+    expect(screen.getByText("Lower A")).toBeInTheDocument();
+    expect(screen.getByText("2 exercises")).toBeInTheDocument();
+    expect(screen.getByText("1 exercises")).toBeInTheDocument();
+  });
+
+  test("shows the calorie target and every macro target", () => {
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={() => {}} />);
+    expect(screen.getByText("2600")).toBeInTheDocument();
+    expect(screen.getByText("180g")).toBeInTheDocument();
+    expect(screen.getByText("260g")).toBeInTheDocument();
+    expect(screen.getByText("80g")).toBeInTheDocument();
+  });
+
+  test("mentions the Coach can change any of this", () => {
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={() => {}} />);
+    expect(screen.getByText(/tell your Coach/i)).toBeInTheDocument();
+  });
+
+  test("continuing calls onContinue", async () => {
+    const user = userEvent.setup();
+    const onContinue = vi.fn();
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={onContinue} />);
+    await user.click(screen.getByText(/Let's go/));
+    expect(onContinue).toHaveBeenCalledTimes(1);
   });
 });

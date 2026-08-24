@@ -604,10 +604,22 @@ export function buildProgram(profile) {
   const pool = filterPool(basePool, profile.injuries);
   const cap = capFor(profile);
   const split = splitForDays(profile.daysPerWeek, profile.experience);
-  const days = split.labels.map((label, i) => ({
-    name: label,
-    exercises: buildDay(split.kinds[i], pool, profile.goal, cap, i >= split.labels.length / 2 ? 2 : 0),
-  }));
+  // Two days sharing the same "kind" (two "full" days, two "push" days in a
+  // PPL x2 split, etc.) need to draw from different points in the pool, or
+  // they come out completely identical — real report: a 3-day Full Body
+  // split's "Full Body A" and "Full Body B" had the exact same exercises.
+  // The old offset (a flat "first half of the days get 0, second half get
+  // 2") only ever produced two buckets — for an ODD day count like 3, days 0
+  // and 1 both rounded into the same bucket. Tracking how many days have
+  // already used each kind and rotating one step further per repeat fixes
+  // this for any day count, not just even ones.
+  const kindOccurrence = {};
+  const days = split.labels.map((label, i) => {
+    const kind = split.kinds[i];
+    const occurrence = kindOccurrence[kind] || 0;
+    kindOccurrence[kind] = occurrence + 1;
+    return { name: label, exercises: buildDay(kind, pool, profile.goal, cap, occurrence) };
+  });
   return { splitName: splitDisplayName(split.key), days };
 }
 
@@ -855,9 +867,22 @@ function TickRule({ label }) {
   );
 }
 
-function Card({ children, style }) {
+function Card({ children, style, onClick }) {
+  // Optional onClick makes the whole card a real interactive control (not
+  // just decorative), so it needs the keyboard/role handling a <button>
+  // would give for free — a beta-review flagged that only a small arrow
+  // inside a card was clickable, which is an easy miss target on mobile.
+  const interactiveProps = onClick ? {
+    onClick,
+    role: "button",
+    tabIndex: 0,
+    onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(e); } },
+  } : {};
   return (
-    <div style={{ background: T.card, borderRadius: 14, padding: 16, boxShadow: "0 1px 2px rgba(18,22,28,0.06)", border: `1px solid ${T.steel}`, ...style }}>
+    <div
+      {...interactiveProps}
+      style={{ background: T.card, borderRadius: 14, padding: 16, boxShadow: "0 1px 2px rgba(18,22,28,0.06)", border: `1px solid ${T.steel}`, ...(onClick ? { cursor: "pointer" } : {}), ...style }}
+    >
       {children}
     </div>
   );
@@ -1412,6 +1437,10 @@ function Onboarding({ onComplete }) {
   const [inches, setInches] = useState(8);
   const [building, setBuilding] = useState(false);
   const [buildNote, setBuildNote] = useState("Designing your program…");
+  // Holds the finished { profile, program, targets } once built, so a short
+  // summary screen can show what was made before actually entering the app
+  // — onComplete() itself doesn't fire until they confirm from there.
+  const [summary, setSummary] = useState(null);
 
   const cur = QUIZ_STEPS[step];
   const canNext = !cur ? true
@@ -1471,7 +1500,12 @@ function Onboarding({ onComplete }) {
     // Guarantees every exercise has form tips baked in — whether they came
     // from the AI (normal case) or the offline rule-based fallback above —
     // so "How to do it" during a workout never needs a live AI call.
-    onComplete({ profile, program: normalizeProgramTips(program), targets });
+    setBuilding(false);
+    setSummary({ profile, program: normalizeProgramTips(program), targets });
+  }
+
+  if (summary) {
+    return <OnboardingSummary profile={summary.profile} program={summary.program} targets={summary.targets} onContinue={() => onComplete(summary)} />;
   }
 
   if (building) {
@@ -1605,6 +1639,73 @@ function Onboarding({ onComplete }) {
           {step === QUIZ_STEPS.length - 1 ? "Build my plan" : "Next"} <ChevronRight size={18} />
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// Shown once, right after the quiz builds a program and before the person
+// ever lands in the app itself — a beta report flagged that people didn't
+// realize their split (or anything else) could be changed by just asking
+// the Coach, so this is also the first place that gets said explicitly,
+// before they've even seen the app.
+export function OnboardingSummary({ profile, program, targets, onContinue }) {
+  const goalLabel = (GOAL_SCHEME[profile.goal] || GOAL_SCHEME.recomp).label;
+  return (
+    <div className="auth-screen" style={{ display: "flex", flexDirection: "column", background: T.paper, padding: "calc(24px + env(safe-area-inset-top, 0px)) 20px calc(20px + env(safe-area-inset-bottom, 0px))", boxSizing: "border-box" }}>
+      <style>{FONT_IMPORT}</style>
+      <style>{SHELL_CSS}</style>
+      <div style={{ flex: 1, overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Sparkles size={18} color={T.charge} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1.5, color: T.charge, fontWeight: 600 }}>YOUR PLAN IS READY</span>
+        </div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "8px 0 4px", color: T.ink }}>Here's what we built you.</h1>
+        <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 14, color: T.steelDark, lineHeight: 1.5, margin: "0 0 20px" }}>
+          Built around {goalLabel.toLowerCase()}, {profile.daysPerWeek} days a week, ~{profile.sessionLength} min sessions.
+        </p>
+
+        <TickRule label="Your split" />
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, color: T.ink }}>{program.splitName}</span>
+            <Dumbbell size={20} color={T.charge} />
+          </div>
+          <div>
+            {program.days.map((d, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+                <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 600, color: T.ink }}>{d.name}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark }}>{d.exercises.length} exercises</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <TickRule label="Food goals" />
+        <Card style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, color: T.ink }}>
+              {targets.calories}<span style={{ fontSize: 13, color: T.steelDark }}> cal / day</span>
+            </div>
+            <Flame size={24} color={T.charge} />
+          </div>
+        </Card>
+        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+          <StatChip label="Protein" val={`${targets.protein}g`} color={T.protein} icon={<Beef size={16} color={T.protein} />} />
+          <StatChip label="Carbs" val={`${targets.carbs}g`} color={T.carb} icon={<Wheat size={16} color={T.carb} />} />
+          <StatChip label="Fat" val={`${targets.fat}g`} color={T.fat} icon={<Droplet size={16} color={T.fat} />} />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "#fff", border: `1px solid ${T.steel}`, borderRadius: 12, padding: 14 }}>
+          <MessageCircle size={18} color={T.charge} style={{ flexShrink: 0, marginTop: 1 }} />
+          <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 13, color: T.ink, lineHeight: 1.5, margin: 0 }}>
+            None of this is locked in — want a different split, different exercises, or your numbers adjusted? Just tell your Coach any time.
+          </p>
+        </div>
+      </div>
+
+      <Btn variant="accent" onClick={onContinue} style={{ width: "100%", padding: "16px", marginTop: 16, flexShrink: 0 }}>
+        Let's go <ChevronRight size={18} />
+      </Btn>
     </div>
   );
 }
@@ -1966,7 +2067,7 @@ function StatChip({ label, val, color, icon }) {
 }
 
 function Home({ state, setActiveTab, startWorkout }) {
-  const { program, targets, logs } = state;
+  const { program, targets, logs, profile } = state;
   const nextIdx = logs.workouts.length % program.days.length;
   const nextDay = program.days[nextIdx];
   const today = todayISO();
@@ -1994,9 +2095,15 @@ function Home({ state, setActiveTab, startWorkout }) {
             {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
           </h1>
         </div>
-        <div style={{ background: T.ink, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
-          <div style={{ color: T.charge, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{thisWeek}</div>
-          <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>THIS WK</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ background: T.ink, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
+            <div style={{ color: T.charge, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{targets.calories}</div>
+            <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>CAL GOAL</div>
+          </div>
+          <div style={{ background: T.ink, borderRadius: 10, padding: "8px 12px", textAlign: "center" }}>
+            <div style={{ color: T.charge, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16 }}>{thisWeek}/{profile.daysPerWeek}</div>
+            <div style={{ color: "#B9BEC6", fontSize: 9, fontWeight: 700 }}>WORKOUTS WK</div>
+          </div>
         </div>
       </div>
 
@@ -2019,8 +2126,10 @@ function Home({ state, setActiveTab, startWorkout }) {
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: T.ink }}>{cals}<span style={{ fontSize: 15, color: T.steelDark }}> / {targets.calories} cal</span></div>
-            <div style={{ fontSize: 13, color: T.steelDark, marginTop: 2 }}>{Math.max(0, targets.calories - cals)} cal remaining</div>
+            {/* Leads with "remaining" as the headline number — "0 / 2645"
+                read at a glance like a zero goal, not zero eaten yet. */}
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: T.ink }}>{Math.max(0, targets.calories - cals).toLocaleString()}<span style={{ fontSize: 15, color: T.steelDark }}> cal left</span></div>
+            <div style={{ fontSize: 13, color: T.steelDark, marginTop: 2 }}>{cals.toLocaleString()} consumed of {targets.calories.toLocaleString()}</div>
           </div>
           <Ring value={cals} max={targets.calories} color={T.charge} size={64} stroke={7}>
             <Flame size={22} color={T.charge} />
@@ -2048,7 +2157,7 @@ function Train({ state, startWorkout, setActiveTab }) {
     <div style={{ padding: "20px 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>YOUR PROGRAM</span>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>{program.splitName}</h1>
-      <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>{program.days.length}-day rotating split · tap a day to log it</p>
+      <p style={{ color: T.steelDark, fontSize: 13, marginBottom: 4 }}>{program.days.length}-day rotating split · choose a session to start</p>
 
       {/* Direct answer to real beta-tester confusion: she wanted a
           different split but didn't know she could just ask for one. */}
@@ -2066,7 +2175,11 @@ function Train({ state, startWorkout, setActiveTab }) {
       <TickRule label="Sessions" />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {program.days.map((day, i) => (
-          <Card key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: i === nextIdx ? `2px solid ${T.charge}` : `1px solid ${T.steel}` }}>
+          <Card
+            key={i}
+            onClick={() => startWorkout(i)}
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: i === nextIdx ? `2px solid ${T.charge}` : `1px solid ${T.steel}` }}
+          >
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, margin: 0, color: T.ink }}>{day.name}</h3>
@@ -2074,9 +2187,11 @@ function Train({ state, startWorkout, setActiveTab }) {
               </div>
               <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{day.exercises.map((e) => e.name).join(" · ")}</div>
             </div>
-            <button onClick={() => startWorkout(i)} style={{ background: T.ink, border: "none", borderRadius: 10, width: 40, height: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            {/* Decorative now — the whole card is the click target (was just
+                this small arrow before, an easy miss on mobile). */}
+            <div style={{ background: T.ink, borderRadius: 10, width: 40, height: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <ChevronRight size={18} color="#fff" />
-            </button>
+            </div>
           </Card>
         ))}
       </div>

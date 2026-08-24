@@ -558,6 +558,20 @@ describe("buildProgram (offline rule-based fallback)", () => {
       }
     }
   });
+
+  // Regression coverage for a real report: a 3-day Full Body split's "Full
+  // Body A" and "Full Body B" came out with the exact same exercises. Root
+  // cause was the old offset formula only producing two buckets ("first
+  // half of days" vs "second half"), which collapsed to the same bucket for
+  // days 0 and 1 whenever the day count was odd (3 days -> half = 1.5).
+  test("two days sharing the same kind (e.g. a 3-day Full Body split) never come out with identical exercises", () => {
+    for (const daysPerWeek of [3, 6]) {
+      const program = buildProgram({ ...baseProfile, daysPerWeek, experience: "intermediate" });
+      const namesByDay = program.days.map((d) => d.exercises.map((e) => e.name).join(","));
+      const uniqueDays = new Set(namesByDay);
+      expect(uniqueDays.size).toBe(namesByDay.length);
+    }
+  });
 });
 
 /* ============================================================
