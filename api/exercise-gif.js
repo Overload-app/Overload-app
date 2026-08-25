@@ -2,17 +2,18 @@
 // This keeps the WorkoutX API key on the server — it never reaches the
 // browser. Mirrors api/claude.js's pattern exactly.
 
-// Real result: searching WorkoutX's own name-search endpoint for "Barbell
-// Bench Press" (about as standard an exercise as exists) came back with a
-// genuine, confirmed zero matches — a real 200 response, just nothing in
-// it. WorkoutX's own docs example only ever searches a single generic word
-// ("squat" -> matches "barbell squat"), which suggests their partial match
-// requires the SEARCH TERM to be a substring of their STORED name, not the
-// other way around — if they store this exercise as simply "Bench Press"
-// (no equipment prefix), searching the app's longer, equipment-prefixed
-// name would never match it. If the first search comes back empty, retry
-// once with a leading equipment word stripped before giving up.
-const EQUIPMENT_PREFIX = /^(barbell|dumbbell|cable|machine|smith machine|bodyweight|kettlebell|band|ez-?bar)\s+/i;
+// Confirmed from a real response (not the docs, which showed a bare array
+// and turned out to be wrong): WorkoutX wraps results as
+// { total, count, data: [...] } — an OBJECT, not a bare array. The
+// original code checked Array.isArray(results) directly on that object,
+// which is always false, so EVERY lookup was being treated as "zero
+// matches" regardless of what WorkoutX actually found. This was the whole
+// bug — never the search query itself.
+function extractItems(results) {
+  if (Array.isArray(results)) return results;
+  if (Array.isArray(results?.data)) return results.data;
+  return [];
+}
 
 async function searchWorkoutX(query, apiKey) {
   const upstream = await fetch(`https://api.workoutxapp.com/v1/exercises/name/${encodeURIComponent(query)}`, {
@@ -21,6 +22,11 @@ async function searchWorkoutX(query, apiKey) {
   const bodyText = await upstream.text();
   return { upstream, bodyText };
 }
+
+// Kept as a fallback (harmless, doesn't cost anything now that the parsing
+// itself is fixed) for the case where a full equipment-prefixed name
+// genuinely isn't in their database under that exact phrasing.
+const EQUIPMENT_PREFIX = /^(barbell|dumbbell|cable|machine|smith machine|bodyweight|kettlebell|band|ez-?bar)\s+/i;
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -58,27 +64,27 @@ export default async function handler(req, res) {
     } catch (e) {
       return res.status(502).json({ error: "WorkoutX returned a non-JSON response", detail: bodyText.slice(0, 300) });
     }
+    let items = extractItems(results);
 
-    if (Array.isArray(results) && results.length === 0) {
+    if (items.length === 0) {
       const stripped = name.replace(EQUIPMENT_PREFIX, "");
       if (stripped !== name) {
         const retry = await searchWorkoutX(stripped, apiKey);
         console.log(`WorkoutX retry (stripped equipment) for "${stripped}": ${retry.upstream.status}`, retry.bodyText.slice(0, 500));
         if (retry.upstream.ok) {
           try {
-            const retryResults = JSON.parse(retry.bodyText);
-            if (Array.isArray(retryResults) && retryResults.length > 0) results = retryResults;
+            const retryItems = extractItems(JSON.parse(retry.bodyText));
+            if (retryItems.length > 0) items = retryItems;
           } catch (e) {
             // Ignore a malformed retry response — fall through with the
-            // original (empty) results rather than failing the whole
+            // original (empty) items rather than failing the whole
             // request over a fallback attempt.
           }
         }
       }
     }
 
-    const gifUrl = Array.isArray(results) && results.length > 0 ? results[0].gifUrl : null;
-    res.status(200).json({ gifUrl: gifUrl || null, matchCount: Array.isArray(results) ? results.length : null });
+    res.status(200).json({ gifUrl: items[0]?.gifUrl || null, matchCount: items.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
