@@ -854,14 +854,17 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  test("a CONFIRMED empty match shows 'unavailable' with a Retry option", async () => {
+  // No Retry here, deliberately — a confirmed "no match" isn't a glitch,
+  // so retrying would just spend another shared WorkoutX request (a real
+  // account-wide, not per-user, 500/month quota) on the same answer.
+  test("a CONFIRMED empty match shows 'unavailable' with no Retry option", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
     const user = setup();
 
     await user.click(screen.getByText("How to do it"));
     expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
-    expect(screen.getByText("Retry")).toBeInTheDocument();
+    expect(screen.queryByText("Retry")).not.toBeInTheDocument();
   });
 
   // Regression coverage for the actual real-world bug: a bad/missing key

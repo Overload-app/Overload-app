@@ -1,14 +1,12 @@
 // Vercel automatically turns any file in /api into a serverless endpoint.
 // This keeps the WorkoutX API key on the server — it never reaches the
-// browser. Mirrors api/claude.js's pattern exactly.
+// browser. Mirrors api/claude.js's pattern.
+import { createClient } from "@supabase/supabase-js";
 
-// Confirmed from a real response (not the docs, which showed a bare array
-// and turned out to be wrong): WorkoutX wraps results as
-// { total, count, data: [...] } — an OBJECT, not a bare array. The
-// original code checked Array.isArray(results) directly on that object,
-// which is always false, so EVERY lookup was being treated as "zero
-// matches" regardless of what WorkoutX actually found. This was the whole
-// bug — never the search query itself.
+// Confirmed from a real response the user pulled directly from WorkoutX's
+// own API Tester (not the docs, which showed a bare-array example and was
+// wrong): WorkoutX wraps results as { total, count, data: [...] } — an
+// object, not a bare array.
 function extractItems(results) {
   if (Array.isArray(results)) return results;
   if (Array.isArray(results?.data)) return results.data;
@@ -23,10 +21,22 @@ async function searchWorkoutX(query, apiKey) {
   return { upstream, bodyText };
 }
 
-// Kept as a fallback (harmless, doesn't cost anything now that the parsing
-// itself is fixed) for the case where a full equipment-prefixed name
-// genuinely isn't in their database under that exact phrasing.
+// A generated program's exercise name can carry qualifiers that don't
+// exist in WorkoutX's own naming — a real report: "Leg Press (Low)" found
+// nothing even though WorkoutX obviously has a plain "Leg Press" entry.
+// Builds a list of progressively simpler search terms (full name, then
+// with any "(...)" qualifier stripped, then with a leading equipment word
+// also stripped) and tries each in order until one gets a real match.
 const EQUIPMENT_PREFIX = /^(barbell|dumbbell|cable|machine|smith machine|bodyweight|kettlebell|band|ez-?bar)\s+/i;
+export function searchCandidates(name) {
+  const candidates = [name];
+  const noParens = name.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+  if (noParens && noParens !== name) candidates.push(noParens);
+  const base = noParens || name;
+  const noEquipment = base.replace(EQUIPMENT_PREFIX, "");
+  if (noEquipment && !candidates.includes(noEquipment)) candidates.push(noEquipment);
+  return candidates;
+}
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -42,49 +52,60 @@ export default async function handler(req, res) {
   if (!name) {
     return res.status(400).json({ error: "Missing ?name= query parameter." });
   }
+  const key = name.toLowerCase();
+
+  // Shared, cross-account cache — reused from the same Supabase project the
+  // rest of the app already uses, same service-role pattern as
+  // api/stripe-webhook.js and api/create-portal-session.js (server-side
+  // only, bypasses RLS, never exposed to the browser). If ANY account has
+  // ever looked up this exact exercise before, this is a free read with no
+  // WorkoutX request at all — the whole point, since the free tier's
+  // 500 req/month is shared across every user, not per-account.
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseAdmin = supabaseUrl && serviceRoleKey ? createClient(supabaseUrl, serviceRoleKey) : null;
+
+  if (supabaseAdmin) {
+    const { data: cached } = await supabaseAdmin.from("exercise_gifs").select("gif_url").eq("name_key", key).maybeSingle();
+    if (cached) {
+      return res.status(200).json({ gifUrl: cached.gif_url || null, matchCount: cached.gif_url ? 1 : 0, source: "cache" });
+    }
+  }
 
   try {
-    let { upstream, bodyText } = await searchWorkoutX(name, apiKey);
-    // Logged either way (not just on failure) — cheap, and the only way to
-    // see what WorkoutX actually said without a passthrough. Check this in
-    // the Vercel dashboard: Project -> Deployments -> (latest) -> Functions
-    // -> exercise-gif, or `vercel logs` if you have the CLI.
-    console.log(`WorkoutX lookup for "${name}": ${upstream.status}`, bodyText.slice(0, 500));
-    if (!upstream.ok) {
-      // Quota exhausted, bad/missing key, upstream hiccup, etc. — the
-      // client treats any non-200 the same way (no GIF available for this
-      // exercise), but the real reason from WorkoutX is included here so
-      // it's visible in the browser's Network tab without needing Vercel
-      // dashboard access.
-      return res.status(upstream.status).json({ error: `WorkoutX API error ${upstream.status}`, detail: bodyText.slice(0, 300) });
-    }
-    let results;
-    try {
-      results = JSON.parse(bodyText);
-    } catch (e) {
-      return res.status(502).json({ error: "WorkoutX returned a non-JSON response", detail: bodyText.slice(0, 300) });
-    }
-    let items = extractItems(results);
-
-    if (items.length === 0) {
-      const stripped = name.replace(EQUIPMENT_PREFIX, "");
-      if (stripped !== name) {
-        const retry = await searchWorkoutX(stripped, apiKey);
-        console.log(`WorkoutX retry (stripped equipment) for "${stripped}": ${retry.upstream.status}`, retry.bodyText.slice(0, 500));
-        if (retry.upstream.ok) {
-          try {
-            const retryItems = extractItems(JSON.parse(retry.bodyText));
-            if (retryItems.length > 0) items = retryItems;
-          } catch (e) {
-            // Ignore a malformed retry response — fall through with the
-            // original (empty) items rather than failing the whole
-            // request over a fallback attempt.
-          }
-        }
+    let items = [];
+    for (const candidate of searchCandidates(name)) {
+      const { upstream, bodyText } = await searchWorkoutX(candidate, apiKey);
+      // Logged either way (not just on failure) — cheap, and the only way
+      // to see what WorkoutX actually said without a passthrough. Check
+      // this in the Vercel dashboard: Project -> Deployments -> (latest)
+      // -> Functions -> exercise-gif, or `vercel logs` if you have the CLI.
+      console.log(`WorkoutX lookup for "${candidate}": ${upstream.status}`, bodyText.slice(0, 500));
+      if (!upstream.ok) {
+        // Quota exhausted, bad/missing key, upstream hiccup, etc. — don't
+        // cache this (it's not a real answer), and don't try further
+        // candidates once the upstream itself is failing.
+        return res.status(upstream.status).json({ error: `WorkoutX API error ${upstream.status}`, detail: bodyText.slice(0, 300) });
       }
+      let parsed;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch (e) {
+        return res.status(502).json({ error: "WorkoutX returned a non-JSON response", detail: bodyText.slice(0, 300) });
+      }
+      items = extractItems(parsed);
+      if (items.length > 0) break;
     }
 
-    res.status(200).json({ gifUrl: items[0]?.gifUrl || null, matchCount: items.length });
+    const gifUrl = items[0]?.gifUrl || null;
+    // Cache the CONFIRMED result (found, or genuinely zero matches after
+    // every candidate) — global, for every account, forever (or until the
+    // row is manually cleared) — so this exact exercise never costs a
+    // second WorkoutX request, from this account or any other.
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("exercise_gifs").upsert({ name_key: key, gif_url: gifUrl, checked_at: new Date().toISOString() });
+    }
+    res.status(200).json({ gifUrl, matchCount: items.length, source: "workoutx" });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

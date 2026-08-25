@@ -837,6 +837,7 @@ Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
 - Spell equipment out in exercise names ("Dumbbell Bench Press," "Barbell Row") rather than gym-jargon abbreviations like "DB" or "BB" — plenty of people using this app are new to lifting and won't know the shorthand.
+- Keep exercise names as the plain, standard version of the movement — "Leg Press," not "Leg Press (Low)" or "Leg Press - Wide Stance." These names are looked up against a real exercise-demo database afterward, and an extra qualifier tacked on in parentheses or after a dash is a common reason a lookup for an exercise that's obviously in the database still fails to match. If a variation genuinely matters, say so in that exercise's own "tips" instead of folding it into the name.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
 - Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
@@ -2489,12 +2490,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                   style={{ width: "100%", borderRadius: 10, display: "block", marginBottom: 14 }}
                 />
               ) : key in gifCache ? (
-                <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  {/* A confirmed "no match" can still be worth a manual
-                      recheck later (WorkoutX's database grows over time),
-                      without waiting for a fresh workout session. */}
+                // No Retry here, deliberately — this is a CONFIRMED "no
+                // match," not a glitch, so retrying would just spend
+                // another shared WorkoutX request for the same answer.
+                // Unlike the transient-error case below, there's no
+                // realistic reason this would resolve differently a few
+                // seconds later.
+                <Card style={{ marginBottom: 14 }}>
                   <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Instructional video unavailable for this exercise.</span>
-                  <button onClick={() => loadGif(ex.name)} style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}>Retry</button>
                 </Card>
               ) : gifTransientError[key] ? (
                 <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -2925,6 +2928,7 @@ Rules:
 - For a PERMANENT change (case 1 above), always build the new "days" by editing the exact "Current program JSON" given above — never reconstruct the program from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the "days" you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
 - Only include exercises doable with their equipment (${p.equipment}).
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
+- Keep exercise names as the plain, standard version of the movement — "Leg Press," not "Leg Press (Low)" or similar qualifiers tacked on in parentheses or after a dash. Names get looked up against a real exercise-demo database afterward, and an extra qualifier is a common reason a lookup for an exercise that's obviously in the database still fails to match. If a variation genuinely matters, put it in that exercise's "tips" instead of folding it into the name.
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
