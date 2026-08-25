@@ -801,42 +801,74 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     vi.unstubAllGlobals();
   });
 
-  function setup(onCacheGif = vi.fn()) {
+  function setup({ onCacheGif = vi.fn(), gifCache = {}, dayOverride = day } = {}) {
     const user = userEvent.setup();
     render(
       <WorkoutSession
-        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        day={dayOverride} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
         onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
-        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()} onCacheGif={onCacheGif}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+        gifCache={gifCache} onCacheGif={onCacheGif}
       />
     );
     return user;
   }
 
-  test("opening 'How to do it' for the first time shows the GIF once the lookup resolves, and caches it", async () => {
+  test("opening 'How to do it' for the first time shows the GIF once the lookup resolves, and caches it by name", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
     const onCacheGif = vi.fn();
-    const user = setup(onCacheGif);
+    const user = setup({ onCacheGif });
 
     await user.click(screen.getByText("How to do it"));
     const img = await screen.findByAltText("Back Squat demonstration");
     expect(img.src).toBe("https://api.workoutxapp.com/v1/gifs/0201.gif");
-    expect(onCacheGif).toHaveBeenCalledWith(0, "https://api.workoutxapp.com/v1/gifs/0201.gif");
+    // Keyed by normalized NAME now, not an exercise-object index — that's
+    // the actual fix (see the multi-occurrence test below).
+    expect(onCacheGif).toHaveBeenCalledWith("back squat", "https://api.workoutxapp.com/v1/gifs/0201.gif");
   });
 
-  test("no GIF available shows the honest fallback message, not a broken image or silence", async () => {
+  test("an already-populated gifCache (from a previous session) shows the GIF immediately with no fetch at all", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const user = setup({ gifCache: { "back squat": "https://api.workoutxapp.com/v1/gifs/0201.gif" } });
+
+    await user.click(screen.getByText("How to do it"));
+    expect(await screen.findByAltText("Back Squat demonstration")).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("a CONFIRMED empty match shows 'unavailable' with a Retry option", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
     const user = setup();
 
     await user.click(screen.getByText("How to do it"));
     expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
+    expect(screen.getByText("Retry")).toBeInTheDocument();
+  });
+
+  // Regression coverage for the actual real-world bug: a bad/missing key
+  // (or any transient failure) used to get cached exactly like a genuine
+  // "not in WorkoutX's database" result — permanently, with no way to
+  // retry once the real problem was fixed. This is why the fetch had
+  // stopped firing at all for exercises tested before the key was wired up.
+  test("an UNCONFIRMED failure (bad key, network error) shows a different, retryable message — and is never cached", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: "unauthorized" }) }));
+    const onCacheGif = vi.fn();
+    const user = setup({ onCacheGif });
+
+    await user.click(screen.getByText("How to do it"));
+    expect(await screen.findByText("Couldn't check for a demo right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Instructional video unavailable for this exercise.")).not.toBeInTheDocument();
+    expect(onCacheGif).not.toHaveBeenCalled();
   });
 
   test("closing and reopening 'How to do it' does not re-fetch — the result is cached locally too, not just persisted", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) });
     vi.stubGlobal("fetch", fetchSpy);
     const user = setup();
 
@@ -846,6 +878,58 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     await user.click(screen.getByText("How to do it")); // reopen
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // The actual real-world bug: real usage data showed "Barbell Bench Press"
+  // fetched 3 separate times because the same exercise name repeated
+  // across the program (extremely common — most splits hit a muscle group
+  // more than once a week) had no way to know it had already been looked
+  // up. This proves the fix directly: two DIFFERENT exercise entries with
+  // the same name, opening both only fetches once.
+  test("the same exercise name appearing more than once in the day only fetches once", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) });
+    vi.stubGlobal("fetch", fetchSpy);
+    const repeatedDay = {
+      name: "Full Body A",
+      exercises: [
+        { name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] },
+        { name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] },
+      ],
+    };
+    const user = setup({ dayOverride: repeatedDay });
+
+    const [first, second] = screen.getAllByText("How to do it");
+    await user.click(first);
+    await screen.findAllByAltText("Back Squat demonstration");
+    await user.click(second);
+    await screen.findAllByAltText("Back Squat demonstration");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // Uncovered by testing the fetch-dedup above: "How to do it" open/closed
+  // state used to be keyed by exercise NAME too, so two same-named
+  // exercises shared one toggle — opening the second one's tips actually
+  // COLLAPSED the first, since they read/wrote the exact same state key.
+  test("two same-named exercises expand and collapse independently", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
+    const repeatedDay = {
+      name: "Full Body A",
+      exercises: [
+        { name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] },
+        { name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] },
+      ],
+    };
+    const user = setup({ dayOverride: repeatedDay });
+
+    const [first, second] = screen.getAllByText("How to do it");
+    await user.click(first);
+    await screen.findByAltText("Back Squat demonstration"); // first card's tips are open
+
+    await user.click(second); // opening the second should NOT collapse the first
+    expect(await screen.findAllByAltText("Back Squat demonstration")).toHaveLength(2);
   });
 });
 

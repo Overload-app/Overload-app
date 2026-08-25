@@ -13,6 +13,7 @@ import {
   capForProgram,
   isUnilateral,
   fetchExerciseGif,
+  normalizeGifKey,
   withTips,
   normalizeProgramTips,
   deriveSplitName,
@@ -1578,30 +1579,53 @@ describe("fetchExerciseGif", () => {
     vi.unstubAllGlobals();
   });
 
-  test("returns null and never calls fetch when offline", async () => {
+  // Real usage data: a Barbell Bench Press lookup that failed once (before
+  // the API key was fully wired up) got permanently cached as "no GIF" —
+  // because the old code cached ANY result, confirmed or not. "confirmed"
+  // is what the caller uses to decide whether a result is safe to
+  // permanently cache; these pin exactly which outcomes are which.
+  test("offline: unconfirmed (retryable later), never calls fetch", async () => {
     vi.stubGlobal("navigator", { onLine: false });
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
-    expect(await fetchExerciseGif("Back Squat")).toBeNull();
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  test("returns the gifUrl on a successful lookup", async () => {
+  test("a successful lookup with a match: confirmed, returns the real gifUrl", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif" }) }));
-    expect(await fetchExerciseGif("Back Squat")).toBe("https://api.workoutxapp.com/v1/gifs/0201.gif");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", confirmed: true });
   });
 
-  test("returns null (not a throw) for a non-200 response — quota exhausted, not found, etc.", async () => {
+  test("a successful lookup with genuinely no match: confirmed, gifUrl null", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
-    expect(await fetchExerciseGif("Some Made-Up Exercise")).toBeNull();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
+    expect(await fetchExerciseGif("Some Made-Up Exercise")).toEqual({ gifUrl: null, confirmed: true });
   });
 
-  test("returns null (not a throw) if fetch itself rejects", async () => {
+  test("a non-200 response (bad key, quota, upstream error): unconfirmed, not a throw", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: "unauthorized" }) }));
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
+  });
+
+  test("fetch itself rejecting (network failure): unconfirmed, not a throw", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
-    expect(await fetchExerciseGif("Back Squat")).toBeNull();
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
+  });
+});
+
+describe("normalizeGifKey", () => {
+  test("lowercases and trims so different casing/whitespace hit the same cache entry", () => {
+    expect(normalizeGifKey("Barbell Bench Press")).toBe("barbell bench press");
+    expect(normalizeGifKey("  Barbell Bench Press  ")).toBe("barbell bench press");
+    expect(normalizeGifKey("BARBELL BENCH PRESS")).toBe("barbell bench press");
+  });
+
+  test("handles a missing name without throwing", () => {
+    expect(normalizeGifKey(undefined)).toBe("");
   });
 });
 

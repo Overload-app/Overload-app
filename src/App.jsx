@@ -240,25 +240,41 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // thrown error) for "no GIF available" in every case — offline, not
 // found, quota exhausted — so the UI can show one honest fallback message
 // ("Instructional video unavailable") regardless of which of those it was.
+// Returns { gifUrl, confirmed }. "confirmed" is the important part: only a
+// genuine WorkoutX response (found or a real empty match) is confirmed —
+// everything else (offline, a bad/missing key, quota, a network error) is
+// NOT confirmed. The caller should only ever permanently cache a confirmed
+// result; caching an unconfirmed failure would mean a transient problem
+// (like a key that wasn't wired up correctly yet) becomes a PERMANENT
+// "no GIF" for that exercise, with no way to ever retry once the real
+// problem is fixed — which is exactly the bug this replaces.
+// Cache key for the GLOBAL, account-wide GIF cache (state.gifCache) — real
+// usage data showed "Barbell Bench Press" fetched 3 separate times because
+// the cache lived on each individual exercise OBJECT, so the same exercise
+// name appearing on more than one day of the program (extremely common —
+// most splits repeat a muscle group at least once a week) each had their
+// own independent, uncached slot. Keying by normalized name instead makes
+// it truly "ask WorkoutX for this exercise at most once, ever."
+export function normalizeGifKey(name) {
+  return (name || "").trim().toLowerCase();
+}
+
 export async function fetchExerciseGif(name) {
-  if (!navigator.onLine) return null;
+  if (!navigator.onLine) return { gifUrl: null, confirmed: false };
   try {
     const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`);
     const data = await res.json().catch(() => null);
     if (!res.ok) {
-      // Logged, not swallowed — "no GIF" always has an honest reason
-      // (bad/missing key, quota, no match), and it should be visible in
-      // the browser console without needing Vercel dashboard access.
       console.warn(`Exercise GIF lookup failed for "${name}": ${res.status}`, data?.error, data?.detail);
-      return null;
+      return { gifUrl: null, confirmed: false };
     }
     if (data?.matchCount === 0) {
       console.warn(`Exercise GIF lookup: no WorkoutX match for "${name}"`);
     }
-    return data?.gifUrl || null;
+    return { gifUrl: data?.gifUrl || null, confirmed: true };
   } catch (e) {
     console.warn(`Exercise GIF lookup threw for "${name}":`, e.message);
-    return null;
+    return { gifUrl: null, confirmed: false };
   }
 }
 
@@ -1935,7 +1951,7 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, onCacheGif, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -2064,27 +2080,64 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   // Tips are baked into the exercise data at program-generation time (see
   // normalizeProgramTips/tipsForExercise), so this is just a local toggle —
   // no AI call, no loading state, works with zero signal at the gym.
-  // Demo GIF lookup is lazy and one-time per exercise, ever — only fires
-  // the first time someone actually opens "How to do it" for it (never at
-  // program-generation time, and never again once cached), since the free
-  // WorkoutX tier is a shared 500 requests/month, not per-user.
-  // ex.gifUrl: undefined = never checked, null = checked and none found,
-  // a string = the real URL.
+  // Demo GIF lookup is lazy and one-time per exercise NAME, ever — only
+  // fires the first time someone opens "How to do it" for a name that
+  // isn't in gifCache yet (never at program-generation time), since the
+  // free WorkoutX tier is a shared 500 requests/month, not per-user.
+  // gifCache[key]: absent = never checked, null = checked and confirmed
+  // none found, a string = the real URL.
+  // Local, in-session mirror of the GLOBAL gifCache prop — lets a fresh
+  // lookup show up immediately without waiting on the parent's persist
+  // round-trip (same reasoning as the two-write pattern used elsewhere:
+  // the parent's gifCache prop won't reflect a change until after persist()
+  // resolves and a re-render happens, which is too slow for "tap and see
+  // the GIF appear").
+  const [localGifCache, setLocalGifCache] = useState({});
+  const gifCache = { ...(propGifCache || {}), ...localGifCache };
+  // Distinct from "confirmed unavailable" (which lives in gifCache as
+  // null) — this is "we tried just now and couldn't tell," so the UI can
+  // be honest about the difference instead of implying WorkoutX was
+  // actually checked and came back empty.
+  const [gifTransientError, setGifTransientError] = useState({});
+
+  function loadGif(name) {
+    const key = normalizeGifKey(name);
+    setGifLoading((g) => ({ ...g, [key]: true }));
+    setGifTransientError((g) => ({ ...g, [key]: false }));
+    fetchExerciseGif(name).then(({ gifUrl, confirmed }) => {
+      // Only a CONFIRMED result gets permanently cached. Caching an
+      // unconfirmed failure (offline, a key that wasn't set up yet, quota,
+      // a network hiccup) would mean a transient problem becomes a
+      // PERMANENT "no GIF," with no way to ever retry once the real
+      // problem's fixed — that was the actual bug behind "nothing shows up
+      // in the console," since the fetch was never even firing again after
+      // the first, uncached-away failure.
+      if (confirmed) {
+        setLocalGifCache((c) => ({ ...c, [key]: gifUrl }));
+        onCacheGif?.(key, gifUrl);
+      } else {
+        setGifTransientError((g) => ({ ...g, [key]: true }));
+      }
+      setGifLoading((g) => ({ ...g, [key]: false }));
+    });
+  }
+
   function toggleTips(exIdx, name) {
-    setExpandedTips((e) => ({ ...e, [name]: !e[name] }));
-    const ex = sets[exIdx];
-    if (ex.gifUrl === undefined && !gifLoading[name]) {
-      setGifLoading((g) => ({ ...g, [name]: true }));
-      fetchExerciseGif(name).then((gifUrl) => {
-        // Two writes, deliberately: the local `sets` array is what THIS
-        // session actually renders from, and it's a separate copy from
-        // the parent's program data by this point — persisting via
-        // onCacheGif alone would only show up on the NEXT workout, not
-        // this one (the same staleness class as the earlier resume bug).
-        setSets((s) => s.map((e2, i) => (i === exIdx ? { ...e2, gifUrl } : e2)));
-        onCacheGif?.(exIdx, gifUrl);
-        setGifLoading((g) => ({ ...g, [name]: false }));
-      });
+    // Keyed by exIdx, not name — two exercises sharing a name (the exact
+    // scenario that caused the GIF-caching bug) shouldn't have their
+    // "How to do it" open/closed state coupled together too; each card's
+    // own expand/collapse is independent of what any same-named exercise
+    // elsewhere in the day is doing.
+    setExpandedTips((e) => ({ ...e, [exIdx]: !e[exIdx] }));
+    const key = normalizeGifKey(name);
+    // Real usage data: the same exercise appearing on more than one day of
+    // a program (very common) used to trigger a separate fetch for each
+    // occurrence, because the cache lived per exercise-object instead of
+    // per exercise NAME. Checking the shared gifCache here — instead of
+    // some per-exercise field — is what actually makes "ask WorkoutX for
+    // this exercise at most once, ever" true.
+    if (!(key in gifCache) && !gifLoading[key]) {
+      loadGif(name);
     }
   }
 
@@ -2223,7 +2276,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
               >
                 <Info size={13} /> How to do it
-                <ChevronDown size={13} style={{ transform: expandedTips[ex.name] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                <ChevronDown size={13} style={{ transform: expandedTips[exIdx] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
               </button>
               <button
                 onClick={() => { setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setSwapPickerIdx(exIdx); }}
@@ -2238,20 +2291,43 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 <TrendingUp size={13} /> History & PR
               </button>
             </div>
-            {expandedTips[ex.name] && (
+            {expandedTips[exIdx] && (
               <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
-                {gifLoading[ex.name] ? (
+                {gifLoading[normalizeGifKey(ex.name)] ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.steelDark, marginBottom: 8 }}>
                     <Loader2 size={13} className="spin" /> Loading demo…
                   </div>
-                ) : ex.gifUrl ? (
+                ) : gifCache[normalizeGifKey(ex.name)] ? (
                   <img
-                    src={ex.gifUrl} alt={`${ex.name} demonstration`}
+                    src={gifCache[normalizeGifKey(ex.name)]} alt={`${ex.name} demonstration`}
                     style={{ width: "100%", maxWidth: 260, borderRadius: 8, display: "block", marginBottom: 8 }}
                   />
-                ) : ex.gifUrl === null ? (
-                  <div style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic", marginBottom: 8 }}>
-                    Instructional video unavailable for this exercise.
+                ) : normalizeGifKey(ex.name) in gifCache ? (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic" }}>
+                      Instructional video unavailable for this exercise.
+                    </span>
+                    {/* A confirmed "no match" can still be worth a manual
+                        recheck later (WorkoutX's database grows over time),
+                        without waiting for a fresh workout session. */}
+                    <button
+                      onClick={() => loadGif(ex.name)}
+                      style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : gifTransientError[normalizeGifKey(ex.name)] ? (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic" }}>
+                      Couldn't check for a demo right now.
+                    </span>
+                    <button
+                      onClick={() => loadGif(ex.name)}
+                      style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}
+                    >
+                      Retry
+                    </button>
                   </div>
                 ) : null}
                 <ul style={{ margin: 0, paddingLeft: 16 }}>
@@ -4277,6 +4353,7 @@ export default function App() {
       inProgressWorkout: null,
       coachUsage: null,
       programHistory: [],
+      gifCache: {},
     };
     persist(fresh);
   }
@@ -4332,19 +4409,16 @@ export default function App() {
     });
   }
 
-  // Same shape as cacheAlternatives — caches the WorkoutX demo GIF lookup
-  // onto the exercise permanently (gifUrl: a real URL string, or null for
-  // "checked, none available") so it's a one-time cost per exercise ever,
-  // not per workout session.
-  function cacheGif(dayIdx, exIdx, gifUrl) {
-    persist((prev) => {
-      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
-      const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
-      const newExercises = baseExercises.map((ex, i) => (i === exIdx ? { ...ex, gifUrl } : ex));
-      if (hasOverride) return { ...prev, todayOverride: newExercises };
-      const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
-      return { ...prev, program: { ...prev.program, days: newDays } };
-    });
+  // Global, account-wide, name-keyed WorkoutX GIF cache — gifUrl is a real
+  // URL string, or null for "checked, confirmed none available". Real
+  // usage data showed the earlier per-exercise-object version fetching
+  // "Barbell Bench Press" 3 separate times, because the same exercise name
+  // appearing on more than one day of the program each had its own
+  // independent, uncached slot. Keyed by name instead, this is a genuine
+  // one-time cost per exercise ever, for the whole account — not per
+  // occurrence, not per workout session.
+  function cacheGif(key, gifUrl) {
+    persist((prev) => ({ ...prev, gifCache: { ...(prev.gifCache || {}), [key]: gifUrl } }));
   }
 
   function saveWorkoutProgress(dayIdx, sets) {
@@ -4610,7 +4684,8 @@ export default function App() {
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}
           onCacheAlternatives={(exIdx, alts) => cacheAlternatives(session.dayIdx, exIdx, alts)}
-          onCacheGif={(exIdx, gifUrl) => cacheGif(session.dayIdx, exIdx, gifUrl)}
+          gifCache={state.gifCache || {}}
+          onCacheGif={cacheGif}
         />
       )}
 
