@@ -52,7 +52,12 @@ import {
   claudeChat,
   fetchSimilarExercises,
   OFFLINE_MESSAGE,
+  loadState,
+  saveState,
 } from "./App.jsx";
+import { supabase } from "./supabaseClient.js";
+
+vi.mock("./supabaseClient.js", () => ({ supabase: { from: vi.fn() } }));
 
 // Baseline profile fields calcTargets/buildProgram actually read — kept
 // minimal and overridden per test so each test's intent is obvious from
@@ -537,6 +542,23 @@ describe("planSetsRest", () => {
     expect(capFor(profile)).toBeGreaterThanOrEqual(4);
   });
 
+  test("a beginner still gets at least 4 exercises when the time budget has room for it — planSetsRest used to stop trimming as soon as the RAW count hit 4, before capFor's own beginner -1 adjustment dropped the final cap to 3", () => {
+    // 34 min has enough headroom that trimming down to the sets/rest floor
+    // reaches a raw count of 5 — old code stopped trimming the moment the
+    // raw count first hit 4 (never checking the -1 adjustment beginners get
+    // downstream), landing beginners on a real report of "only 3 exercises".
+    const profile = { sessionLength: 34, goal: "build", experience: "beginner" };
+    expect(capFor(profile)).toBeGreaterThanOrEqual(4);
+  });
+
+  test("a session too short to physically fit 4 even at the sets/rest floor honestly returns fewer, rather than trimming below the floor", () => {
+    const profile = { sessionLength: 25, goal: "build", experience: "beginner" };
+    const { sets, rest } = planSetsRest(profile);
+    expect(sets).toBeGreaterThanOrEqual(2);
+    expect(rest).toBeGreaterThanOrEqual(45);
+    expect(capFor(profile)).toBeLessThan(4); // genuinely can't fit 4 at the floor — not a bug
+  });
+
   test("the offline program builder actually bakes the adapted sets/rest into every exercise, not the textbook scheme", () => {
     const profile = { ...baseProfile, sessionLength: 30, goal: "build", experience: "intermediate", daysPerWeek: 3 };
     const program = buildProgram(profile);
@@ -701,7 +723,7 @@ describe("buildProgram (offline rule-based fallback)", () => {
   test("respects injury exclusions end to end", () => {
     const program = buildProgram({ ...baseProfile, injuries: ["knees"] });
     const names = program.days.flatMap((d) => d.exercises.map((e) => e.name));
-    expect(names).not.toContain("Back Squat");
+    expect(names).not.toContain("Barbell Squat");
   });
 
   test("a longer session produces at least as many exercises per day as a shorter one", () => {
@@ -966,6 +988,91 @@ describe("local storage layer", () => {
   test("pending-sync flags are per-user", () => {
     setPendingSync("user-1", true);
     expect(hasPendingSync("user-2")).toBe(false);
+  });
+});
+
+/* ============================================================
+   SYNC RACE: loadState/saveState vs. a reload/exit that beats the network
+   (real reports: finished-set progress, and a Coach todayOverride swap,
+   both silently vanished after a reload or app exit — loadState always
+   trusted a successful server read, even when a just-finished local save's
+   upsert hadn't landed yet and the server read was simply stale.)
+============================================================ */
+describe("loadState / saveState race with a not-yet-confirmed save", () => {
+  class MemoryStorage {
+    constructor() { this.store = new Map(); }
+    getItem(key) { return this.store.has(key) ? this.store.get(key) : null; }
+    setItem(key, value) { this.store.set(key, String(value)); }
+    removeItem(key) { this.store.delete(key); }
+    clear() { this.store.clear(); }
+  }
+
+  beforeEach(() => {
+    globalThis.localStorage = new MemoryStorage();
+    vi.clearAllMocks();
+  });
+
+  function mockSupabase({ maybeSingle, upsert }) {
+    supabase.from.mockImplementation(() => ({
+      select: () => ({ eq: () => ({ maybeSingle }) }),
+      upsert,
+    }));
+  }
+
+  test("saveState marks the sync pending BEFORE the upsert resolves, so a reload mid-flight can tell local is newer", async () => {
+    let resolveUpsert;
+    const upsert = vi.fn(() => new Promise((r) => { resolveUpsert = r; }));
+    mockSupabase({ maybeSingle: vi.fn(), upsert });
+
+    const savePromise = saveState("user-1", { value: "new" });
+    // Still in flight — pending must already be set, not only after failure.
+    expect(hasPendingSync("user-1")).toBe(true);
+    resolveUpsert({ error: null });
+    await savePromise;
+    expect(hasPendingSync("user-1")).toBe(false);
+  });
+
+  test("saveState leaves the sync pending on a genuine upsert failure", async () => {
+    const upsert = vi.fn().mockResolvedValue({ error: new Error("network down") });
+    mockSupabase({ maybeSingle: vi.fn(), upsert });
+
+    const ok = await saveState("user-1", { value: "new" });
+    expect(ok).toBe(false);
+    expect(hasPendingSync("user-1")).toBe(true);
+  });
+
+  test("loadState prefers the local cache over a successful-but-stale server read when a save is still pending", async () => {
+    writeLocalState("user-1", { value: "newer, saved locally" });
+    setPendingSync("user-1", true);
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { state: { value: "stale server copy" } }, error: null });
+    const upsert = vi.fn();
+    mockSupabase({ maybeSingle, upsert });
+
+    const { state, fromCache } = await loadState("user-1");
+    expect(state).toEqual({ value: "newer, saved locally" });
+    expect(fromCache).toBe(true);
+    expect(maybeSingle).not.toHaveBeenCalled(); // never even asks the server — local is already known newer
+  });
+
+  test("loadState trusts the server as usual once nothing is pending", async () => {
+    writeLocalState("user-1", { value: "old local copy" });
+    setPendingSync("user-1", false);
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { state: { value: "confirmed server copy" } }, error: null });
+    mockSupabase({ maybeSingle, upsert: vi.fn() });
+
+    const { state, fromCache } = await loadState("user-1");
+    expect(state).toEqual({ value: "confirmed server copy" });
+    expect(fromCache).toBe(false);
+  });
+
+  test("loadState still falls back to local cache if pending is true but there's no local cache to trust", async () => {
+    setPendingSync("user-1", true); // e.g. pending flag from a different, since-cleared browser profile
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { state: { value: "server copy" } }, error: null });
+    mockSupabase({ maybeSingle, upsert: vi.fn() });
+
+    const { state } = await loadState("user-1");
+    expect(state).toEqual({ value: "server copy" });
+    expect(maybeSingle).toHaveBeenCalled();
   });
 });
 
@@ -1549,13 +1656,19 @@ describe("claudeChat", () => {
     vi.unstubAllGlobals();
   });
 
-  test("fails fast with an offline error when navigator.onLine is false — never calls fetch", async () => {
+  test("still calls fetch and succeeds even when navigator.onLine falsely reports offline — real report: a genuinely online user got a false 'no internet' error", async () => {
+    // navigator.onLine is a flaky browser flag, not a real connectivity
+    // check (known to misreport, especially on mobile/PWA) — it must never
+    // gate the request. Only an actual fetch failure means offline.
     vi.stubGlobal("navigator", { onLine: false });
-    const fetchSpy = vi.fn();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "hi" }] }),
+    });
     vi.stubGlobal("fetch", fetchSpy);
 
-    await expect(claudeChat({ system: "s", messages: [] })).rejects.toMatchObject({ offline: true, message: OFFLINE_MESSAGE });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("hi");
+    expect(fetchSpy).toHaveBeenCalled();
   });
 
   test("treats a fetch()-level failure (DNS, connection refused) as offline too, even if navigator.onLine lied", async () => {
@@ -1677,8 +1790,11 @@ describe("fetchSimilarExercises", () => {
   });
 
   test("propagates the offline error when there's no connection, for the caller to fall back on", async () => {
+    // navigator.onLine is deliberately no longer trusted as a gate (see
+    // claudeChat tests) — a genuine connectivity failure is what actually
+    // makes fetch() itself reject, so that's what real offline looks like.
     vi.stubGlobal("navigator", { onLine: false });
-    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
     await expect(fetchSimilarExercises("Back Squat", "full", [])).rejects.toMatchObject({ offline: true });
   });

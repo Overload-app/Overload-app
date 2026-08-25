@@ -105,11 +105,13 @@ function offlineError() {
 }
 
 export async function claudeChat({ system, messages }) {
-  // Fail fast and with a clear reason rather than letting a doomed request
-  // hang — every AI feature in the app (Coach, meal suggestions, photo
-  // analysis, program generation) routes through here, so this one check
-  // covers all of them.
-  if (!navigator.onLine) throw offlineError();
+  // Deliberately NOT gated on navigator.onLine — it's a browser-reported
+  // flag, not a real connectivity check, and real report: a user got "No
+  // internet connection" while genuinely online (known flaky behavior,
+  // especially on mobile/PWA after the tab was backgrounded). The actual
+  // fetch() below is the real test; its catch block already produces the
+  // identical offlineError() for a genuine connectivity failure, so gating
+  // here first only added a way to be wrong, never a way to be right sooner.
   let res;
   try {
     res = await fetch("/api/claude", {
@@ -304,7 +306,15 @@ export const POOLS = {
     chest: ["Barbell Bench Press", "Incline Dumbbell Press", "Cable Fly", "Weighted Dip"],
     back: ["Barbell Row", "Lat Pulldown", "Seated Cable Row", "Pull-Up"],
     shoulders: ["Overhead Press", "Dumbbell Lateral Raise", "Face Pull", "Rear Delt Fly"],
-    legs: ["Back Squat", "Romanian Deadlift", "Leg Press", "Walking Lunge", "Leg Curl", "Leg Extension", "Calf Raise"],
+    // "Barbell Squat", not "Back Squat" — confirmed from WorkoutX's own docs
+    // example response ("name": "barbell squat"). "Back Squat" is a common
+    // gym term but not what WorkoutX's database actually calls it, so it
+    // was a genuine synonym mismatch, not something the name-cleanup/
+    // fallback-search logic in api/exercise-gif.js could ever fix on its
+    // own (those only strip qualifiers/equipment prefixes, they don't
+    // rewrite to a different word). Real report: "back squat should be
+    // something that has an instructional vid."
+    legs: ["Barbell Squat", "Romanian Deadlift", "Leg Press", "Walking Lunge", "Leg Curl", "Leg Extension", "Calf Raise"],
     biceps: ["Barbell Curl", "Hammer Curl", "Incline Dumbbell Curl"],
     triceps: ["Tricep Pushdown", "Skull Crusher", "Overhead Cable Extension"],
     core: ["Hanging Leg Raise", "Cable Crunch", "Ab Wheel Rollout", "Plank"],
@@ -679,7 +689,17 @@ export function planSetsRest(profile) {
   const scheme = GOAL_SCHEME[profile.goal] || GOAL_SCHEME.recomp;
   let sets = scheme.sets;
   let rest = scheme.rest;
-  const fits = () => Math.floor((profile.sessionLength * 60) / rawSecondsPerExercise(sets, rest)) >= TARGET_MIN_EXERCISES;
+  // Must mirror capFromSeconds' own experience adjustment exactly, not just
+  // the raw floor-divide — otherwise this loop can stop as soon as the RAW
+  // count hits 4, while capFor()'s subsequent beginner -1 then drops the
+  // FINAL cap to 3. Real report: a beginner got a 3-exercise plan despite
+  // this function's whole purpose being a guaranteed minimum of 4.
+  const fits = () => {
+    let adjusted = Math.floor((profile.sessionLength * 60) / rawSecondsPerExercise(sets, rest));
+    if (profile.experience === "advanced") adjusted += 1;
+    if (profile.experience === "beginner") adjusted -= 1;
+    return adjusted >= TARGET_MIN_EXERCISES;
+  };
 
   while (!fits() && rest > MIN_REST_SECONDS) rest = Math.max(MIN_REST_SECONDS, rest - 10);
   while (!fits() && sets > MIN_SETS) sets -= 1;
@@ -927,7 +947,21 @@ function writePendingPhotos(userId, list) {
   try { localStorage.setItem(pendingPhotosKey(userId), JSON.stringify(list)); } catch (e) { console.error("writePendingPhotos failed", e); }
 }
 
-async function loadState(userId, attempt = 0) {
+export async function loadState(userId, attempt = 0) {
+  // If the last save on this device never got confirmed as pushed (saveState
+  // sets this flag before the upsert, clears it only on success), the local
+  // cache is known to be AHEAD of whatever's on the server right now — the
+  // write could still be in flight, or could have failed outright. Real
+  // reports: finishing a set (or getting a Coach reply) then immediately
+  // reloading/backgrounding lost the change, because a plain reload always
+  // trusted a successful server read over local, even when that read just
+  // won a race against a save that hadn't landed yet. Fall back to local in
+  // that case instead of unconditionally trusting a fresh — but stale —
+  // server read.
+  if (hasPendingSync(userId)) {
+    const local = readLocalState(userId);
+    if (local) return { state: local, fromCache: true };
+  }
   const { data, error } = await supabase.from("app_state").select("state").eq("user_id", userId).maybeSingle();
   if (error) {
     // A fresh session (e.g. right after a password reset) can occasionally
@@ -948,8 +982,16 @@ async function loadState(userId, attempt = 0) {
 // Always saves locally first (instant, works with zero connectivity), then
 // tries to push to Supabase. Returns whether the server push succeeded so
 // the UI can show a "saved locally, will sync" indicator when it doesn't.
-async function saveState(userId, state) {
+export async function saveState(userId, state) {
   writeLocalState(userId, state);
+  // Set BEFORE the upsert starts, not just on failure — the flag needs to
+  // cover the whole window while this write is in flight, not only the
+  // aftermath of a confirmed failure. Real report: progress (a finished
+  // set, a Coach change) got lost on reload/exit even though the upsert
+  // would have eventually succeeded — the reload just won the race and
+  // happened before it landed, and loadState() had no way to know a newer
+  // local write existed to prefer over the still-stale server read.
+  setPendingSync(userId, true);
   try {
     const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
     if (error) throw error;
@@ -957,7 +999,6 @@ async function saveState(userId, state) {
     return true;
   } catch (e) {
     console.error("saveState failed, will retry once back online", e);
-    setPendingSync(userId, true);
     return false;
   }
 }
@@ -1710,6 +1751,19 @@ export function Onboarding({ onComplete }) {
         <Loader2 size={36} color={T.charge} className="spin" />
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "18px 0 6px" }}>{buildNote}</h2>
         <p style={{ color: "#B9BEC6", fontSize: 13, maxWidth: 280 }}>Weighing your goal, experience, equipment, injuries, and desired physique to build a program made for you.</p>
+        {/* Real gap: a person watching a spinner with no sense of whether
+            it's stuck or almost done tends to assume the worst. Frames the
+            wait as deliberate (a real, personalized build, not a stalled
+            request) and gives it an actual expectation to hold against. */}
+        <p style={{ color: "#B9BEC6", fontSize: 13, maxWidth: 280, marginTop: 10 }}>
+          This takes a little longer than picking from a template — we're building something specific to you. Usually ready in under a minute.
+        </p>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 20, padding: "12px 14px", background: "rgba(255,255,255,0.06)", borderRadius: 10, maxWidth: 300, textAlign: "left" }}>
+          <AlertCircle size={15} color="#B9BEC6" style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ color: "#B9BEC6", fontSize: 11.5, lineHeight: 1.5 }}>
+            Overload uses AI to build your plan. Like any AI, it can occasionally get something wrong — use your judgment, and check with a doctor or trainer for anything medical.
+          </span>
+        </div>
         <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       </div>
     );
