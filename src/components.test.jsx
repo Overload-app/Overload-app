@@ -822,10 +822,25 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
 
     await user.click(screen.getByText("How to do it"));
     const img = await screen.findByAltText("Back Squat demonstration");
-    expect(img.src).toBe("https://api.workoutxapp.com/v1/gifs/0201.gif");
+    // Routed through the server-side proxy (api/gif-proxy.js), not linked
+    // directly at WorkoutX — a plain <img src> pointed straight at their
+    // URL rendered as a broken image, since their asset URLs also need the
+    // X-WorkoutX-Key auth header a browser-issued <img> request can't send.
+    expect(img.src).toContain("/api/gif-proxy?url=");
+    expect(img.src).toContain(encodeURIComponent("https://api.workoutxapp.com/v1/gifs/0201.gif"));
     // Keyed by normalized NAME now, not an exercise-object index — that's
     // the actual fix (see the multi-occurrence test below).
     expect(onCacheGif).toHaveBeenCalledWith("back squat", "https://api.workoutxapp.com/v1/gifs/0201.gif");
+  });
+
+  test("clicking the exercise's own name opens the same full info page, not just the 'How to do it' button", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
+    const user = setup();
+
+    await user.click(screen.getByText("Back Squat")); // the exercise's own name/heading
+    expect(await screen.findByAltText("Back Squat demonstration")).toBeInTheDocument();
+    expect(screen.getByText("Form cues")).toBeInTheDocument();
   });
 
   test("an already-populated gifCache (from a previous session) shows the GIF immediately with no fetch at all", async () => {
@@ -908,11 +923,11 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  // Uncovered by testing the fetch-dedup above: "How to do it" open/closed
-  // state used to be keyed by exercise NAME too, so two same-named
-  // exercises shared one toggle — opening the second one's tips actually
-  // COLLAPSED the first, since they read/wrote the exact same state key.
-  test("two same-named exercises expand and collapse independently", async () => {
+  // Each exercise's info page is a full-screen view now (only one open at
+  // a time, by design), but the two SEPARATE exercise objects sharing a
+  // name should still each open their own page correctly, reusing the
+  // cached GIF instantly the second time with no new fetch.
+  test("a second, same-named exercise's info page opens instantly from cache, closing the first", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
     const repeatedDay = {
@@ -926,10 +941,12 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
 
     const [first, second] = screen.getAllByText("How to do it");
     await user.click(first);
-    await screen.findByAltText("Back Squat demonstration"); // first card's tips are open
+    await screen.findByAltText("Back Squat demonstration");
+    await user.click(screen.getByLabelText("Close exercise info"));
+    expect(screen.queryByAltText("Back Squat demonstration")).not.toBeInTheDocument();
 
-    await user.click(second); // opening the second should NOT collapse the first
-    expect(await screen.findAllByAltText("Back Squat demonstration")).toHaveLength(2);
+    await user.click(second);
+    expect(await screen.findByAltText("Back Squat demonstration")).toBeInTheDocument();
   });
 });
 

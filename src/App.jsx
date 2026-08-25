@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, ChevronDown, Repeat, Clock,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, Repeat, Clock,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -257,6 +257,15 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // it truly "ask WorkoutX for this exercise at most once, ever."
 export function normalizeGifKey(name) {
   return (name || "").trim().toLowerCase();
+}
+
+// A plain <img src> pointed straight at WorkoutX's own URL rendered as a
+// broken image — their asset URLs need the same X-WorkoutX-Key auth as the
+// search endpoint, which a browser-issued <img> request has no way to
+// attach. This routes it through api/gif-proxy.js instead, which fetches
+// the real bytes server-side (with the key) and streams them back.
+export function gifProxyUrl(rawUrl) {
+  return rawUrl ? `/api/gif-proxy?url=${encodeURIComponent(rawUrl)}` : rawUrl;
 }
 
 export async function fetchExerciseGif(name) {
@@ -1998,7 +2007,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   }, []);
   const elapsedSeconds = resumedAt ? accumulateActiveSeconds(priorActiveSeconds, resumedAt, Date.now()) : 0;
   const [confirmExit, setConfirmExit] = useState(false);
-  const [expandedTips, setExpandedTips] = useState({});
+  const [exerciseInfoIdx, setExerciseInfoIdx] = useState(null); // index of the exercise showing its full-screen info page, or null
   const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
@@ -2122,13 +2131,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
     });
   }
 
-  function toggleTips(exIdx, name) {
-    // Keyed by exIdx, not name — two exercises sharing a name (the exact
-    // scenario that caused the GIF-caching bug) shouldn't have their
-    // "How to do it" open/closed state coupled together too; each card's
-    // own expand/collapse is independent of what any same-named exercise
-    // elsewhere in the day is doing.
-    setExpandedTips((e) => ({ ...e, [exIdx]: !e[exIdx] }));
+  // Opens the full-screen exercise info page (demo GIF + tips) — tapping
+  // either the exercise's own name or "How to do it" leads here now,
+  // instead of a small inline expand.
+  function openExerciseInfo(exIdx, name) {
+    setExerciseInfoIdx(exIdx);
     const key = normalizeGifKey(name);
     // Real usage data: the same exercise appearing on more than one day of
     // a program (very common) used to trigger a separate fetch for each
@@ -2264,7 +2271,12 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
         {sets.map((ex, exIdx) => (
           <Card key={exIdx} style={{ marginBottom: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{ex.name}</h3>
+              <h3
+                onClick={() => openExerciseInfo(exIdx, ex.name)}
+                style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0, cursor: "pointer", textDecoration: "underline", textDecorationColor: T.steel, textUnderlineOffset: 3 }}
+              >
+                {ex.name}
+              </h3>
               <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{ex.reps} reps · {ex.rest}s rest</span>
             </div>
             {lastFor(ex.name) && (
@@ -2272,11 +2284,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <button
-                onClick={() => toggleTips(exIdx, ex.name)}
+                onClick={() => openExerciseInfo(exIdx, ex.name)}
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
               >
                 <Info size={13} /> How to do it
-                <ChevronDown size={13} style={{ transform: expandedTips[exIdx] ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                <ChevronRight size={13} />
               </button>
               <button
                 onClick={() => { setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setSwapPickerIdx(exIdx); }}
@@ -2291,52 +2303,6 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 <TrendingUp size={13} /> History & PR
               </button>
             </div>
-            {expandedTips[exIdx] && (
-              <div style={{ marginTop: 6, padding: "10px 12px", background: T.paper, borderRadius: 8 }}>
-                {gifLoading[normalizeGifKey(ex.name)] ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.steelDark, marginBottom: 8 }}>
-                    <Loader2 size={13} className="spin" /> Loading demo…
-                  </div>
-                ) : gifCache[normalizeGifKey(ex.name)] ? (
-                  <img
-                    src={gifCache[normalizeGifKey(ex.name)]} alt={`${ex.name} demonstration`}
-                    style={{ width: "100%", maxWidth: 260, borderRadius: 8, display: "block", marginBottom: 8 }}
-                  />
-                ) : normalizeGifKey(ex.name) in gifCache ? (
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic" }}>
-                      Instructional video unavailable for this exercise.
-                    </span>
-                    {/* A confirmed "no match" can still be worth a manual
-                        recheck later (WorkoutX's database grows over time),
-                        without waiting for a fresh workout session. */}
-                    <button
-                      onClick={() => loadGif(ex.name)}
-                      style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}
-                    >
-                      Retry
-                    </button>
-                  </div>
-                ) : gifTransientError[normalizeGifKey(ex.name)] ? (
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic" }}>
-                      Couldn't check for a demo right now.
-                    </span>
-                    <button
-                      onClick={() => loadGif(ex.name)}
-                      style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}
-                    >
-                      Retry
-                    </button>
-                  </div>
-                ) : null}
-                <ul style={{ margin: 0, paddingLeft: 16 }}>
-                  {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
-                    <li key={i} style={{ fontSize: 12, color: T.ink, lineHeight: 1.5, marginBottom: 4 }}>{tip}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
             <div style={{ marginTop: 10 }}>
               {ex.logged.map((l, setIdx) => (
                 <div key={setIdx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
@@ -2499,6 +2465,55 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       })()}
 
       {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} onClose={() => setDetailFor(null)} />}
+
+      {exerciseInfoIdx !== null && sets[exerciseInfoIdx] && (() => {
+        const ex = sets[exerciseInfoIdx];
+        const key = normalizeGifKey(ex.name);
+        return (
+          <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+            <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#B9BEC6", letterSpacing: 1, fontWeight: 600 }}>HOW TO DO IT</span>
+                <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "2px 0 0" }}>{ex.name}</h2>
+              </div>
+              <button onClick={() => setExerciseInfoIdx(null)} aria-label="Close exercise info" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+              {gifLoading[key] ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: T.steelDark, marginBottom: 14 }}>
+                  <Loader2 size={16} className="spin" /> Loading demo…
+                </div>
+              ) : gifCache[key] ? (
+                <img
+                  src={gifProxyUrl(gifCache[key])} alt={`${ex.name} demonstration`}
+                  style={{ width: "100%", borderRadius: 10, display: "block", marginBottom: 14 }}
+                />
+              ) : key in gifCache ? (
+                <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  {/* A confirmed "no match" can still be worth a manual
+                      recheck later (WorkoutX's database grows over time),
+                      without waiting for a fresh workout session. */}
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Instructional video unavailable for this exercise.</span>
+                  <button onClick={() => loadGif(ex.name)} style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}>Retry</button>
+                </Card>
+              ) : gifTransientError[key] ? (
+                <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Couldn't check for a demo right now.</span>
+                  <button onClick={() => loadGif(ex.name)} style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}>Retry</button>
+                </Card>
+              ) : null}
+              <Card>
+                <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, margin: "0 0 8px" }}>Form cues</h3>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {(ex.tips && ex.tips.length > 0 ? ex.tips : tipsForExercise(ex.name)).map((tip, i) => (
+                    <li key={i} style={{ fontSize: 13, color: T.ink, lineHeight: 1.6, marginBottom: 6 }}>{tip}</li>
+                  ))}
+                </ul>
+              </Card>
+            </div>
+          </div>
+        );
+      })()}
 
       {prCelebration && (
         <div
