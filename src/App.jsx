@@ -2492,7 +2492,15 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
               </div>
               <button onClick={() => setExerciseInfoIdx(null)} aria-label="Close exercise info" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
             </div>
+            {/* max-width + centering — this overlay spans the full browser
+                width on desktop (it's outside .app-main-inner's own
+                max-width, being a fullscreen-overlay), so an un-capped GIF
+                was stretching to fill a 1000px+ wide column and getting
+                blown up well past its real resolution. Fine on a phone
+                (100% already lands well under this cap), broken on a wide
+                desktop window. */}
             <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+              <div style={{ maxWidth: 480, margin: "0 auto" }}>
               {gifLoading[key] ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: T.steelDark, marginBottom: 14 }}>
                   <Loader2 size={16} className="spin" /> Loading demo…
@@ -2526,6 +2534,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                   ))}
                 </ul>
               </Card>
+              </div>
             </div>
           </div>
         );
