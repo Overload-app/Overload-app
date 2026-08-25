@@ -12,6 +12,7 @@ import {
   capFor,
   capForProgram,
   isUnilateral,
+  exerciseVocabularyFor,
   fetchExerciseGif,
   normalizeGifKey,
   withTips,
@@ -615,6 +616,26 @@ describe("isUnilateral", () => {
 
   test("handles a missing name without throwing", () => {
     expect(isUnilateral(undefined)).toBe(false);
+  });
+});
+
+describe("exerciseVocabularyFor", () => {
+  test("returns a flat, deduplicated list of real exercise names for a known equipment type", () => {
+    const vocab = exerciseVocabularyFor("dumbbell");
+    expect(vocab.length).toBeGreaterThan(0);
+    expect(vocab).toContain("Dumbbell Bench Press");
+    expect(new Set(vocab).size).toBe(vocab.length); // no duplicates
+  });
+
+  test("covers all three equipment types without throwing", () => {
+    for (const equipment of ["full", "dumbbell", "bodyweight"]) {
+      expect(exerciseVocabularyFor(equipment).length).toBeGreaterThan(0);
+    }
+  });
+
+  test("returns an empty array for an unknown equipment type rather than throwing", () => {
+    expect(exerciseVocabularyFor("resistance-bands")).toEqual([]);
+    expect(exerciseVocabularyFor(undefined)).toEqual([]);
   });
 });
 

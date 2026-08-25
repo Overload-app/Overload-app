@@ -329,6 +329,17 @@ export const POOLS = {
   },
 };
 
+// A real, plain-name vocabulary to hand the AI as a preferred reference —
+// reusing these exact spellings (rather than the AI inventing its own
+// phrasing each time) both keeps naming consistent across a program and
+// tends to match the exercise-demo database better, since these are
+// already known-good, unqualified names.
+export function exerciseVocabularyFor(equipment) {
+  const pool = POOLS[equipment];
+  if (!pool) return [];
+  return [...new Set(Object.values(pool).flat())];
+}
+
 export const INJURY_EXCLUDES = {
   knees: ["Squat", "Lunge", "Leg Press", "Leg Extension", "Step-Up", "Split Squat", "Wall Sit"],
   shoulders: ["Overhead Press", "Lateral Raise", "Dip", "Push-Up", "Handstand", "Pike Push-Up", "Rear Delt Fly", "Y-Raise", "Arnold Press"],
@@ -837,7 +848,9 @@ Rules:
 - "days" must have exactly ${profile.daysPerWeek} entries.
 - Only include exercises doable with this equipment: ${profile.equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : profile.equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment"}.
 - Spell equipment out in exercise names ("Dumbbell Bench Press," "Barbell Row") rather than gym-jargon abbreviations like "DB" or "BB" — plenty of people using this app are new to lifting and won't know the shorthand.
-- Keep exercise names as the plain, standard version of the movement — "Leg Press," not "Leg Press (Low)" or "Leg Press - Wide Stance." These names are looked up against a real exercise-demo database afterward, and an extra qualifier tacked on in parentheses or after a dash is a common reason a lookup for an exercise that's obviously in the database still fails to match. If a variation genuinely matters, say so in that exercise's own "tips" instead of folding it into the name.
+- Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, and no trailing descriptor word or phrase tacked on either (not "Leg Press (Low)," not "Leg Press - Wide Stance," not "Leg Press Moderate Depth," not "Controlled Leg Press" — just "Leg Press"). These names get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance width, range of motion — all of that belongs in that exercise's "tips," never in the name.
+- Use the EXACT SAME spelling for an exercise every time it appears in this program — if "Leg Press" shows up on more than one day, it must be spelled identically both times, not "Leg Press" one day and "Leg Press Machine" or "Machine Leg Press" the next. These are meant to be the same reference name throughout, not restated in different words each time.
+- Where one of these fits what you're trying to program, prefer it exactly as written — real, plain names already known to work well: ${exerciseVocabularyFor(profile.equipment).join(", ")}. Use something else if none of these fit, but don't rename or rephrase one of these if it does fit.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
 - Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
@@ -2928,7 +2941,8 @@ Rules:
 - For a PERMANENT change (case 1 above), always build the new "days" by editing the exact "Current program JSON" given above — never reconstruct the program from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the "days" you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
 - Only include exercises doable with their equipment (${p.equipment}).
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
-- Keep exercise names as the plain, standard version of the movement — "Leg Press," not "Leg Press (Low)" or similar qualifiers tacked on in parentheses or after a dash. Names get looked up against a real exercise-demo database afterward, and an extra qualifier is a common reason a lookup for an exercise that's obviously in the database still fails to match. If a variation genuinely matters, put it in that exercise's "tips" instead of folding it into the name.
+- Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, no trailing descriptor word or phrase either (not "Leg Press (Low)," not "Leg Press Moderate Depth" — just "Leg Press"). These get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance, range of motion — that belongs in "tips," never the name.
+- If an exercise you're including already appears somewhere in "Current program JSON" above (or in the version history), use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Where none of that applies and one of these fits what you're programming, prefer it exactly as written: ${exerciseVocabularyFor(p.equipment).join(", ")}.
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
