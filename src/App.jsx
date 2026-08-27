@@ -303,7 +303,14 @@ export async function fetchSimilarExercises(name, equipment, injuries) {
 ============================================================ */
 export const POOLS = {
   full: {
-    chest: ["Barbell Bench Press", "Incline Dumbbell Press", "Cable Fly", "Weighted Dip"],
+    // "Machine Fly", not "Pec Dec Fly" — confirmed directly against
+    // WorkoutX's now-synced full catalog: "pec dec fly" and "pec fly" have
+    // no match at all (not even via the fuzzy fallback), while "Machine
+    // Fly" resolves to a real entry. Kept alongside "Cable Fly" rather
+    // than replacing it — they're genuinely different equipment, and the
+    // AI needs a real machine-based option instead of inventing "Pec Dec
+    // Fly" on its own when that's what a program actually calls for.
+    chest: ["Barbell Bench Press", "Incline Dumbbell Press", "Cable Fly", "Machine Fly", "Weighted Dip"],
     back: ["Barbell Row", "Lat Pulldown", "Seated Cable Row", "Pull-Up"],
     shoulders: ["Overhead Press", "Dumbbell Lateral Raise", "Face Pull", "Rear Delt Fly"],
     // "Barbell Squat", not "Back Squat" — confirmed from WorkoutX's own docs
