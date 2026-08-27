@@ -3825,7 +3825,7 @@ function ExerciseProgress({ logs }) {
   );
 }
 
-export function Progress({ state, addWeight, removeWeight }) {
+export function Progress({ state, addWeight, removeWeight, onOpenHistory }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
@@ -3858,6 +3858,16 @@ export function Progress({ state, addWeight, removeWeight }) {
         <StatChip label="Workouts logged" val={totalWorkouts} color={T.charge} icon={<Award size={16} color={T.charge} />} />
         <StatChip label="Week streak" val={weekStreak} color={T.good} icon={<Sparkles size={16} color={T.good} />} />
       </div>
+
+      {totalWorkouts > 0 && (
+        <button
+          onClick={onOpenHistory}
+          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: `1px solid ${T.steel}`, borderRadius: 10, padding: "12px 14px", marginTop: 10, cursor: "pointer", textAlign: "left" }}
+        >
+          <span style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>View & edit workout history</span>
+          <ChevronRight size={16} color={T.steelDark} />
+        </button>
+      )}
 
       <TickRule label="This month" />
       <MonthlySummary logs={logs} />
@@ -3922,6 +3932,133 @@ export function Progress({ state, addWeight, removeWeight }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// Real ask: an editable history — tap a past workout, correct a weight/rep
+// typo or a bad log after the fact, or delete an entry entirely (a false
+// start, a duplicate, testing). `index` throughout is always the real
+// position in `workouts` (oldest first) — the list itself is shown
+// reversed (most-recent-first) but keeps each entry's real index so
+// delete/update always hits the right one, same convention the bodyweight
+// list already uses.
+export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate }) {
+  const [openIdx, setOpenIdx] = useState(null);
+  const [editedExercises, setEditedExercises] = useState(null); // working copy while editing, or null (not yet touched)
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  function closeDetail() {
+    setOpenIdx(null);
+    setEditedExercises(null);
+    setConfirmDelete(false);
+  }
+
+  function updateSet(exIdx, setIdx, field, val, baseExercises) {
+    const copy = baseExercises.map((e) => ({ ...e, logged: (e.logged || []).map((l) => ({ ...l })) }));
+    copy[exIdx].logged[setIdx][field] = val;
+    setEditedExercises(copy);
+  }
+
+  if (openIdx !== null) {
+    const entry = workouts[openIdx];
+    const exercises = editedExercises || entry.exercises || [];
+    return (
+      <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+        <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#B9BEC6", letterSpacing: 1, fontWeight: 600 }}>{entry.date}</span>
+            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "2px 0 0" }}>{entry.dayName}</h2>
+          </div>
+          <button onClick={closeDetail} aria-label="Close workout detail" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {exercises.map((ex, exIdx) => (
+            <Card key={exIdx} style={{ marginBottom: 10 }}>
+              <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, margin: "0 0 8px" }}>{ex.name}</h3>
+              {(ex.logged || []).map((l, setIdx) => (
+                <div key={setIdx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ width: 16, flexShrink: 0, fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{setIdx + 1}</span>
+                  <input
+                    type="number" placeholder="lb" value={l.weight ?? ""}
+                    onChange={(e) => updateSet(exIdx, setIdx, "weight", e.target.value, exercises)}
+                    aria-label={`${ex.name} set ${setIdx + 1} weight`}
+                    style={{ flex: 1, minWidth: 0, padding: "8px 6px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 15, boxSizing: "border-box" }}
+                  />
+                  <input
+                    type="number" placeholder="reps" value={l.reps ?? ""}
+                    onChange={(e) => updateSet(exIdx, setIdx, "reps", e.target.value, exercises)}
+                    aria-label={`${ex.name} set ${setIdx + 1} reps`}
+                    style={{ flex: 1, minWidth: 0, padding: "8px 6px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 15, boxSizing: "border-box" }}
+                  />
+                </div>
+              ))}
+            </Card>
+          ))}
+        </div>
+        <div style={{ padding: 16, borderTop: `1px solid ${T.steel}`, display: "flex", gap: 8, flexShrink: 0 }}>
+          <Btn variant="ghost" onClick={() => setConfirmDelete(true)} style={{ flexShrink: 0 }}>Delete</Btn>
+          <Btn
+            variant="accent"
+            style={{ flex: 1 }}
+            onClick={() => {
+              if (editedExercises) onUpdate(openIdx, editedExercises);
+              closeDetail();
+            }}
+          >
+            Save changes
+          </Btn>
+        </div>
+
+        {confirmDelete && (
+          <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 75, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+            <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Delete this workout?</h3>
+            <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 300, marginBottom: 20 }}>This permanently removes it from your history. This can't be undone.</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 280 }}>
+              <Btn
+                variant="accent"
+                onClick={() => {
+                  onDelete(openIdx);
+                  closeDetail();
+                }}
+                style={{ width: "100%" }}
+              >
+                Delete
+              </Btn>
+              <button onClick={() => setConfirmDelete(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const reversed = workouts.map((w, i) => ({ ...w, i })).reverse();
+  return (
+    <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: 0 }}>Workout history</h2>
+        <button onClick={onClose} aria-label="Close workout history" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        {reversed.length === 0 ? (
+          <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", marginTop: 40 }}>No workouts logged yet.</p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {reversed.map((w) => (
+              <Card key={w.i} onClick={() => setOpenIdx(w.i)} style={{ padding: 12, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{w.dayName}</div>
+                  <div style={{ fontSize: 11, color: T.steelDark }}>
+                    {w.date}{w.durationSec ? ` · ${formatDuration(w.durationSec)}` : ""} · {(w.exercises || []).length} exercises
+                  </div>
+                </div>
+                <ChevronRight size={16} color={T.steelDark} />
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -4067,6 +4204,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
+  const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [coachLoading, setCoachLoading] = useState(false);
   // "synced" | "offline" (change saved locally, not yet on the server) | "saving"
   const [syncStatus, setSyncStatus] = useState("synced");
@@ -4644,6 +4782,21 @@ export default function App() {
     persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: prev.logs.bodyweight.filter((_, i) => i !== index) } }));
   }
 
+  // index here is always the real position in logs.workouts (oldest
+  // first) — callers showing a reversed, most-recent-first list must map
+  // back to this real index themselves, same convention as removeWeight
+  // above and the bodyweight list's own reversed rendering.
+  function deleteWorkoutLog(index) {
+    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: prev.logs.workouts.filter((_, i) => i !== index) } }));
+  }
+
+  function updateWorkoutLog(index, updatedExercises) {
+    persist((prev) => ({
+      ...prev,
+      logs: { ...prev.logs, workouts: prev.logs.workouts.map((w, i) => (i === index ? { ...w, exercises: updatedExercises } : w)) },
+    }));
+  }
+
   function resetAll() {
     persist(null);
   }
@@ -4797,7 +4950,7 @@ export default function App() {
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} setActiveTab={setActiveTab} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
-          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} />}
+          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} onOpenHistory={() => setHistoryEditorOpen(true)} />}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
         </div>
 
@@ -4911,6 +5064,15 @@ export default function App() {
 
       {showSubscribeOverlay && (
         <SubscribeOverlay account={account} onClose={() => setShowSubscribeOverlay(false)} />
+      )}
+
+      {historyEditorOpen && (
+        <WorkoutHistoryEditor
+          workouts={state.logs.workouts}
+          onClose={() => setHistoryEditorOpen(false)}
+          onDelete={deleteWorkoutLog}
+          onUpdate={updateWorkoutLog}
+        />
       )}
     </div>
   );

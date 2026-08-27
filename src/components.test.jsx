@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, dateToISO, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -242,6 +242,95 @@ describe("<Progress />", () => {
     const firstCard = entries[0].parentElement.parentElement;
     await user.click(within(firstCard).getByRole("button"));
     expect(removeWeight).toHaveBeenCalledWith(1);
+  });
+
+  test("shows a 'View & edit workout history' entry point once at least one workout is logged, and calls onOpenHistory", async () => {
+    const user = userEvent.setup();
+    const onOpenHistory = vi.fn();
+    const state = { profile: { weightLb: 180 }, logs: { bodyweight: [], workouts: [{ date: "2026-08-01", dayName: "Push", exercises: [] }], nutrition: [] } };
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={onOpenHistory} />);
+    await user.click(screen.getByText("View & edit workout history"));
+    expect(onOpenHistory).toHaveBeenCalledTimes(1);
+  });
+
+  test("hides the workout-history entry point when nothing has been logged yet", () => {
+    render(<Progress state={buildState([])} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} />);
+    expect(screen.queryByText("View & edit workout history")).not.toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutHistoryEditor />", () => {
+  function workouts() {
+    return [
+      { date: "2026-08-01", dayName: "Push", durationSec: 2400, exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "8", done: true }] }] },
+      { date: "2026-08-08", dayName: "Legs", durationSec: 1800, exercises: [{ name: "Leg Press", logged: [{ weight: "225", reps: "10", done: true }] }] },
+    ];
+  }
+
+  test("lists workouts most-recent-first and opens a detail view on tap", async () => {
+    const user = userEvent.setup();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={vi.fn()} />);
+    const cards = screen.getAllByText(/Push|Legs/);
+    expect(cards[0]).toHaveTextContent("Legs"); // most recent (index 1) shown first
+    await user.click(screen.getByText("Push"));
+    expect(screen.getByText("Bench Press")).toBeInTheDocument();
+  });
+
+  test("editing a set's weight and saving calls onUpdate with the real (non-reversed) index and the edited value", async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={onUpdate} />);
+    await user.click(screen.getByText("Push")); // real index 0
+    const weightInput = screen.getByLabelText("Bench Press set 1 weight");
+    await user.clear(weightInput);
+    await user.type(weightInput, "145");
+    await user.click(screen.getByText("Save changes"));
+    expect(onUpdate).toHaveBeenCalledWith(0, [{ name: "Bench Press", logged: [{ weight: "145", reps: "8", done: true }] }]);
+  });
+
+  test("saving without editing anything does not call onUpdate", async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={onUpdate} />);
+    await user.click(screen.getByText("Push"));
+    await user.click(screen.getByText("Save changes"));
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  test("deleting requires confirmation, then calls onDelete with the real index", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={onDelete} onUpdate={vi.fn()} />);
+    await user.click(screen.getByText("Legs")); // real index 1
+    await user.click(screen.getByText("Delete"));
+    expect(screen.getByText("Delete this workout?")).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled(); // not yet — still needs confirmation
+    await user.click(screen.getAllByText("Delete")[1]); // the confirm dialog's own Delete button
+    expect(onDelete).toHaveBeenCalledWith(1);
+  });
+
+  test("canceling the delete confirmation keeps the workout", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={onDelete} onUpdate={vi.fn()} />);
+    await user.click(screen.getByText("Push"));
+    await user.click(screen.getByText("Delete"));
+    await user.click(screen.getByText("Cancel"));
+    expect(screen.queryByText("Delete this workout?")).not.toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  test("shows an empty state with no workouts logged", () => {
+    render(<WorkoutHistoryEditor workouts={[]} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={vi.fn()} />);
+    expect(screen.getByText("No workouts logged yet.")).toBeInTheDocument();
+  });
+
+  test("closing calls onClose", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={onClose} onDelete={vi.fn()} onUpdate={vi.fn()} />);
+    await user.click(screen.getByLabelText("Close workout history"));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
 
