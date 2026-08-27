@@ -935,6 +935,30 @@ export function setPendingSync(userId, pending) {
   } catch (e) { /* best-effort only */ }
 }
 
+// A cold start (fresh tab/relaunch, not just backgrounding) has to ask
+// Supabase for a session before anything else can happen — and that ask
+// has no timeout. Real report: the app was a permanent blank white screen
+// on first open with no connection, but "worked fine without wifi" once
+// already open — because ONLY that very first gate had nothing to fall
+// back to. This remembers who was last signed in on this device so a cold
+// start with no connectivity can skip straight to their already-cached
+// local state instead of hanging forever waiting on a network call that's
+// never going to complete.
+const LAST_ACCOUNT_KEY = "overload_last_account";
+export function readLastAccount() {
+  try {
+    const raw = localStorage.getItem(LAST_ACCOUNT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+export function writeLastAccount(account) {
+  try {
+    localStorage.setItem(LAST_ACCOUNT_KEY, JSON.stringify(account));
+  } catch (e) { /* best-effort only */ }
+}
+
 // Meal photos captured with no connection (e.g. offline at the gym) — kept
 // separate from the main app_state blob (rather than riding along in
 // saveState/loadState) so queued photos never bloat the JSON that gets
@@ -4085,9 +4109,44 @@ export default function App() {
         return;
       }
 
-      const { data: { session: sbSession } } = await supabase.auth.getSession();
-      if (sbSession?.user) {
-        await hydrateAccount(sbSession.user);
+      // A cold start has to ask Supabase for a session before anything
+      // else can happen, and that ask has no built-in timeout — a
+      // completely offline device can leave this hanging indefinitely,
+      // which left "loading" stuck true forever and the app a permanent
+      // blank white screen. Real report: needed wifi just to OPEN the app
+      // at all, despite working fine offline once it was already open.
+      // Racing it against a timeout guarantees this resolves either way;
+      // on timeout, fall back to whoever was last signed in on this
+      // device and their already-cached local state, same as how the rest
+      // of the app already works offline once open.
+      const timedOut = Symbol("timedOut");
+      const sessionPromise = supabase.auth.getSession().catch(() => null);
+      const sessionResult = await Promise.race([
+        sessionPromise,
+        new Promise((resolve) => setTimeout(() => resolve(timedOut), 5000)),
+      ]);
+      if (sessionResult === timedOut || !sessionResult?.data?.session?.user) {
+        const lastAccount = readLastAccount();
+        if (lastAccount && !navigator.onLine) {
+          setAccount({ id: lastAccount.id, name: lastAccount.name, email: lastAccount.email });
+          setSubscribed(!!lastAccount.subscribed);
+          setTrialStartedAt(lastAccount.trialStartedAt || null);
+          const loadedLocal = readLocalState(lastAccount.id);
+          setState(loadedLocal && loadedLocal.program ? { ...loadedLocal, program: normalizeProgramTips(loadedLocal.program) } : loadedLocal);
+          setSyncStatus("offline");
+        }
+        // If the timeout was actually just a slow-but-live connection (not
+        // truly offline), don't abandon it — once the real answer arrives,
+        // hydrate for real so the person lands in their live account
+        // rather than being stuck on the offline fallback (or a login
+        // screen) with no way back in short of a manual reload.
+        if (sessionResult === timedOut) {
+          sessionPromise.then((late) => {
+            if (late?.data?.session?.user) hydrateAccount(late.data.session.user);
+          });
+        }
+      } else {
+        await hydrateAccount(sessionResult.data.session.user);
       }
       setLoading(false);
     })();
@@ -4128,9 +4187,17 @@ export default function App() {
 
   async function hydrateAccount(user) {
     const profileRow = await loadProfile(user.id);
-    setAccount({ id: user.id, name: profileRow?.name || user.user_metadata?.name || "", email: user.email });
-    setSubscribed(!!profileRow?.subscribed);
-    setTrialStartedAt(profileRow?.trial_started_at || null);
+    const accountObj = { id: user.id, name: profileRow?.name || user.user_metadata?.name || "", email: user.email };
+    const subscribedVal = !!profileRow?.subscribed;
+    const trialStartedAtVal = profileRow?.trial_started_at || null;
+    setAccount(accountObj);
+    setSubscribed(subscribedVal);
+    setTrialStartedAt(trialStartedAtVal);
+    // Caches the last-known entitlement alongside the account, not just
+    // false/null defaults — a cold-start-while-offline fallback needs to
+    // know whether this person was actually subscribed, not guess "no" and
+    // wrongly show a paywall to someone who already pays.
+    writeLastAccount({ ...accountObj, subscribed: subscribedVal, trialStartedAt: trialStartedAtVal });
     const { state: loaded, fromCache } = await loadState(user.id);
     // Backfills tips/alternatives onto programs saved before those features
     // existed, so existing accounts get offline-capable "How to do it" tips

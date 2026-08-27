@@ -25,6 +25,8 @@ import {
   writeLocalState,
   hasPendingSync,
   setPendingSync,
+  readLastAccount,
+  writeLastAccount,
   POOLS,
   INJURY_EXCLUDES,
   GOAL_SCHEME,
@@ -988,6 +990,21 @@ describe("local storage layer", () => {
   test("pending-sync flags are per-user", () => {
     setPendingSync("user-1", true);
     expect(hasPendingSync("user-2")).toBe(false);
+  });
+
+  test("readLastAccount returns null before anyone has ever signed in on this device", () => {
+    expect(readLastAccount()).toBeNull();
+  });
+
+  test("writeLastAccount then readLastAccount round-trips, including cached entitlement", () => {
+    writeLastAccount({ id: "user-1", name: "Fred", email: "fred@example.com", subscribed: true, trialStartedAt: null });
+    expect(readLastAccount()).toEqual({ id: "user-1", name: "Fred", email: "fred@example.com", subscribed: true, trialStartedAt: null });
+  });
+
+  test("readLastAccount never throws on corrupt JSON", () => {
+    globalThis.localStorage.setItem("overload_last_account", "{not valid json");
+    expect(() => readLastAccount()).not.toThrow();
+    expect(readLastAccount()).toBeNull();
   });
 });
 
