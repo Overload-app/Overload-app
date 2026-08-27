@@ -38,6 +38,53 @@ export function searchCandidates(name) {
   return candidates;
 }
 
+// Once the full catalog has been bulk-synced into exercise_gifs (see
+// sync-exercise-catalog.js), most near-misses can resolve entirely from
+// that LOCAL copy — zero further WorkoutX requests — instead of falling
+// through to a live search every time an AI-generated name doesn't match
+// verbatim. Real ask: "take workouts from the actual gif program, word for
+// word" — this is the practical version of that when the AI's phrasing
+// still drifts slightly (e.g. "Tricep Pushdown" vs a catalog entry spelled
+// "Triceps Pushdown").
+const STOPWORDS = new Set(["the", "a", "an", "of", "with", "to"]);
+function stem(word) {
+  // Naive plural stripping — enough to line up "tricep"/"triceps",
+  // "curl"/"curls" without a real stemming library.
+  return word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word;
+}
+function tokenize(name) {
+  return (name || "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w && !STOPWORDS.has(w))
+    .map(stem);
+}
+
+// candidates: [{ name_key, gif_url }]. Jaccard token overlap — deliberately
+// conservative (0.5 = at least half the combined vocabulary between the
+// two names actually matches) because showing the WRONG exercise's demo
+// is worse than showing none at all, so a low-confidence guess is refused
+// rather than risked.
+export function bestFuzzyMatch(query, candidates) {
+  const qTokens = new Set(tokenize(query));
+  if (qTokens.size === 0) return null;
+  let best = null;
+  let bestScore = 0;
+  for (const c of candidates) {
+    const cTokens = new Set(tokenize(c.name_key));
+    if (cTokens.size === 0) continue;
+    let intersection = 0;
+    for (const t of qTokens) if (cTokens.has(t)) intersection++;
+    const union = new Set([...qTokens, ...cTokens]).size;
+    const score = intersection / union;
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return bestScore >= 0.5 ? best : null;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -69,6 +116,19 @@ export default async function handler(req, res) {
     const { data: cached } = await supabaseAdmin.from("exercise_gifs").select("gif_url").eq("name_key", key).maybeSingle();
     if (cached) {
       return res.status(200).json({ gifUrl: cached.gif_url || null, matchCount: cached.gif_url ? 1 : 0, source: "cache" });
+    }
+
+    // No exact key, but the bulk-synced catalog may still have a real
+    // match under slightly different wording — check locally (a plain
+    // table read, no WorkoutX cost) before ever going live.
+    const { data: allEntries } = await supabaseAdmin.from("exercise_gifs").select("name_key, gif_url").not("gif_url", "is", null);
+    if (allEntries && allEntries.length > 0) {
+      const fuzzy = bestFuzzyMatch(name, allEntries);
+      if (fuzzy) {
+        // Cache THIS exact name too, so next time it's a free direct hit.
+        await supabaseAdmin.from("exercise_gifs").upsert({ name_key: key, gif_url: fuzzy.gif_url, checked_at: new Date().toISOString() });
+        return res.status(200).json({ gifUrl: fuzzy.gif_url, matchCount: 1, source: "fuzzy-cache" });
+      }
     }
   }
 
