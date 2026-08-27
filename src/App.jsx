@@ -4580,6 +4580,25 @@ export default function App() {
       saveState(user.id, finalState);
     }
 
+    // Same backfill idea for accounts created before periodic reviews
+    // existed — without accountCreatedAt, isReviewDue() has no anchor to
+    // count a period from and silently never fires. Best-effort: falls
+    // back to their oldest history snapshot's savedAt, or now if there's
+    // no history either — either way the first review just ends up due
+    // one period from whenever this backfill actually ran, not "always
+    // was on since day one," which is fine for a one-time migration.
+    if (finalState && !finalState.accountCreatedAt) {
+      const history = finalState.programHistory || [];
+      const oldest = history.length > 0 ? history[history.length - 1] : null;
+      finalState = {
+        ...finalState,
+        accountCreatedAt: oldest?.savedAt || new Date().toISOString(),
+        reviewsEnabled: finalState.reviewsEnabled || { weekly: false, monthly: false },
+        reviews: finalState.reviews || { weekly: [], monthly: [] },
+      };
+      saveState(user.id, finalState);
+    }
+
     setState(finalState);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
