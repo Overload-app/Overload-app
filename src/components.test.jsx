@@ -1217,9 +1217,9 @@ describe("<Home /> Coach insight card", () => {
 });
 
 describe("<Onboarding /> injuries step — 'Other' merged in, not a separate question", () => {
-  // Clicks through every step ahead of injuries (the quiz's last step) with
-  // a minimal valid answer at each — proves there's no longer a separate
-  // "any other injuries" question between it and "Build my plan".
+  // Clicks through every step ahead of injuries with a minimal valid
+  // answer at each — proves there's no longer a separate "any other
+  // injuries" question between it and the notes step that now follows it.
   async function goToInjuriesStep(user) {
     await user.click(screen.getByText("Start the quiz"));
     await user.click(screen.getByText("Male"));
@@ -1247,12 +1247,11 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
   }
 
-  test("injuries is the final quiz step — no separate 'other injuries' question follows it", async () => {
+  test("no separate 'other injuries' question follows the injuries step", async () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} />);
     await goToInjuriesStep(user);
     expect(screen.getByText("Any injuries or areas we should train around?")).toBeInTheDocument();
-    expect(screen.getByText("Build my plan")).toBeInTheDocument(); // only shown on the last step
   });
 
   test("selecting 'Other' reveals an inline text box right there, instead of a whole separate step", async () => {
@@ -1278,5 +1277,30 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
 
     await user.click(screen.getByText("Other")); // re-check
     expect(screen.getByPlaceholderText(/Describe in your own words/).value).toBe("");
+  });
+
+  test("notes is the actual final step, and it's optional — 'Build my plan' shows without typing anything", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next"));
+    expect(screen.getByText("Anything else your coach should know?")).toBeInTheDocument();
+    expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+
+  test("whatever's typed in the notes step ends up on the built profile", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    render(<Onboarding onComplete={onComplete} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next"));
+    await user.type(screen.getByPlaceholderText(/Prefer an upper\/lower split/), "No pull-up bar at my gym");
+    await user.click(screen.getByText("Build my plan"));
+    // Program building falls back to the offline generator in this test
+    // env (no real network) and lands on the summary screen next, same as
+    // the rest of this quiz flow.
+    expect(await screen.findByText(/Let's go/)).toBeInTheDocument();
   });
 });

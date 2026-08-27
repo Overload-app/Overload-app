@@ -53,6 +53,8 @@ import {
   detectCoachInsight,
   claudeChat,
   fetchSimilarExercises,
+  buildProgramGenSystem,
+  buildCoachSystem,
   OFFLINE_MESSAGE,
   loadState,
   saveState,
@@ -502,6 +504,33 @@ describe("secondsPerExercise / capFor", () => {
     const modeledSeconds = capFor(profile) * rawSecondsPerExercise(sets, rest);
     expect(modeledSeconds / 60).toBeGreaterThanOrEqual(50);
     expect(modeledSeconds / 60).toBeLessThanOrEqual(70);
+  });
+});
+
+// Real ask: a free-text "anything else your coach should know?" quiz step
+// (preferred split, disliked exercises, missing gym equipment, etc.) that
+// actually reaches both AI prompts, not just gets collected and ignored.
+describe("profile notes reach both AI prompts", () => {
+  test("buildProgramGenSystem includes the client's notes verbatim when present", () => {
+    const system = buildProgramGenSystem({ ...baseProfile, notes: "Prefer an upper/lower split, no cable machine at my gym" });
+    expect(system).toContain("Prefer an upper/lower split, no cable machine at my gym");
+  });
+
+  test("buildProgramGenSystem adds nothing extra when notes is empty/unset", () => {
+    const withNotes = buildProgramGenSystem({ ...baseProfile, notes: "test-marker-xyz" });
+    const withoutNotes = buildProgramGenSystem({ ...baseProfile, notes: "" });
+    expect(withNotes).toContain("test-marker-xyz");
+    expect(withoutNotes).not.toContain("test-marker-xyz");
+  });
+
+  test("buildCoachSystem includes the client's notes verbatim when present", () => {
+    const system = buildCoachSystem({ profile: { ...baseProfile, notes: "Hate burpees, please avoid them" } });
+    expect(system).toContain("Hate burpees, please avoid them");
+  });
+
+  test("buildCoachSystem omits the notes sentence entirely when there are none", () => {
+    const system = buildCoachSystem({ profile: { ...baseProfile, notes: "" } });
+    expect(system).not.toContain("Additional notes from the client");
   });
 });
 

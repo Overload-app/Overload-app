@@ -834,7 +834,7 @@ export function injuryDescription(profile) {
   return parts.length > 0 ? parts.join(", ") : "none";
 }
 
-function buildProgramGenSystem(profile) {
+export function buildProgramGenSystem(profile) {
   const { sets: recSets, rest: recRest } = planSetsRest(profile);
   return `You are a world-class evidence-based strength & physique coach designing a brand-new, fully personalized training program from scratch for a new client. Apply mainstream exercise-science consensus: progressive overload, sensible per-muscle volume landmarks, rep ranges matched to the goal, and adequate recovery between sessions hitting the same muscles.
 
@@ -850,6 +850,7 @@ Client details:
 - Target session length: ~${profile.sessionLength} minutes
 - Injuries / areas to train around: ${injuryDescription(profile)}
 - Daily activity level outside training: ${profile.activity}
+${profile.notes ? `- Additional notes from the client, in their own words — treat this as a real constraint/preference, not a nice-to-have: "${profile.notes}"` : ""}
 
 Split structure guidance for ${profile.daysPerWeek} days/week: ${splitGuidanceFor(profile.daysPerWeek)}
 IMPORTANT: Do not default to an Upper/Lower split out of habit. Actually weigh which valid structure for this day count best serves THIS person's experience level and desired physique, and choose that one — different clients with the same day count should be able to land on different splits if their goals differ. If their desired physique calls out specific areas (e.g. "bigger arms", "glutes", "wider back"), prefer a split structure that lets you dedicate real, undiluted volume to that area rather than folding it into a generic day.
@@ -872,6 +873,7 @@ Rules:
 - Use the EXACT SAME spelling for an exercise every time it appears in this program — if "Leg Press" shows up on more than one day, it must be spelled identically both times, not "Leg Press" one day and "Leg Press Machine" or "Machine Leg Press" the next. These are meant to be the same reference name throughout, not restated in different words each time.
 - Where one of these fits what you're trying to program, prefer it exactly as written — real, plain names already known to work well: ${exerciseVocabularyFor(profile.equipment).join(", ")}. Use something else if none of these fit, but don't rename or rephrase one of these if it does fit.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
+${profile.notes ? `- Actually honor the client's own additional notes above ("${profile.notes}") — a stated split preference, a disliked/avoided exercise, equipment their specific gym doesn't have, or anything else in there. If something in it conflicts with another rule (e.g. asks for equipment outside what's available), prioritize what's actually usable and briefly note the conflict isn't a way to silently ignore it.` : ""}
 - Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
 - Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."`;
@@ -1680,6 +1682,13 @@ const QUIZ_STEPS = [
   // reason to make someone click Next just to say "nothing else" when they
   // could just leave a checkbox unchecked.
   { key: "injuries", q: "Any injuries or areas we should train around?", sub: "Select all that apply — we'll avoid exercises that stress these.", type: "multi", options: [["none", "None"], ["knees", "Knees"], ["shoulders", "Shoulders"], ["lower_back", "Lower back"], ["wrists", "Wrists"], ["elbows", "Elbows"], ["other", "Other"]] },
+  {
+    key: "notes",
+    q: "Anything else your coach should know?",
+    sub: "Optional, but genuinely read and used — a preferred split, exercises you just don't enjoy, equipment your gym doesn't actually have, anything that doesn't fit the questions above.",
+    type: "text",
+    placeholder: "e.g. \"Prefer an upper/lower split\", \"no cable machine at my gym\", \"please no burpees or box jumps\"",
+  },
 ];
 
 export function Onboarding({ onComplete }) {
@@ -2982,7 +2991,7 @@ function Train({ state, startWorkout, setActiveTab }) {
 /* ============================================================
    COACH (AI CHAT)
 ============================================================ */
-function buildCoachSystem(state) {
+export function buildCoachSystem(state) {
   const p = state.profile;
   // Derived from what the current program's exercises ACTUALLY use, not
   // profile.goal's static default sets/rest — a user can ask Coach to
@@ -3000,7 +3009,7 @@ function buildCoachSystem(state) {
     calories: h.targets?.calories,
   }));
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
-User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.
+User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
