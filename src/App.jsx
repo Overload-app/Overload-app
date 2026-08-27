@@ -2269,13 +2269,20 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
         // back out after setSets instead of inside the updater itself).
         // exercisePR only sees logs from BEFORE this workout was saved, so
         // this only fires for a genuine new best, not just "heavier than
-        // an earlier set tonight."
+        // an earlier set tonight." Requires an actual PRIOR value to beat —
+        // "no history found" used to celebrate too (nothing to lose to),
+        // but that fires just as easily when a name simply doesn't match
+        // old history (a rename, a regenerated program) as it does for a
+        // real first-ever log, and either way it's not a genuine beaten
+        // record. Real report: it read as "tying a PR shouldn't count as a
+        // PR" — no prior match at all is the same case, just with no
+        // number to visibly tie.
         const justLogged = copy[exIdx].logged[setIdx];
         const weight = Number(justLogged.weight);
         const reps = Number(justLogged.reps);
         if (logs && weight > 0 && reps > 0) {
           const priorPR = exercisePR(logs, copy[exIdx].name);
-          if (!priorPR || weight > priorPR.weight || (weight === priorPR.weight && reps > priorPR.reps)) {
+          if (priorPR && (weight > priorPR.weight || (weight === priorPR.weight && reps > priorPR.reps))) {
             setPrCelebration({ name: copy[exIdx].name, weight, reps });
           }
         }
@@ -3692,25 +3699,12 @@ export function detectCoachInsight(state) {
   if (!logs || !profile) return null;
   const workouts = logs.workouts || [];
 
-  // 1. Adherence: meaningfully under their own stated weekly target, but
-  // only once there's enough history logged for that to mean something
-  // (not week one, and not a single missed day misread as a trend).
-  if (workouts.length >= 3 && profile.daysPerWeek) {
-    const last7 = new Set();
-    const cursor = new Date();
-    for (let i = 0; i < 7; i++) {
-      last7.add(dateToISO(cursor));
-      cursor.setDate(cursor.getDate() - 1);
-    }
-    const doneThisWeek = workouts.filter((w) => last7.has(w.date)).length;
-    if (doneThisWeek < profile.daysPerWeek && doneThisWeek <= Math.floor(profile.daysPerWeek / 2) - 1) {
-      return {
-        type: "adherence",
-        message: `You've done ${doneThisWeek}/${profile.daysPerWeek} workouts this week — anything getting in the way, or should we adjust the schedule?`,
-        coachPrompt: `I've only done ${doneThisWeek} of my ${profile.daysPerWeek} planned workouts this week. Can you help me figure out what to do about it?`,
-      };
-    }
-  }
+  // Deliberately no adherence/schedule nudge here — real report: this used
+  // to compare workouts-done-in-a-trailing-7-days against the full weekly
+  // target, which reads as "you're behind" even a day or two into a fresh
+  // week (a rolling window can't tell "genuinely behind" from "just early"
+  // without knowing which days are actually left to train). Explicit user
+  // preference: "Don't want coach giving advice about schedule."
 
   // 2. Duration overrun: the last few timed sessions consistently ran well
   // past the session length they actually asked for.
@@ -4048,6 +4042,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
+  const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [coachLoading, setCoachLoading] = useState(false);
   // "synced" | "offline" (change saved locally, not yet on the server) | "saving"
   const [syncStatus, setSyncStatus] = useState("synced");
@@ -4454,7 +4449,19 @@ export default function App() {
     persist(fresh);
   }
 
+  // Only one paused workout can be held in inProgressWorkout at a time —
+  // starting a second, DIFFERENT day while one is already paused silently
+  // overwrote it the moment "Save & exit" ran on the new one, with no
+  // warning it was about to happen. Real report: "I accidentally selected
+  // a new workout and it deleted my other workout with no warning."
+  // Skipped for a same-day resume (state.inProgressWorkout.dayIdx ===
+  // dayIdx) and for the resume button itself (resume === true) — neither
+  // of those can actually lose anything.
   function startWorkout(dayIdx, resume) {
+    if (!resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx !== dayIdx) {
+      setConflictStartIdx(dayIdx);
+      return;
+    }
     // resumedAt marks the start of THIS active stretch — whether that's a
     // brand-new workout or picking a saved one back up — so duration only
     // ever counts time the workout screen was actually open.
@@ -4646,6 +4653,17 @@ export default function App() {
     { key: "profile", label: "You", icon: User },
   ];
 
+  // todayOverride is a Coach one-time swap for "your next upcoming
+  // session" — same day-of-rotation math as Home/Train use to decide which
+  // card gets the NEXT pill. It was being applied to whichever dayIdx the
+  // active session actually pointed at, with no check that it was really
+  // that same day — so a stale override generated for legs kept getting
+  // overlaid onto push, back, or any other day the person actually picked,
+  // forcing them into a workout they never chose. Real report: "it took me
+  // to legs every time" no matter what was tapped.
+  const nextIdx = state.logs.workouts.length % state.program.days.length;
+  const sessionIsNextDay = session && session.dayIdx === nextIdx;
+
   return (
     <div className="app-shell">
       <style>{FONT_IMPORT}</style>
@@ -4740,8 +4758,12 @@ export default function App() {
       {/* Guards against a stale saved workout referencing a day that no
           longer exists — e.g. the Coach permanently shrunk the program's
           day count while this was paused. Without this check, resuming it
-          would crash trying to render an undefined day. */}
-      {state.inProgressWorkout && !session && state.program.days[state.inProgressWorkout.dayIdx] && (
+          would crash trying to render an undefined day. Hidden on the
+          Coach tab specifically — real report: it floats right over the
+          middle of an active chat, covering message text just above the
+          input box. Home and Train already surface resume prominently, so
+          nothing is actually lost by not floating it here too. */}
+      {state.inProgressWorkout && !session && activeTab !== "coach" && state.program.days[state.inProgressWorkout.dayIdx] && (
         <button
           className="resume-bar"
           onClick={() => startWorkout(state.inProgressWorkout.dayIdx, true)}
@@ -4751,7 +4773,7 @@ export default function App() {
           <span style={{ textAlign: "left" }}>
             <div style={{ fontSize: 9, fontWeight: 700, color: "#B9BEC6", letterSpacing: 1 }}>RESUME</div>
             <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>
-              {Array.isArray(state.todayOverride) && state.todayOverride.length > 0
+              {Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && state.inProgressWorkout.dayIdx === nextIdx
                 ? overrideDayName(state.todayOverride)
                 : state.program.days[state.inProgressWorkout.dayIdx]?.name}
             </div>
@@ -4760,14 +4782,49 @@ export default function App() {
         </button>
       )}
 
+      {conflictStartIdx !== null && state.inProgressWorkout && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>You have an unfinished workout</h3>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>
+            Starting "{state.program.days[conflictStartIdx]?.name}" now will permanently discard your paused progress on "{state.program.days[state.inProgressWorkout.dayIdx]?.name}".
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
+            <Btn
+              variant="accent"
+              onClick={() => {
+                const idx = conflictStartIdx;
+                persist((prev) => ({ ...prev, inProgressWorkout: null }));
+                setConflictStartIdx(null);
+                setSession({ dayIdx: idx, resume: false, resumedAt: Date.now() });
+              }}
+              style={{ width: "100%" }}
+            >
+              Discard it & start "{state.program.days[conflictStartIdx]?.name}"
+            </Btn>
+            <Btn
+              variant="ghost"
+              onClick={() => {
+                const idx = state.inProgressWorkout.dayIdx;
+                setConflictStartIdx(null);
+                setSession({ dayIdx: idx, resume: true, resumedAt: Date.now() });
+              }}
+              style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}
+            >
+              Resume "{state.program.days[state.inProgressWorkout.dayIdx]?.name}" instead
+            </Btn>
+            <button onClick={() => setConflictStartIdx(null)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       {session && state.program.days[session.dayIdx] && (
         <WorkoutSession
           day={
-            Array.isArray(state.todayOverride) && state.todayOverride.length > 0
+            Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && sessionIsNextDay
               ? { ...state.program.days[session.dayIdx], name: overrideDayName(state.todayOverride), exercises: state.todayOverride }
               : state.program.days[session.dayIdx]
           }
-          isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0}
+          isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && sessionIsNextDay}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
           logs={state.logs}
           resumedAt={session.resumedAt}

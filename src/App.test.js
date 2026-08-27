@@ -1524,7 +1524,7 @@ describe("detectCoachInsight", () => {
     expect(detectCoachInsight(null)).toBeNull();
   });
 
-  test("returns null for a healthy state — good adherence, on-time duration, no stalled lift", () => {
+  test("returns null for a healthy state — on-time duration, no stalled lift", () => {
     const state = {
       profile: { daysPerWeek: 3, sessionLength: 45 },
       program: { days: [{ name: "Day 1", exercises: [{ name: "Bench Press" }] }] },
@@ -1539,7 +1539,12 @@ describe("detectCoachInsight", () => {
     expect(detectCoachInsight(state)).toBeNull();
   });
 
-  test("flags low adherence once there's enough history to mean something", () => {
+  // No adherence/schedule nudge at all, regardless of how little was
+  // logged this week — explicit user preference ("Don't want coach giving
+  // advice about schedule"), and it used to misfire early in a fresh week
+  // besides (a trailing-7-day window can't distinguish "behind" from
+  // "just early" without knowing which days are actually left to train).
+  test("never flags low weekly volume, no matter how far under the target", () => {
     const state = {
       profile: { daysPerWeek: 4 },
       logs: {
@@ -1550,19 +1555,12 @@ describe("detectCoachInsight", () => {
         ],
       },
     };
-    const insight = detectCoachInsight(state);
-    expect(insight.type).toBe("adherence");
-    expect(insight.message).toContain("1/4");
-  });
-
-  test("does not flag adherence in week one — not enough history logged yet", () => {
-    const state = { profile: { daysPerWeek: 4 }, logs: { workouts: [{ date: daysAgo(0), exercises: [] }] } };
     expect(detectCoachInsight(state)).toBeNull();
   });
 
   test("flags a consistent duration overrun across the last few timed sessions", () => {
     const state = {
-      profile: { sessionLength: 30 }, // no daysPerWeek — isolates this from the adherence branch
+      profile: { sessionLength: 30 },
       logs: {
         workouts: [
           { date: daysAgo(1), exercises: [], durationSec: 2700 }, // 45 min
@@ -1617,7 +1615,7 @@ describe("detectCoachInsight", () => {
     expect(detectCoachInsight(state)).toBeNull();
   });
 
-  test("prioritizes adherence over a duration overrun when both would apply", () => {
+  test("still flags a duration overrun even for someone far under their weekly volume target", () => {
     const state = {
       profile: { daysPerWeek: 4, sessionLength: 30 },
       logs: {
@@ -1628,7 +1626,7 @@ describe("detectCoachInsight", () => {
         ],
       },
     };
-    expect(detectCoachInsight(state).type).toBe("adherence");
+    expect(detectCoachInsight(state).type).toBe("duration");
   });
 
   // Every insight hands back a ready-to-send Coach message so the "Ask

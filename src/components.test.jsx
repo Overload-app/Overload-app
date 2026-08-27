@@ -538,22 +538,70 @@ describe("<WorkoutSession /> PR celebration", () => {
     expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
   });
 
-  test("with no logged history at all, any real logged set counts as a new PR", async () => {
+  test("with no logged history at all, no toast shows — there's nothing it actually beat", async () => {
+    // Real report: this used to celebrate any first-ever log as a "new
+    // PR" — but the same "no history found" path also fires when an
+    // exercise was simply renamed (a Coach edit, a regenerated program),
+    // stranding real history under the old name. Either way there's no
+    // genuine prior number being beaten, so no toast is the honest answer.
     const user = setup({ workouts: [] });
     await user.type(screen.getByPlaceholderText("lb"), "135");
     await user.type(screen.getByPlaceholderText("reps"), "8");
     await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
-    expect(screen.getByText("NEW PR")).toBeInTheDocument();
+    expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
+  });
+
+  test("logging the exact same weight and reps as the existing PR (a tie) shows no toast", async () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "185", reps: "5", done: true }] }] }] };
+    const user = setup(logs);
+    await user.type(screen.getByPlaceholderText("lb"), "185");
+    await user.type(screen.getByPlaceholderText("reps"), "5");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
   });
 
   test("dismissing the toast hides it immediately", async () => {
-    const user = setup({ workouts: [] });
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "115", reps: "8", done: true }] }] }] };
+    const user = setup(logs);
     await user.type(screen.getByPlaceholderText("lb"), "135");
     await user.type(screen.getByPlaceholderText("reps"), "8");
     await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
     expect(screen.getByText("NEW PR")).toBeInTheDocument();
     await user.click(screen.getByLabelText("Dismiss PR notification"));
     expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutSession /> editing weight/reps after the checkmark", () => {
+  // Real report: "should be able to change the weight or reps after the
+  // checkmark has been hit, and it should remember that as the reps or
+  // weight actually done." The inputs were never actually locked after
+  // marking a set done — this just confirms an edit made AFTER checking
+  // the box is what actually gets saved when the workout finishes, not
+  // whatever was typed in before the checkmark.
+  test("a weight/reps edit made after marking a set done is what onFinish actually receives", async () => {
+    const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] }] };
+    const onFinish = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={onFinish} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.type(screen.getByPlaceholderText("lb"), "135");
+    await user.type(screen.getByPlaceholderText("reps"), "8");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    // Edit AFTER the checkmark — should not be locked out.
+    await user.clear(screen.getByPlaceholderText("lb"));
+    await user.type(screen.getByPlaceholderText("lb"), "145");
+    await user.clear(screen.getByPlaceholderText("reps"));
+    await user.type(screen.getByPlaceholderText("reps"), "6");
+
+    await user.click(screen.getByText("Finish workout"));
+    const savedExercises = onFinish.mock.calls[0][0];
+    expect(savedExercises[0].logged[0]).toMatchObject({ weight: "145", reps: "6", done: true });
   });
 });
 
@@ -1021,15 +1069,19 @@ describe("<Home /> Coach insight card", () => {
     };
   }
 
-  function lowAdherenceState() {
+  // Adherence/schedule nudges were removed entirely (explicit user
+  // preference — see detectCoachInsight in App.jsx), so this card is now
+  // exercised via a duration-overrun insight instead, the next one in
+  // detectCoachInsight's priority order.
+  function durationOverrunState() {
     const daysAgo = (n) => dateToISO(new Date(Date.now() - n * 86400000));
     return baseState({
-      profile: { daysPerWeek: 4, sessionLength: 45 },
+      profile: { daysPerWeek: 4, sessionLength: 30 },
       logs: {
         workouts: [
-          { date: daysAgo(1), exercises: [] },
-          { date: daysAgo(20), exercises: [] },
-          { date: daysAgo(25), exercises: [] },
+          { date: daysAgo(1), exercises: [], durationSec: 2700 },
+          { date: daysAgo(8), exercises: [], durationSec: 2700 },
+          { date: daysAgo(15), exercises: [], durationSec: 2700 },
         ],
         nutrition: [],
       },
@@ -1039,7 +1091,7 @@ describe("<Home /> Coach insight card", () => {
   test("shows a Coach insight card when one applies, and Ask Coach sends it through", async () => {
     const user = userEvent.setup();
     const onAskCoach = vi.fn();
-    render(<Home state={lowAdherenceState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={onAskCoach} />);
+    render(<Home state={durationOverrunState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={onAskCoach} />);
     expect(screen.getByText("COACH NOTICED")).toBeInTheDocument();
     await user.click(screen.getByText("Ask Coach"));
     expect(onAskCoach).toHaveBeenCalledTimes(1);
@@ -1048,7 +1100,7 @@ describe("<Home /> Coach insight card", () => {
 
   test("dismissing the insight card hides it", async () => {
     const user = userEvent.setup();
-    render(<Home state={lowAdherenceState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    render(<Home state={durationOverrunState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
     expect(screen.getByText("COACH NOTICED")).toBeInTheDocument();
     await user.click(screen.getByText("Dismiss"));
     expect(screen.queryByText("COACH NOTICED")).not.toBeInTheDocument();
