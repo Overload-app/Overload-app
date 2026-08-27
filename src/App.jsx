@@ -1689,6 +1689,14 @@ const QUIZ_STEPS = [
     type: "text",
     placeholder: "e.g. \"Prefer an upper/lower split\", \"no cable machine at my gym\", \"please no burpees or box jumps\"",
   },
+  {
+    key: "reviewCadence",
+    q: "Want periodic AI check-ins on your progress?",
+    sub: "Optional — a short written review of your training and nutrition, generated automatically once a period's worth of data is in. Pick either, both, or neither; change this anytime in Settings.",
+    type: "multi",
+    optional: true,
+    options: [["weekly", "Weekly review"], ["monthly", "Monthly review"]],
+  },
 ];
 
 export function Onboarding({ onComplete }) {
@@ -1705,6 +1713,7 @@ export function Onboarding({ onComplete }) {
 
   const cur = QUIZ_STEPS[step];
   const canNext = !cur ? true
+    : cur.optional ? true
     : cur.type === "height" ? true
     : cur.type === "multi" ? (answers[cur.key]?.length > 0)
     : cur.type === "text" ? true
@@ -1746,6 +1755,8 @@ export function Onboarding({ onComplete }) {
       specificGoals: answers.specificGoals || "",
       injuries: answers.injuries || ["none"],
       otherInjuries: answers.otherInjuries || "",
+      weeklyReviewEnabled: (answers.reviewCadence || []).includes("weekly"),
+      monthlyReviewEnabled: (answers.reviewCadence || []).includes("monthly"),
       name: "",
     };
     const targets = calcTargets(profile);
@@ -2837,6 +2848,27 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
         </div>
       )}
 
+      {/* A generated review sits permanently under Progress either way —
+          this is just a heads-up that a new one showed up, not the only
+          place to see it. */}
+      {(() => {
+        const unseen = ["weekly", "monthly"]
+          .flatMap((cadence) => (state.reviews?.[cadence] || []).map((r, i) => ({ cadence, r, i })))
+          .filter(({ r }) => !r.seen);
+        if (unseen.length === 0) return null;
+        const cadenceLabel = unseen.length > 1 ? "reviews are" : `${unseen[0].cadence} review is`;
+        return (
+          <button
+            onClick={() => setActiveTab("progress")}
+            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", background: T.card, border: `1px solid ${T.steel}`, borderRadius: 12, padding: "12px 14px", marginTop: 10, cursor: "pointer", textAlign: "left" }}
+          >
+            <TrendingUp size={16} color={T.chargeDeep} style={{ flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: 13, color: T.ink, fontWeight: 600 }}>Your {cadenceLabel} ready — see it in Progress</span>
+            <ChevronRight size={16} color={T.steelDark} />
+          </button>
+        );
+      })()}
+
       <TickRule label="Next workout" />
       <Card style={{ background: T.ink, border: "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -3774,6 +3806,66 @@ export function detectCoachInsight(state) {
   return null;
 }
 
+/* ============================================================
+   PERIODIC AI REVIEWS (weekly / monthly)
+   Rolling-window, not calendar-aligned — the next review is simply due one
+   period after the last one (or after the account was created, for the
+   very first one), rather than trying to line up with a fixed weekday or
+   the 1st of the month. Simpler to reason about, and doesn't require
+   knowing what day the account was created relative to any calendar
+   boundary.
+============================================================ */
+const REVIEW_PERIOD_MS = { weekly: 7 * 86400000, monthly: 30 * 86400000 };
+
+export function reviewPeriodStart(reviews, accountCreatedAt, cadence) {
+  const list = reviews?.[cadence] || [];
+  const last = list.length > 0 ? list[list.length - 1] : null;
+  return last ? new Date(last.generatedAt).getTime() : new Date(accountCreatedAt).getTime();
+}
+
+export function nextReviewDueAt(reviews, accountCreatedAt, cadence) {
+  return reviewPeriodStart(reviews, accountCreatedAt, cadence) + REVIEW_PERIOD_MS[cadence];
+}
+
+export function isReviewDue(reviews, accountCreatedAt, cadence, now = new Date()) {
+  if (!accountCreatedAt) return false;
+  return now.getTime() >= nextReviewDueAt(reviews, accountCreatedAt, cadence);
+}
+
+// Deterministic stats for the period — computed regardless of whether the
+// AI call that turns them into prose succeeds, so there's always at least
+// real numbers behind a review, never just AI-generated vibes.
+export function summarizeReviewPeriod(logs, periodStartMs, periodEndMs) {
+  const inRange = (dateStr) => {
+    const t = new Date(dateStr).getTime();
+    return t >= periodStartMs && t <= periodEndMs;
+  };
+  const workouts = (logs.workouts || []).filter((w) => inRange(w.date));
+  const totalDurationSec = workouts.reduce((a, w) => a + (w.durationSec || 0), 0);
+  const timedCount = workouts.filter((w) => w.durationSec).length;
+  const weighIns = (logs.bodyweight || []).filter((w) => inRange(w.date)).sort((a, b) => (a.date > b.date ? 1 : -1));
+  const weightChange = weighIns.length >= 2 ? Number((weighIns[weighIns.length - 1].weight - weighIns[0].weight).toFixed(1)) : null;
+  return {
+    workoutCount: workouts.length,
+    avgDurationSec: timedCount > 0 ? Math.round(totalDurationSec / timedCount) : null,
+    weightChange,
+    startWeight: weighIns[0]?.weight ?? null,
+    endWeight: weighIns[weighIns.length - 1]?.weight ?? null,
+  };
+}
+
+export function buildReviewSystem(profile, cadence, summary) {
+  const periodLabel = cadence === "weekly" ? "the past week" : "the past month";
+  return `You are an evidence-based strength & nutrition coach writing a short periodic progress review for a client in a workout app called Overload, covering ${periodLabel}.
+
+Client profile: goal=${profile.goal}, experience=${profile.experience}, days/week target=${profile.daysPerWeek}.
+Logged data for ${periodLabel}: ${summary.workoutCount} workout(s) logged${summary.avgDurationSec ? `, averaging ${Math.round(summary.avgDurationSec / 60)} min each` : ""}.${summary.weightChange !== null ? ` Bodyweight went from ${summary.startWeight}lb to ${summary.endWeight}lb (${summary.weightChange > 0 ? "+" : ""}${summary.weightChange}lb).` : " No bodyweight trend available for this period."}
+
+Write a short, honest, encouraging review — 3-5 sentences of overview, then 2-3 concrete, specific pieces of advice for training and/or diet going forward. If little or nothing was logged this period, say that plainly and gently rather than inventing progress that didn't happen — ask what got in the way rather than assuming.
+
+Respond ONLY with JSON, no markdown fences: {"overview": "<3-5 sentence summary>", "advice": ["<specific tip>", "<specific tip>"]}`;
+}
+
 function ExerciseProgress({ logs }) {
   const names = Array.from(new Set(logs.workouts.flatMap((w) => w.exercises.map((e) => e.name)))).sort();
   const [selected, setSelected] = useState(names[0] || "");
@@ -3834,7 +3926,63 @@ function ExerciseProgress({ logs }) {
   );
 }
 
-export function Progress({ state, addWeight, removeWeight, onOpenHistory }) {
+// Shows generated weekly/monthly reviews, most-recent-first within each
+// cadence, only when at least one of either exists — nothing shown at all
+// (not even an empty state) for accounts that never enabled either, so
+// this doesn't clutter Progress for the common case of neither being on.
+// Marks any unseen entries as seen once they're actually rendered here
+// (this section itself IS "viewing" them, whether reached via the Home
+// banner or just browsing Progress directly).
+function ReviewsSection({ reviews, onMarkSeen }) {
+  const weekly = reviews?.weekly || [];
+  const monthly = reviews?.monthly || [];
+  useEffect(() => {
+    weekly.forEach((r, i) => { if (!r.seen) onMarkSeen?.("weekly", i); });
+    monthly.forEach((r, i) => { if (!r.seen) onMarkSeen?.("monthly", i); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekly.length, monthly.length]);
+
+  if (weekly.length === 0 && monthly.length === 0) return null;
+
+  function ReviewCard({ label, entry }) {
+    return (
+      <Card style={{ marginBottom: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5 }}>{label}</span>
+          <span style={{ fontSize: 11, color: T.steelDark }}>{entry.generatedAt.slice(0, 10)}</span>
+        </div>
+        {entry.overview ? (
+          <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{entry.overview}</p>
+        ) : (
+          <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
+            {entry.summary.workoutCount} workout{entry.summary.workoutCount === 1 ? "" : "s"} logged this period.
+          </p>
+        )}
+        {entry.advice && entry.advice.length > 0 && (
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {entry.advice.map((tip, i) => (
+              <li key={i} style={{ fontSize: 12.5, color: T.steelDark, marginBottom: 3 }}>{tip}</li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    );
+  }
+
+  return (
+    <>
+      <TickRule label="Reviews" />
+      {weekly.slice().reverse().slice(0, 3).map((r, i) => (
+        <ReviewCard key={`w-${weekly.length - 1 - i}`} label="WEEKLY REVIEW" entry={r} />
+      ))}
+      {monthly.slice().reverse().slice(0, 3).map((r, i) => (
+        <ReviewCard key={`m-${monthly.length - 1 - i}`} label="MONTHLY REVIEW" entry={r} />
+      ))}
+    </>
+  );
+}
+
+export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMarkReviewSeen }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
@@ -3877,6 +4025,8 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory }) {
           <ChevronRight size={16} color={T.steelDark} />
         </button>
       )}
+
+      <ReviewsSection reviews={state.reviews} onMarkSeen={onMarkReviewSeen} />
 
       <TickRule label="This month" />
       <MonthlySummary logs={logs} />
@@ -4075,7 +4225,7 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate }) 
 /* ============================================================
    PROFILE
 ============================================================ */
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -4170,6 +4320,29 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
+      <TickRule label="Reviews" />
+      <Card>
+        <p style={{ fontSize: 12, color: T.steelDark, margin: "0 0 10px" }}>A short AI-written progress review, generated automatically once a period's worth of data is in.</p>
+        {[["weekly", "Weekly review"], ["monthly", "Monthly review"]].map(([cadence, label], i) => (
+          <div key={cadence} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+            <span style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</span>
+            <button
+              role="switch"
+              aria-checked={!!state.reviewsEnabled?.[cadence]}
+              aria-label={`Toggle ${label.toLowerCase()}`}
+              onClick={() => onSetReviewEnabled(cadence, !state.reviewsEnabled?.[cadence])}
+              style={{
+                width: 42, height: 24, borderRadius: 12, border: "none", cursor: "pointer", padding: 2,
+                background: state.reviewsEnabled?.[cadence] ? T.charge : T.steel,
+                display: "flex", justifyContent: state.reviewsEnabled?.[cadence] ? "flex-end" : "flex-start",
+              }}
+            >
+              <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", display: "block" }} />
+            </button>
+          </div>
+        ))}
+      </Card>
+
       <TickRule label="Support & legal" />
       <Card>
         <a href="mailto:support@overload-app.com" style={{ display: "block", fontSize: 13, color: T.ink, fontWeight: 600, padding: "8px 0", textDecoration: "none" }}>Contact support</a>
@@ -4235,6 +4408,45 @@ export default function App() {
     window.addEventListener("online", retryPendingSync);
     return () => window.removeEventListener("online", retryPendingSync);
   }, [account]);
+
+  // Checks once per state change whether a weekly/monthly review has come
+  // due — no cron/background jobs here, so "the app was opened" is the
+  // only real trigger point available. reviewGenerating guards against
+  // firing twice for the same cadence while a request is already in
+  // flight (a fast double-render, or logs changing again mid-request).
+  const reviewGeneratingRef = useRef({ weekly: false, monthly: false });
+  useEffect(() => {
+    if (!account || !state?.accountCreatedAt) return;
+    ["weekly", "monthly"].forEach(async (cadence) => {
+      if (!state.reviewsEnabled?.[cadence]) return;
+      if (reviewGeneratingRef.current[cadence]) return;
+      if (!isReviewDue(state.reviews, state.accountCreatedAt, cadence)) return;
+      reviewGeneratingRef.current[cadence] = true;
+      try {
+        const periodStartMs = reviewPeriodStart(state.reviews, state.accountCreatedAt, cadence);
+        const summary = summarizeReviewPeriod(state.logs, periodStartMs, Date.now());
+        let overview = null;
+        let advice = [];
+        try {
+          const raw = await claudeChat({
+            system: buildReviewSystem(state.profile, cadence, summary),
+            messages: [{ role: "user", content: "Write my review now." }],
+          });
+          const parsed = parseJSONLoose(raw);
+          overview = parsed?.overview || null;
+          advice = Array.isArray(parsed?.advice) ? parsed.advice : [];
+        } catch (e) {
+          // No connection or the call failed — still record a real,
+          // data-only review below rather than losing the period
+          // entirely; nothing here should block on AI availability.
+        }
+        const entry = { generatedAt: new Date().toISOString(), periodStartMs, periodEndMs: Date.now(), summary, overview, advice, seen: false };
+        persist((prev) => ({ ...prev, reviews: { ...prev.reviews, [cadence]: [...(prev.reviews?.[cadence] || []), entry] } }));
+      } finally {
+        reviewGeneratingRef.current[cadence] = false;
+      }
+    });
+  }, [account, state?.logs, state?.reviewsEnabled, state?.accountCreatedAt]);
 
   useEffect(() => {
     (async () => {
@@ -4659,6 +4871,9 @@ export default function App() {
       coachUsage: null,
       programHistory: [],
       gifCache: {},
+      accountCreatedAt: new Date().toISOString(),
+      reviewsEnabled: { weekly: !!profile.weeklyReviewEnabled, monthly: !!profile.monthlyReviewEnabled },
+      reviews: { weekly: [], monthly: [] },
     };
     persist(fresh);
   }
@@ -4803,6 +5018,17 @@ export default function App() {
     persist((prev) => ({
       ...prev,
       logs: { ...prev.logs, workouts: prev.logs.workouts.map((w, i) => (i === index ? { ...w, exercises: updatedExercises } : w)) },
+    }));
+  }
+
+  function setReviewEnabled(cadence, enabled) {
+    persist((prev) => ({ ...prev, reviewsEnabled: { ...prev.reviewsEnabled, [cadence]: enabled } }));
+  }
+
+  function markReviewSeen(cadence, index) {
+    persist((prev) => ({
+      ...prev,
+      reviews: { ...prev.reviews, [cadence]: (prev.reviews?.[cadence] || []).map((r, i) => (i === index ? { ...r, seen: true } : r)) },
     }));
   }
 
@@ -4959,8 +5185,8 @@ export default function App() {
           {activeTab === "train" && <Train state={state} startWorkout={startWorkout} setActiveTab={setActiveTab} />}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
-          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} onOpenHistory={() => setHistoryEditorOpen(true)} />}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} />}
+          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} onOpenHistory={() => setHistoryEditorOpen(true)} onMarkReviewSeen={markReviewSeen} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} />}
         </div>
 
         <div className="bottom-nav">

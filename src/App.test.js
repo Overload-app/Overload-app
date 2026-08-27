@@ -55,6 +55,11 @@ import {
   fetchSimilarExercises,
   buildProgramGenSystem,
   buildCoachSystem,
+  reviewPeriodStart,
+  nextReviewDueAt,
+  isReviewDue,
+  summarizeReviewPeriod,
+  buildReviewSystem,
   OFFLINE_MESSAGE,
   loadState,
   saveState,
@@ -504,6 +509,79 @@ describe("secondsPerExercise / capFor", () => {
     const modeledSeconds = capFor(profile) * rawSecondsPerExercise(sets, rest);
     expect(modeledSeconds / 60).toBeGreaterThanOrEqual(50);
     expect(modeledSeconds / 60).toBeLessThanOrEqual(70);
+  });
+});
+
+// Real ask: periodic (weekly/monthly) AI reviews of training and diet,
+// each independently toggleable from the quiz and Settings.
+describe("periodic review scheduling and summarization", () => {
+  const DAY = 86400000;
+
+  test("the very first weekly review is due 7 days after account creation, not before", () => {
+    const created = new Date("2026-08-01T00:00:00Z").toISOString();
+    expect(isReviewDue({ weekly: [] }, created, "weekly", new Date("2026-08-06T00:00:00Z"))).toBe(false);
+    expect(isReviewDue({ weekly: [] }, created, "weekly", new Date("2026-08-08T00:00:00Z"))).toBe(true);
+  });
+
+  test("the very first monthly review is due 30 days after account creation", () => {
+    const created = new Date("2026-08-01T00:00:00Z").toISOString();
+    expect(isReviewDue({ monthly: [] }, created, "monthly", new Date("2026-08-20T00:00:00Z"))).toBe(false);
+    expect(isReviewDue({ monthly: [] }, created, "monthly", new Date("2026-08-31T00:00:00Z"))).toBe(true);
+  });
+
+  test("after a review has been generated, the next one is due one period after THAT one, not account creation", () => {
+    const created = new Date("2026-01-01T00:00:00Z").toISOString();
+    const reviews = { weekly: [{ generatedAt: new Date("2026-08-01T00:00:00Z").toISOString() }] };
+    expect(isReviewDue(reviews, created, "weekly", new Date("2026-08-05T00:00:00Z"))).toBe(false);
+    expect(isReviewDue(reviews, created, "weekly", new Date("2026-08-09T00:00:00Z"))).toBe(true);
+  });
+
+  test("reviewPeriodStart anchors to the last review when one exists, else account creation", () => {
+    const created = new Date("2026-01-01T00:00:00Z").toISOString();
+    expect(reviewPeriodStart({ weekly: [] }, created, "weekly")).toBe(new Date(created).getTime());
+    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
+    expect(reviewPeriodStart({ weekly: [{ generatedAt: lastGen }] }, created, "weekly")).toBe(new Date(lastGen).getTime());
+  });
+
+  test("summarizeReviewPeriod only counts workouts/weigh-ins actually inside the period", () => {
+    const logs = {
+      workouts: [
+        { date: "2026-07-25", durationSec: 2400 }, // before the period
+        { date: "2026-08-02", durationSec: 3000 },
+        { date: "2026-08-05", durationSec: 3600 },
+      ],
+      bodyweight: [
+        { date: "2026-07-20", weight: 200 }, // before the period
+        { date: "2026-08-01", weight: 180 },
+        { date: "2026-08-07", weight: 178 },
+      ],
+    };
+    const start = new Date("2026-08-01T00:00:00Z").getTime();
+    const end = new Date("2026-08-08T00:00:00Z").getTime();
+    const summary = summarizeReviewPeriod(logs, start, end);
+    expect(summary.workoutCount).toBe(2);
+    expect(summary.avgDurationSec).toBe(3300); // (3000+3600)/2
+    expect(summary.weightChange).toBe(-2); // 178 - 180
+  });
+
+  test("summarizeReviewPeriod reports null weightChange with fewer than 2 weigh-ins in the period", () => {
+    const logs = { workouts: [], bodyweight: [{ date: "2026-08-01", weight: 180 }] };
+    const summary = summarizeReviewPeriod(logs, new Date("2026-08-01").getTime(), new Date("2026-08-08").getTime());
+    expect(summary.weightChange).toBeNull();
+  });
+
+  test("buildReviewSystem includes the real logged stats and asks for honest, non-inflated feedback when nothing was logged", () => {
+    const summary = { workoutCount: 0, avgDurationSec: null, weightChange: null, startWeight: null, endWeight: null };
+    const system = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 4 }, "weekly", summary);
+    expect(system).toContain("0 workout(s) logged");
+    expect(system.toLowerCase()).toContain("nothing");
+  });
+
+  test("buildReviewSystem reports a weight trend when one exists", () => {
+    const summary = { workoutCount: 3, avgDurationSec: 2700, weightChange: -2, startWeight: 180, endWeight: 178 };
+    const system = buildReviewSystem({ goal: "lose", experience: "beginner", daysPerWeek: 3 }, "monthly", summary);
+    expect(system).toContain("180lb to 178lb");
+    expect(system).toContain("-2lb");
   });
 });
 

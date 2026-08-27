@@ -190,6 +190,45 @@ describe("<ProfileTab /> reset confirmation", () => {
   });
 });
 
+describe("<ProfileTab /> review toggles", () => {
+  const mockState = {
+    profile: {
+      goal: "recomp", currentPhysique: "average", desiredPhysique: "lean and athletic",
+      specificGoals: "", experience: "intermediate", equipment: "full", daysPerWeek: 4,
+      sessionLength: 60, injuries: ["none"], otherInjuries: "", heightIn: 70, weightLb: 180,
+    },
+    targets: { calories: 2400, protein: 180, carbs: 250, fat: 70, tdee: 2600 },
+    reviewsEnabled: { weekly: true, monthly: false },
+  };
+  const account = { name: "Alex", email: "alex@example.com" };
+
+  test("reflects the current on/off state of each toggle", () => {
+    render(
+      <ProfileTab
+        state={mockState} resetAll={vi.fn()} account={account} onLogout={vi.fn()}
+        subscribed={true} trialActive={false} trialDaysLeftCount={0} onOpenSubscribe={vi.fn()} onSetReviewEnabled={vi.fn()}
+      />
+    );
+    expect(screen.getByLabelText("Toggle weekly review")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByLabelText("Toggle monthly review")).toHaveAttribute("aria-checked", "false");
+  });
+
+  test("clicking a toggle calls onSetReviewEnabled with the flipped value for just that cadence", async () => {
+    const user = userEvent.setup();
+    const onSetReviewEnabled = vi.fn();
+    render(
+      <ProfileTab
+        state={mockState} resetAll={vi.fn()} account={account} onLogout={vi.fn()}
+        subscribed={true} trialActive={false} trialDaysLeftCount={0} onOpenSubscribe={vi.fn()} onSetReviewEnabled={onSetReviewEnabled}
+      />
+    );
+    await user.click(screen.getByLabelText("Toggle weekly review"));
+    expect(onSetReviewEnabled).toHaveBeenCalledWith("weekly", false); // was true
+    await user.click(screen.getByLabelText("Toggle monthly review"));
+    expect(onSetReviewEnabled).toHaveBeenCalledWith("monthly", true); // was false
+  });
+});
+
 /* ============================================================
    PROGRESS — bodyweight log / delete (built this session)
 ============================================================ */
@@ -256,6 +295,36 @@ describe("<Progress />", () => {
   test("hides the workout-history entry point when nothing has been logged yet", () => {
     render(<Progress state={buildState([])} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} />);
     expect(screen.queryByText("View & edit workout history")).not.toBeInTheDocument();
+  });
+
+  test("shows no Reviews section at all when no review has ever been generated", () => {
+    render(<Progress state={buildState([])} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    expect(screen.queryByText("Reviews")).not.toBeInTheDocument();
+  });
+
+  test("renders a generated review's overview and advice, and marks it seen", () => {
+    const onMarkReviewSeen = vi.fn();
+    const state = {
+      ...buildState([]),
+      reviews: {
+        weekly: [{ generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 3 }, overview: "Solid week overall.", advice: ["Add a fourth set to bench."], seen: false }],
+        monthly: [],
+      },
+    };
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={onMarkReviewSeen} />);
+    expect(screen.getByText("WEEKLY REVIEW")).toBeInTheDocument();
+    expect(screen.getByText("Solid week overall.")).toBeInTheDocument();
+    expect(screen.getByText("Add a fourth set to bench.")).toBeInTheDocument();
+    expect(onMarkReviewSeen).toHaveBeenCalledWith("weekly", 0);
+  });
+
+  test("falls back to the deterministic workout count when the AI overview is missing (e.g. a failed/offline generation)", () => {
+    const state = {
+      ...buildState([]),
+      reviews: { weekly: [], monthly: [{ generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 2 }, overview: null, advice: [], seen: false }] },
+    };
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    expect(screen.getByText("2 workouts logged this period.")).toBeInTheDocument();
   });
 });
 
@@ -1216,6 +1285,41 @@ describe("<Home /> Coach insight card", () => {
   });
 });
 
+describe("<Home /> review-ready banner", () => {
+  function baseState(overrides = {}) {
+    return {
+      program: { splitName: "Full Body", days: [{ name: "Full Body A", exercises: [{ name: "Back Squat" }] }] },
+      targets: { calories: 2200, protein: 160, carbs: 220, fat: 70 },
+      logs: { workouts: [], nutrition: [] },
+      profile: { daysPerWeek: 3, sessionLength: 45 },
+      reviews: { weekly: [], monthly: [] },
+      ...overrides,
+    };
+  }
+
+  test("shows nothing when there are no reviews at all", () => {
+    render(<Home state={baseState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    expect(screen.queryByText(/review is ready|reviews are ready/)).not.toBeInTheDocument();
+  });
+
+  test("shows nothing when every generated review has already been seen", () => {
+    const state = baseState({ reviews: { weekly: [{ generatedAt: "2026-08-01", summary: {}, overview: "x", advice: [], seen: true }], monthly: [] } });
+    render(<Home state={state} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    expect(screen.queryByText(/review is ready/)).not.toBeInTheDocument();
+  });
+
+  test("shows a banner and switches to Progress when an unseen review exists", async () => {
+    const user = userEvent.setup();
+    const setActiveTab = vi.fn();
+    const state = baseState({ reviews: { weekly: [{ generatedAt: "2026-08-01", summary: {}, overview: "x", advice: [], seen: false }], monthly: [] } });
+    render(<Home state={state} setActiveTab={setActiveTab} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
+    const banner = screen.getByText(/Your weekly review is ready/);
+    expect(banner).toBeInTheDocument();
+    await user.click(banner);
+    expect(setActiveTab).toHaveBeenCalledWith("progress");
+  });
+});
+
 describe("<Onboarding /> injuries step — 'Other' merged in, not a separate question", () => {
   // Clicks through every step ahead of injuries with a minimal valid
   // answer at each — proves there's no longer a separate "any other
@@ -1279,13 +1383,24 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     expect(screen.getByPlaceholderText(/Describe in your own words/).value).toBe("");
   });
 
-  test("notes is the actual final step, and it's optional — 'Build my plan' shows without typing anything", async () => {
+  test("notes is optional — the next step (review cadence) shows without typing anything", async () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} />);
     await goToInjuriesStep(user);
     await user.click(screen.getByText("None"));
     await user.click(screen.getByText("Next"));
     expect(screen.getByText("Anything else your coach should know?")).toBeInTheDocument();
+    await user.click(screen.getByText("Next"));
+    expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
+  });
+
+  test("review cadence is the actual final step, and it's optional too — 'Build my plan' shows without picking either", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next")); // -> notes
+    await user.click(screen.getByText("Next")); // -> review cadence
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
   });
 
@@ -1297,10 +1412,23 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("None"));
     await user.click(screen.getByText("Next"));
     await user.type(screen.getByPlaceholderText(/Prefer an upper\/lower split/), "No pull-up bar at my gym");
+    await user.click(screen.getByText("Next"));
     await user.click(screen.getByText("Build my plan"));
     // Program building falls back to the offline generator in this test
     // env (no real network) and lands on the summary screen next, same as
     // the rest of this quiz flow.
     expect(await screen.findByText(/Let's go/)).toBeInTheDocument();
+  });
+
+  test("picking weekly and/or monthly review checkboxes doesn't block finishing the quiz", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next")); // -> notes
+    await user.click(screen.getByText("Next")); // -> review cadence
+    await user.click(screen.getByText("Weekly review"));
+    await user.click(screen.getByText("Monthly review"));
+    expect(screen.getByText("Build my plan")).toBeInTheDocument();
   });
 });
