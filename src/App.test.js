@@ -1840,36 +1840,43 @@ describe("fetchExerciseGif", () => {
   // because the old code cached ANY result, confirmed or not. "confirmed"
   // is what the caller uses to decide whether a result is safe to
   // permanently cache; these pin exactly which outcomes are which.
-  test("offline: unconfirmed (retryable later), never calls fetch", async () => {
-    vi.stubGlobal("navigator", { onLine: false });
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
+  //
+  // navigator.onLine is deliberately never trusted as a gate here (same
+  // reasoning as claudeChat) — every test below stubs it to whatever value
+  // makes the case realistic, but the actual fetch() outcome is what
+  // decides "offline" (a real ask: the failure message should say WHY it
+  // can't load a demo, which needs this to be trustworthy, not a flaky
+  // browser flag).
   test("a successful lookup with a match: confirmed, returns the real gifUrl", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) }));
-    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", confirmed: true });
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", confirmed: true, offline: false });
   });
 
   test("a successful lookup with genuinely no match: confirmed, gifUrl null", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
-    expect(await fetchExerciseGif("Some Made-Up Exercise")).toEqual({ gifUrl: null, confirmed: true });
+    expect(await fetchExerciseGif("Some Made-Up Exercise")).toEqual({ gifUrl: null, confirmed: true, offline: false });
   });
 
-  test("a non-200 response (bad key, quota, upstream error): unconfirmed, not a throw", async () => {
+  test("a non-200 response (bad key, quota, upstream error): unconfirmed, not offline, not a throw", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: "unauthorized" }) }));
-    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false, offline: false });
   });
 
-  test("fetch itself rejecting (network failure): unconfirmed, not a throw", async () => {
+  test("fetch itself rejecting (a genuine connectivity failure): unconfirmed AND offline", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
-    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false });
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: null, confirmed: false, offline: true });
+  });
+
+  test("still tries the real request even when navigator.onLine falsely reports offline", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", matchCount: 1 }) });
+    vi.stubGlobal("fetch", fetchSpy);
+    expect(await fetchExerciseGif("Back Squat")).toEqual({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0201.gif", confirmed: true, offline: false });
+    expect(fetchSpy).toHaveBeenCalled();
   });
 });
 

@@ -271,21 +271,26 @@ export function gifProxyUrl(rawUrl) {
 }
 
 export async function fetchExerciseGif(name) {
-  if (!navigator.onLine) return { gifUrl: null, confirmed: false };
+  // Deliberately NOT gated on navigator.onLine (same reasoning as
+  // claudeChat) — it's a browser-reported flag, not a real connectivity
+  // check. A genuine connectivity failure is what actually makes fetch()
+  // itself throw, which is the real, reliable signal for "offline" — real
+  // report: wanted the failure message to actually say "you're offline"
+  // when that's the real reason, which needs this to be trustworthy.
   try {
     const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`);
     const data = await res.json().catch(() => null);
     if (!res.ok) {
       console.warn(`Exercise GIF lookup failed for "${name}": ${res.status}`, data?.error, data?.detail);
-      return { gifUrl: null, confirmed: false };
+      return { gifUrl: null, confirmed: false, offline: false };
     }
     if (data?.matchCount === 0) {
       console.warn(`Exercise GIF lookup: no WorkoutX match for "${name}"`);
     }
-    return { gifUrl: data?.gifUrl || null, confirmed: true };
+    return { gifUrl: data?.gifUrl || null, confirmed: true, offline: false };
   } catch (e) {
     console.warn(`Exercise GIF lookup threw for "${name}":`, e.message);
-    return { gifUrl: null, confirmed: false };
+    return { gifUrl: null, confirmed: false, offline: true };
   }
 }
 
@@ -2079,7 +2084,7 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, onAutoSave, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
@@ -2125,7 +2130,34 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
     };
   }, []);
   const elapsedSeconds = resumedAt ? accumulateActiveSeconds(priorActiveSeconds, resumedAt, Date.now()) : 0;
+
+  // Silently persists current progress the moment the app is actually
+  // backgrounded — swiped away, screen locked, switched apps — not just on
+  // an explicit "Save & exit" tap. Real report: progress was lost when
+  // swiping out of the app, because until now NOTHING saved mid-workout
+  // except that one explicit action; local-only React state doesn't
+  // survive the tab being suspended. "pagehide" is the one that actually
+  // fires reliably right as iOS Safari suspends a PWA — visibilitychange
+  // is included too since it fires earlier and more consistently on other
+  // platforms. A ref (not a dependency on `sets`) keeps this listener
+  // registered once instead of re-subscribing on every set edit.
+  const setsRef = useRef(sets);
+  useEffect(() => { setsRef.current = sets; }, [sets]);
+  useEffect(() => {
+    if (!onAutoSave) return;
+    function handleMaybeHidden() {
+      if (document.visibilityState === "hidden") onAutoSave(setsRef.current);
+    }
+    document.addEventListener("visibilitychange", handleMaybeHidden);
+    window.addEventListener("pagehide", handleMaybeHidden);
+    return () => {
+      document.removeEventListener("visibilitychange", handleMaybeHidden);
+      window.removeEventListener("pagehide", handleMaybeHidden);
+    };
+  }, [onAutoSave]);
+
   const [confirmExit, setConfirmExit] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false); // second, explicit confirmation before Discard workout actually loses anything
   const [exerciseInfoIdx, setExerciseInfoIdx] = useState(null); // index of the exercise showing its full-screen info page, or null
   const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
@@ -2134,6 +2166,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const [customAlt, setCustomAlt] = useState("");
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [alternativesRetryToken, setAlternativesRetryToken] = useState(0); // bumped to force the alternatives lookup below to run again
   const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
   const [prCelebration, setPrCelebration] = useState(null); // {name, weight, reps} just beaten, or null
   const intervalRef = useRef(null);
@@ -2178,7 +2211,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [swapPickerIdx]);
+  }, [swapPickerIdx, alternativesRetryToken]);
 
   // Applies the swap immediately to this in-progress session (so it's
   // reflected right away, mid-workout, without waiting on a re-render from
@@ -2232,7 +2265,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
     const key = normalizeGifKey(name);
     setGifLoading((g) => ({ ...g, [key]: true }));
     setGifTransientError((g) => ({ ...g, [key]: false }));
-    fetchExerciseGif(name).then(({ gifUrl, confirmed }) => {
+    fetchExerciseGif(name).then(({ gifUrl, confirmed, offline }) => {
       // Only a CONFIRMED result gets permanently cached. Caching an
       // unconfirmed failure (offline, a key that wasn't set up yet, quota,
       // a network hiccup) would mean a transient problem becomes a
@@ -2244,7 +2277,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
         setLocalGifCache((c) => ({ ...c, [key]: gifUrl }));
         onCacheGif?.(key, gifUrl);
       } else {
-        setGifTransientError((g) => ({ ...g, [key]: true }));
+        // Stores WHY, not just that it failed — real ask: "if it can't
+        // load [the] demo because of wifi, make it say that's why."
+        setGifTransientError((g) => ({ ...g, [key]: offline ? "offline" : "error" }));
       }
       setGifLoading((g) => ({ ...g, [key]: false }));
     });
@@ -2366,7 +2401,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       <style>{SHELL_CSS}</style>
       <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <button onClick={() => setConfirmExit(true)} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+          <button onClick={() => setConfirmExit(true)} aria-label="Exit workout" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {resumedAt && (
               <span style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>
@@ -2490,14 +2525,28 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
         />
       )}
 
-      {confirmExit && (
+      {confirmExit && !confirmDiscard && (
         <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
           <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Exit this workout?</h3>
           <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Save your progress to pick it back up later, or discard it completely.</p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
             <Btn variant="accent" onClick={() => onSaveExit(sets)} style={{ width: "100%" }}>Save & exit</Btn>
-            <Btn variant="ghost" onClick={onCancel} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
+            <Btn variant="ghost" onClick={() => setConfirmDiscard(true)} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
             <button onClick={() => setConfirmExit(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
+          </div>
+        </div>
+      )}
+
+      {/* Real ask: discarding used to happen on a single tap with no real
+          "are you sure" — a permanent, unrecoverable loss of everything
+          logged this session shouldn't be one accidental tap away. */}
+      {confirmDiscard && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 71, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Discard this workout?</h3>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Everything logged this session will be permanently lost — this can't be undone.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
+            <Btn variant="accent" onClick={onCancel} style={{ width: "100%" }}>Yes, discard it</Btn>
+            <button onClick={() => setConfirmDiscard(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
           </div>
         </div>
       )}
@@ -2545,7 +2594,21 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {alternatives.length === 0 && (
-                    <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", margin: "10px 0" }}>No alternatives available for this exercise with your current equipment.</p>
+                    // Real report: this read as a hard equipment limitation
+                    // ("no alternatives... with your current equipment"),
+                    // but it's usually just a live AI lookup coming back
+                    // empty (a transient hiccup, not a permanent answer) —
+                    // softened the wording and added a real Retry, on top
+                    // of the "request my own" option already below either way.
+                    <div style={{ textAlign: "center", margin: "10px 0" }}>
+                      <p style={{ color: T.steelDark, fontSize: 13, margin: "0 0 8px" }}>Couldn't find a suggested alternative for this one.</p>
+                      <button
+                        onClick={() => setAlternativesRetryToken((t) => t + 1)}
+                        style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0 }}
+                      >
+                        Try again
+                      </button>
+                    </div>
                   )}
                   {alternatives.map((name) => (
                     <button
@@ -2634,7 +2697,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 </Card>
               ) : gifTransientError[key] ? (
                 <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Couldn't check for a demo right now.</span>
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>
+                    {gifTransientError[key] === "offline" ? "You're offline — connect to check for a demo." : "Couldn't check for a demo right now."}
+                  </span>
                   <button onClick={() => loadGif(ex.name)} style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, flexShrink: 0 }}>Retry</button>
                 </Card>
               ) : null}
@@ -4985,6 +5050,20 @@ export default function App() {
     setSession(null);
   }
 
+  // Same save as above, minus setSession(null) — this is for the app
+  // getting backgrounded/swiped away mid-workout, not an intentional
+  // exit, so the active session should still be sitting there ready to
+  // resume when reopened. Real report: progress was lost when swiping out
+  // of the app — because until now, NOTHING persisted mid-workout sets
+  // except an explicit "Save & exit" tap; just swiping the whole app away
+  // never triggered any save at all, only local React state that vanishes
+  // the moment the tab is suspended.
+  function autoSaveWorkoutProgress(dayIdx, sets) {
+    if (!session) return;
+    const activeSeconds = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
+  }
+
   function discardWorkoutProgress() {
     persist((prev) => ({ ...prev, inProgressWorkout: null }));
     setSession(null);
@@ -5181,7 +5260,10 @@ export default function App() {
 
       <div className="app-main" style={{ fontFamily: "'Inter', sans-serif" }}>
         {syncStatus === "offline" && (
-          <div style={{ background: T.warn, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+          // Real report: unreadable on iPhone — this had no top safe-area
+          // padding at all, so on a standalone PWA it rendered right under
+          // the status bar/notch/Dynamic Island instead of below it.
+          <div style={{ background: T.warn, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px", paddingTop: "calc(9px + env(safe-area-inset-top, 0px))", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff", flexShrink: 0, animation: "pulseDot 1.4s ease-in-out infinite" }} />
             Offline — saved on this device, will sync automatically
           </div>
@@ -5314,6 +5396,7 @@ export default function App() {
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
           onSaveExit={(sets) => saveWorkoutProgress(session.dayIdx, sets)}
+          onAutoSave={(sets) => autoSaveWorkoutProgress(session.dayIdx, sets)}
           equipment={state.profile.equipment}
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}

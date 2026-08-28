@@ -1000,6 +1000,95 @@ describe("<WorkoutSession /> logging UX: pre-fill and quick increment", () => {
   });
 });
 
+describe("<WorkoutSession /> discard requires a second, explicit confirmation", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  function setup(onCancel = vi.fn()) {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={onCancel} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return { user, onCancel };
+  }
+
+  // Real ask: discarding used to happen on a single tap with no real "are
+  // you sure" — a permanent, unrecoverable loss of everything logged this
+  // session shouldn't be one accidental tap away.
+  test("tapping 'Discard workout' does NOT immediately discard — shows a second confirmation first", async () => {
+    const { user, onCancel } = setup();
+    await user.click(screen.getByLabelText("Exit workout"));
+    await user.click(screen.getByText("Discard workout"));
+    expect(screen.getByText("Discard this workout?")).toBeInTheDocument();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  test("only calls onCancel after the second, explicit confirmation", async () => {
+    const { user, onCancel } = setup();
+    await user.click(screen.getByLabelText("Exit workout"));
+    await user.click(screen.getByText("Discard workout"));
+    await user.click(screen.getByText("Yes, discard it"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  test("'Keep training' on the second confirmation backs out without discarding", async () => {
+    const { user, onCancel } = setup();
+    await user.click(screen.getByLabelText("Exit workout"));
+    await user.click(screen.getByText("Discard workout"));
+    await user.click(screen.getByText("Keep training"));
+    expect(screen.queryByText("Discard this workout?")).not.toBeInTheDocument();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("<WorkoutSession /> autosave on backgrounding (swipe away, lock screen, switch apps)", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  // Real report: progress was lost when swiping out of the app — nothing
+  // persisted mid-workout except an explicit "Save & exit" tap. This
+  // simulates the actual event iOS Safari fires when a PWA is suspended.
+  function fireHidden() {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  test("backgrounding the app calls onAutoSave with the current sets, without exiting the workout", async () => {
+    const user = userEvent.setup();
+    const onAutoSave = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.type(screen.getByPlaceholderText("lb"), "135");
+    await user.type(screen.getByPlaceholderText("reps"), "8");
+
+    fireHidden();
+
+    expect(onAutoSave).toHaveBeenCalledTimes(1);
+    const savedExercises = onAutoSave.mock.calls[0][0];
+    expect(savedExercises[0].logged[0]).toMatchObject({ weight: "135", reps: "8" });
+    // Still on the workout screen — this wasn't an exit.
+    expect(screen.getByPlaceholderText("lb")).toBeInTheDocument();
+  });
+
+  test("does nothing when onAutoSave isn't provided (e.g. older callers) — never throws", () => {
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(() => fireHidden()).not.toThrow();
+  });
+});
+
 describe("<WorkoutSession /> demo GIF lookup", () => {
   const day = { name: "Full Body A", exercises: [{ name: "Back Squat", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
 
@@ -1088,6 +1177,21 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     expect(await screen.findByText("Couldn't check for a demo right now.")).toBeInTheDocument();
     expect(screen.queryByText("Instructional video unavailable for this exercise.")).not.toBeInTheDocument();
     expect(onCacheGif).not.toHaveBeenCalled();
+  });
+
+  // Real ask: "if it can't load [the] demo because of wifi, make it say
+  // that's why." A genuine connectivity failure (fetch() itself throwing)
+  // gets its own specific message instead of the generic transient-error
+  // one — same Retry button either way, since both are worth retrying.
+  test("a genuine offline failure (fetch throws) says so specifically, not the generic message", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const user = setup();
+
+    await user.click(screen.getByText("How to do it"));
+    expect(await screen.findByText("You're offline — connect to check for a demo.")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't check for a demo right now.")).not.toBeInTheDocument();
+    expect(screen.getByText("Retry")).toBeInTheDocument();
   });
 
   test("closing and reopening 'How to do it' does not re-fetch — the result is cached locally too, not just persisted", async () => {
@@ -1213,6 +1317,62 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
     expect(screen.getByText("Use this exercise")).toBeDisabled();
     await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
     expect(screen.getByText("Use this exercise")).not.toBeDisabled();
+  });
+});
+
+describe("<WorkoutSession /> 'find alternative' — empty result and retry", () => {
+  // No baked-in alternatives here — forces the live lookup path. Named so
+  // the offline pool fallback (alternativesFor) ALSO can't classify it —
+  // otherwise it'd quietly succeed via that fallback and never actually
+  // reach the truly-empty state this test means to cover.
+  const day = { name: "Full Body A", exercises: [{ name: "Landmine Twist", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setup() {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return user;
+  }
+
+  // Real report: this used to read "No alternatives available for this
+  // exercise with your current equipment" — sounding like a hard,
+  // permanent equipment limitation, when an empty live lookup is often
+  // just a transient AI hiccup. The "request my own" option was already
+  // there either way; this covers the softer wording and the new retry.
+  test("an empty live lookup shows a softer message with a working Retry, not a hard equipment claim", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": []}' }] }) }));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    expect(await screen.findByText("Couldn't find a suggested alternative for this one.")).toBeInTheDocument();
+    expect(screen.queryByText(/No alternatives available/)).not.toBeInTheDocument();
+    expect(screen.getByText("None of these — request my own")).toBeInTheDocument(); // still there either way
+    expect(screen.getByText("Try again")).toBeInTheDocument();
+  });
+
+  test("clicking Try again re-runs the lookup and shows real suggestions if the retry succeeds", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": []}' }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Incline Dumbbell Press"]}' }] }) });
+    vi.stubGlobal("fetch", fetchSpy);
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    await screen.findByText("Try again");
+    await user.click(screen.getByText("Try again"));
+    expect(await screen.findByText("Incline Dumbbell Press")).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });
 
