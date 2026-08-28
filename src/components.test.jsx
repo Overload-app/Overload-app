@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
+import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -345,6 +345,14 @@ describe("<WorkoutHistoryEditor />", () => {
     expect(screen.getByText("Bench Press")).toBeInTheDocument();
   });
 
+  test("initialOpenIndex jumps straight to that entry's detail view — real ask: opening from Train's own History list", () => {
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={vi.fn()} initialOpenIndex={0} />);
+    // Real index 0 is "Push" — should be showing the detail view directly,
+    // not the top-level list.
+    expect(screen.getByText("Bench Press")).toBeInTheDocument();
+    expect(screen.queryByText("Workout history")).not.toBeInTheDocument();
+  });
+
   test("editing a set's weight and saving calls onUpdate with the real (non-reversed) index and the edited value", async () => {
     const user = userEvent.setup();
     const onUpdate = vi.fn();
@@ -400,6 +408,37 @@ describe("<WorkoutHistoryEditor />", () => {
     render(<WorkoutHistoryEditor workouts={workouts()} onClose={onClose} onDelete={vi.fn()} onUpdate={vi.fn()} />);
     await user.click(screen.getByLabelText("Close workout history"));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("<Train /> History list — real ask: edit/delete reachable here too, not just Progress", () => {
+  function buildState() {
+    return {
+      // Distinct from the history entries' dayNames below on purpose — the
+      // Sessions list above also renders day names, and "Push"/"Legs"
+      // would otherwise collide with the history cards this test targets.
+      program: { splitName: "Full Body", days: [{ name: "Full Body A", exercises: [{ name: "Bench Press" }] }] },
+      logs: {
+        workouts: [
+          { date: "2026-08-01", dayName: "Push", durationSec: 2400, exercises: [{ name: "Bench Press" }] }, // real index 0
+          { date: "2026-08-08", dayName: "Legs", durationSec: 1800, exercises: [{ name: "Squat" }] }, // real index 1 — shown FIRST (most recent)
+        ],
+      },
+    };
+  }
+
+  test("tapping a history card calls onOpenHistoryEntry with its REAL index, not its position in the reversed display list", async () => {
+    const user = userEvent.setup();
+    const onOpenHistoryEntry = vi.fn();
+    render(<Train state={buildState()} startWorkout={vi.fn()} setActiveTab={vi.fn()} onOpenHistoryEntry={onOpenHistoryEntry} />);
+
+    const cards = screen.getAllByText(/^Push$|^Legs$/);
+    expect(cards[0]).toHaveTextContent("Legs"); // most recent shown first
+    await user.click(cards[0]);
+    expect(onOpenHistoryEntry).toHaveBeenCalledWith(1); // real index of "Legs"
+
+    await user.click(screen.getByText("Push"));
+    expect(onOpenHistoryEntry).toHaveBeenCalledWith(0); // real index of "Push"
   });
 });
 

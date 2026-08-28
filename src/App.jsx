@@ -3006,7 +3006,7 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   );
 }
 
-function Train({ state, startWorkout, setActiveTab }) {
+export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry }) {
   const { program, logs } = state;
   const nextIdx = logs.workouts.length % program.days.length;
   return (
@@ -3068,7 +3068,14 @@ function Train({ state, startWorkout, setActiveTab }) {
       <TickRule label="History" />
       {logs.workouts.length === 0 && <p style={{ color: T.steelDark, fontSize: 13 }}>No workouts logged yet.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {logs.workouts.slice().reverse().slice(0, 8).map((w, i) => {
+        {/* Real ask: edit/delete available here too, not just buried in
+            Progress — reuses the exact same editor, just opened straight
+            to this entry. Keeps each card's REAL index into logs.workouts
+            (not its position in this reversed, sliced-to-8 display list)
+            so tapping the right card always opens the right workout —
+            same convention as the bodyweight list and WorkoutHistoryEditor
+            itself already use. */}
+        {logs.workouts.map((w, i) => ({ ...w, i })).reverse().slice(0, 8).map((w) => {
           const duration = formatDuration(w.durationSec);
           const exCount = (w.exercises || []).length;
           // "Aug 23" instead of the raw stored ISO string "2026-08-23" —
@@ -3076,13 +3083,16 @@ function Train({ state, startWorkout, setActiveTab }) {
           // app, just no longer literal database formatting leaking through.
           const dateLabel = parseISODate(w.date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
           return (
-            <Card key={i} style={{ padding: 12 }}>
+            <Card key={w.i} onClick={() => onOpenHistoryEntry(w.i)} style={{ padding: 12, cursor: "pointer" }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{w.dayName}</span>
                 <span style={{ fontSize: 12, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{dateLabel}</span>
               </div>
-              <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>
-                {[duration, `${exCount} exercise${exCount === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 3 }}>
+                <span style={{ fontSize: 12, color: T.steelDark }}>
+                  {[duration, `${exCount} exercise${exCount === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}
+                </span>
+                <ChevronRight size={14} color={T.steelDark} />
               </div>
             </Card>
           );
@@ -4174,8 +4184,12 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMark
 // reversed (most-recent-first) but keeps each entry's real index so
 // delete/update always hits the right one, same convention the bodyweight
 // list already uses.
-export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate }) {
-  const [openIdx, setOpenIdx] = useState(null);
+export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, initialOpenIndex = null }) {
+  // Opening from a specific card elsewhere (e.g. Train's own History list)
+  // jumps straight to that entry's detail view instead of the top-level
+  // list — closing the detail view still falls back to the list so other
+  // entries stay reachable from there.
+  const [openIdx, setOpenIdx] = useState(initialOpenIndex);
   const [editedExercises, setEditedExercises] = useState(null); // working copy while editing, or null (not yet touched)
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -4459,6 +4473,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
+  const [historyEditorInitialIdx, setHistoryEditorInitialIdx] = useState(null); // real index to jump straight to, or null for the plain list
   const [coachLoading, setCoachLoading] = useState(false);
   // "synced" | "offline" (change saved locally, not yet on the server) | "saving"
   const [syncStatus, setSyncStatus] = useState("synced");
@@ -5290,10 +5305,21 @@ export default function App() {
               onAskCoach={(prompt) => { setActiveTab("coach"); sendCoachMessage(prompt); }}
             />
           )}
-          {activeTab === "train" && <Train state={state} startWorkout={startWorkout} setActiveTab={setActiveTab} />}
+          {activeTab === "train" && (
+            <Train
+              state={state} startWorkout={startWorkout} setActiveTab={setActiveTab}
+              onOpenHistoryEntry={(idx) => { setHistoryEditorInitialIdx(idx); setHistoryEditorOpen(true); }}
+            />
+          )}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
-          {activeTab === "progress" && <Progress state={state} addWeight={addWeight} removeWeight={removeWeight} onOpenHistory={() => setHistoryEditorOpen(true)} onMarkReviewSeen={markReviewSeen} />}
+          {activeTab === "progress" && (
+            <Progress
+              state={state} addWeight={addWeight} removeWeight={removeWeight}
+              onOpenHistory={() => { setHistoryEditorInitialIdx(null); setHistoryEditorOpen(true); }}
+              onMarkReviewSeen={markReviewSeen}
+            />
+          )}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} />}
         </div>
 
@@ -5413,9 +5439,10 @@ export default function App() {
       {historyEditorOpen && (
         <WorkoutHistoryEditor
           workouts={state.logs.workouts}
-          onClose={() => setHistoryEditorOpen(false)}
+          onClose={() => { setHistoryEditorOpen(false); setHistoryEditorInitialIdx(null); }}
           onDelete={deleteWorkoutLog}
           onUpdate={updateWorkoutLog}
+          initialOpenIndex={historyEditorInitialIdx}
         />
       )}
     </div>
