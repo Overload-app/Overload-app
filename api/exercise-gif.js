@@ -114,13 +114,23 @@ export default async function handler(req, res) {
 
   if (supabaseAdmin) {
     const { data: cached } = await supabaseAdmin.from("exercise_gifs").select("gif_url").eq("name_key", key).maybeSingle();
-    if (cached) {
-      return res.status(200).json({ gifUrl: cached.gif_url || null, matchCount: cached.gif_url ? 1 : 0, source: "cache" });
+    // A real, confirmed match is always safe to trust and return
+    // immediately. A cached NULL is a different story — it just means
+    // this exact name found nothing THE LAST TIME it was checked, which
+    // could predate the catalog being bulk-synced (or growing since).
+    // Real report: "Back Squat" got cached as null before the vocabulary
+    // was renamed to "Barbell Squat" (a real, confirmed match) — every
+    // later request for the old name kept trusting that stale null
+    // forever, never getting a chance to check the now-much-fuller local
+    // catalog. So a null cache hit still falls through to the fuzzy check
+    // below (a local read, zero WorkoutX cost) instead of returning early.
+    if (cached && cached.gif_url) {
+      return res.status(200).json({ gifUrl: cached.gif_url, matchCount: 1, source: "cache" });
     }
 
-    // No exact key, but the bulk-synced catalog may still have a real
-    // match under slightly different wording — check locally (a plain
-    // table read, no WorkoutX cost) before ever going live.
+    // No confirmed exact match, but the bulk-synced catalog may still have
+    // a real one under slightly different wording — check locally (a
+    // plain table read, no WorkoutX cost) before ever going live.
     const { data: allEntries } = await supabaseAdmin.from("exercise_gifs").select("name_key, gif_url").not("gif_url", "is", null);
     if (allEntries && allEntries.length > 0) {
       const fuzzy = bestFuzzyMatch(name, allEntries);
@@ -129,6 +139,13 @@ export default async function handler(req, res) {
         await supabaseAdmin.from("exercise_gifs").upsert({ name_key: key, gif_url: fuzzy.gif_url, checked_at: new Date().toISOString() });
         return res.status(200).json({ gifUrl: fuzzy.gif_url, matchCount: 1, source: "fuzzy-cache" });
       }
+    }
+
+    // Genuinely still nothing, and there was already a cached null for
+    // this exact name — no point spending a live WorkoutX request to
+    // re-confirm the same negative answer.
+    if (cached) {
+      return res.status(200).json({ gifUrl: null, matchCount: 0, source: "cache" });
     }
   }
 
