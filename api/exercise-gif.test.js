@@ -58,4 +58,37 @@ describe("bestFuzzyMatch", () => {
   test("returns null for an empty candidate list", () => {
     expect(bestFuzzyMatch("Cable Fly", [])).toBeNull();
   });
+
+  // Real, confirmed production bug: "Machine Shoulder Press" fuzzy-matched
+  // a "Machine Chest Press" entry at exactly 50% overlap — sharing only
+  // the generic words "machine" and "press" — and showed a chest-press
+  // video (visually confirmed: chest highlighted, not shoulders) for a
+  // shoulder exercise. A body-part word present on both sides but
+  // DIFFERENT must reject the candidate outright, even at a tied or
+  // otherwise-passing score.
+  test("never matches two different body parts sharing only generic words like 'machine'/'press'", () => {
+    const gymCatalog = [
+      { name_key: "machine chest press", gif_url: "https://api.workoutxapp.com/v1/gifs/0576.gif" },
+    ];
+    expect(bestFuzzyMatch("Machine Shoulder Press", gymCatalog)).toBeNull();
+    expect(bestFuzzyMatch("Machine Overhead Press", gymCatalog)).toBeNull();
+  });
+
+  test("still matches the same body part across different equipment/generic words", () => {
+    const gymCatalog = [
+      { name_key: "machine chest press", gif_url: "https://api.workoutxapp.com/v1/gifs/0576.gif" },
+      { name_key: "cable chest fly", gif_url: "https://api.workoutxapp.com/v1/gifs/0577.gif" },
+    ];
+    expect(bestFuzzyMatch("Chest Press Machine", gymCatalog)?.name_key).toBe("machine chest press");
+  });
+
+  test("a tied 50% score is no longer accepted — needs to be strictly over half", () => {
+    // "seated row" vs "seated cable row machine": shares "seated"+"row"
+    // (2 of the combined 4 distinct tokens) — lands at exactly 0.5 via
+    // plain Jaccard, with no body-part word on either side, to pin the
+    // >0.5 (not >=0.5) boundary directly, independent of the distinguishing-
+    // term gate covered by the tests above.
+    const gymCatalog = [{ name_key: "seated cable row machine", gif_url: "https://api.workoutxapp.com/v1/gifs/0900.gif" }];
+    expect(bestFuzzyMatch("Seated Row", gymCatalog)).toBeNull();
+  });
 });

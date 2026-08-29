@@ -60,19 +60,37 @@ function tokenize(name) {
     .map(stem);
 }
 
+// Real, confirmed miss: "Machine Shoulder Press" fuzzy-matched a "Machine
+// Chest Press" catalog entry at exactly 50% token overlap — sharing only
+// the two GENERIC words "machine" and "press", while differing on the one
+// word that actually identifies which exercise this is. A plain word-count
+// score treats every word equally; body-part/muscle-group words are the
+// real disambiguator. If both names mention one and they're not the same
+// one, that's the strongest possible signal these are different exercises
+// — rejected outright, before scoring, regardless of overall overlap.
+const DISTINGUISHING_TERMS = new Set([
+  "chest", "shoulder", "back", "leg", "bicep", "tricep", "calf", "calve", "glute", "quad",
+  "hamstring", "ab", "abs", "core", "lat", "delt", "forearm", "neck", "hip",
+]);
+
 // candidates: [{ name_key, gif_url }]. Jaccard token overlap — deliberately
-// conservative (0.5 = at least half the combined vocabulary between the
-// two names actually matches) because showing the WRONG exercise's demo
-// is worse than showing none at all, so a low-confidence guess is refused
-// rather than risked.
+// conservative (>0.5 = MORE than half the combined vocabulary between the
+// two names actually matches, not just a tie) because showing the WRONG
+// exercise's demo is worse than showing none at all, so a low-confidence
+// guess is refused rather than risked.
 export function bestFuzzyMatch(query, candidates) {
   const qTokens = new Set(tokenize(query));
   if (qTokens.size === 0) return null;
+  const qDistinguishing = [...qTokens].filter((t) => DISTINGUISHING_TERMS.has(t));
   let best = null;
   let bestScore = 0;
   for (const c of candidates) {
     const cTokens = new Set(tokenize(c.name_key));
     if (cTokens.size === 0) continue;
+    const cDistinguishing = [...cTokens].filter((t) => DISTINGUISHING_TERMS.has(t));
+    if (qDistinguishing.length > 0 && cDistinguishing.length > 0 && !qDistinguishing.some((t) => cDistinguishing.includes(t))) {
+      continue; // both name a body part/muscle group, and it's not the same one
+    }
     let intersection = 0;
     for (const t of qTokens) if (cTokens.has(t)) intersection++;
     const union = new Set([...qTokens, ...cTokens]).size;
@@ -82,7 +100,7 @@ export function bestFuzzyMatch(query, candidates) {
       best = c;
     }
   }
-  return bestScore >= 0.5 ? best : null;
+  return bestScore > 0.5 ? best : null;
 }
 
 export default async function handler(req, res) {

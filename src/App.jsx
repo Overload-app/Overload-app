@@ -2373,6 +2373,16 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
           }
         }
       }
+      // Saves right after the most meaningful action in a workout, not
+      // just on the visibilitychange/pagehide listener elsewhere in this
+      // component — real report: progress was STILL lost swiping the app
+      // away without wifi. iOS is known to not reliably fire pagehide for
+      // a hard app-switcher swipe-to-close (as opposed to just leaving the
+      // app backgrounded), so relying on a single "about to disappear"
+      // event alone isn't a real guarantee. This way, at worst, only
+      // whatever happened AFTER the last checkmark is ever at risk, not
+      // the whole session.
+      onAutoSave?.(copy);
       return copy;
     });
   }

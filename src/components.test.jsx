@@ -1116,6 +1116,32 @@ describe("<WorkoutSession /> autosave on backgrounding (swipe away, lock screen,
     expect(screen.getByPlaceholderText("lb")).toBeInTheDocument();
   });
 
+  // Real report: progress was STILL lost swiping out without wifi even
+  // after the hide-event listener above shipped — iOS is known to not
+  // reliably fire pagehide/visibilitychange for a hard app-switcher
+  // swipe-to-close specifically. Saving right after the most meaningful
+  // in-workout action (marking a set done) means at worst only whatever
+  // happened after the LAST checkmark is ever at risk, independent of
+  // whether any hide event fires at all.
+  test("marking a set done also triggers an autosave immediately, independent of any hide event", async () => {
+    const user = userEvent.setup();
+    const onAutoSave = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.type(screen.getByPlaceholderText("lb"), "135");
+    await user.type(screen.getByPlaceholderText("reps"), "8");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+
+    expect(onAutoSave).toHaveBeenCalledTimes(1);
+    const savedExercises = onAutoSave.mock.calls[0][0];
+    expect(savedExercises[0].logged[0]).toMatchObject({ weight: "135", reps: "8", done: true });
+  });
+
   test("does nothing when onAutoSave isn't provided (e.g. older callers) — never throws", () => {
     render(
       <WorkoutSession
