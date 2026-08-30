@@ -17,6 +17,7 @@ import {
   fetchExerciseGif,
   normalizeGifKey,
   withTips,
+  stripNameQualifiers,
   normalizeProgramTips,
   deriveSplitName,
   overrideDayName,
@@ -930,6 +931,49 @@ describe("withTips", () => {
   test("preserves every other field on each exercise untouched", () => {
     const result = withTips([{ name: "Back Squat", sets: 5, reps: "5-5", rest: 180, alternatives: ["x"] }]);
     expect(result[0]).toMatchObject({ name: "Back Squat", sets: 5, reps: "5-5", rest: 180, alternatives: ["x"] });
+  });
+
+  // Real report: "(moderate depth)" was STILL part of an exercise name
+  // even after the Coach explicitly claimed to have cleaned it up —
+  // relying purely on the AI actually following its own naming rule
+  // wasn't reliable enough. withTips is the one place every source (fresh
+  // generation, a Coach edit, old saved data) already flows through, so
+  // this strips it there deterministically, guaranteed, regardless of
+  // what the AI actually produced.
+  test("strips a qualifier off every exercise name that passes through, regardless of source", () => {
+    const result = withTips([{ name: "Leg Press (Moderate Depth)", sets: 3, reps: "8-12", rest: 90 }]);
+    expect(result[0].name).toBe("Leg Press");
+  });
+});
+
+describe("stripNameQualifiers", () => {
+  test("strips a parenthetical qualifier", () => {
+    expect(stripNameQualifiers("Leg Press (Moderate Depth)")).toBe("Leg Press");
+    expect(stripNameQualifiers("Romanian Deadlift (Partial Range)")).toBe("Romanian Deadlift");
+  });
+
+  test("strips a dash-separated qualifier (space on both sides of the dash)", () => {
+    expect(stripNameQualifiers("Leg Press - Wide Stance")).toBe("Leg Press");
+  });
+
+  test("does NOT strip a hyphen that's part of the name itself (no surrounding space)", () => {
+    expect(stripNameQualifiers("Pull-Up")).toBe("Pull-Up");
+    expect(stripNameQualifiers("Step-Up")).toBe("Step-Up");
+    expect(stripNameQualifiers("Single-Arm Row")).toBe("Single-Arm Row");
+  });
+
+  test("leaves an already-plain name completely untouched", () => {
+    expect(stripNameQualifiers("Barbell Bench Press")).toBe("Barbell Bench Press");
+  });
+
+  test("handles a name with both a parenthetical AND a dash qualifier", () => {
+    expect(stripNameQualifiers("Leg Press (Moderate Depth) - Slow Tempo")).toBe("Leg Press");
+  });
+
+  test("handles empty/missing input without throwing", () => {
+    expect(stripNameQualifiers("")).toBe("");
+    expect(stripNameQualifiers(null)).toBeNull();
+    expect(stripNameQualifiers(undefined)).toBeUndefined();
   });
 });
 

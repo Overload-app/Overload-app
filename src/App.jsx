@@ -588,9 +588,33 @@ export function tipsForExercise(name) {
   return rule ? rule[1] : DEFAULT_TIPS;
 }
 
+// The AI is repeatedly told never to attach a qualifier to an exercise
+// name (both prompts spell out this exact rule, with "Leg Press Moderate
+// Depth" as a literal bad example) — and real reports show it still slips
+// through sometimes, including after the Coach explicitly claimed to have
+// fixed it. Rather than rely purely on the model actually following that
+// instruction every single time, this deterministically strips it
+// client-side no matter where the name came from — fresh generation, a
+// Coach edit, or old data from before the rule existed.
+// The dash case specifically requires whitespace on BOTH sides of the
+// dash ("Leg Press - Wide Stance") — a hyphen with no surrounding space
+// is presumed to be part of the name itself ("Pull-Up", "Step-Up",
+// "Single-Arm Row"), not a tacked-on qualifier, and is left alone.
+export function stripNameQualifiers(name) {
+  if (!name) return name;
+  return name
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s+[-–—]\s+.*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // Fills in tips for any exercise that doesn't already have them (e.g. the AI
 // omitted them, or this is a program saved before this feature existed) —
-// never overwrites tips that are already there.
+// never overwrites tips that are already there. Also cleans the name via
+// stripNameQualifiers — see comment there — every time an exercise passes
+// through here, which is the one place every source (fresh AI generation,
+// a Coach edit, the offline fallback) already flows through regardless.
 // Note: deliberately does NOT backfill missing "alternatives" with the
 // coarser pool-based matching here — an absent/empty alternatives array is
 // the signal WorkoutSession uses to know it should try a smarter live
@@ -598,9 +622,11 @@ export function tipsForExercise(name) {
 // here would make every exercise look "already handled" and the AI-sourced
 // upgrade would never get a chance to run.
 export function withTips(exercises) {
-  return (exercises || []).map((ex) => (
-    Array.isArray(ex.tips) && ex.tips.length > 0 ? ex : { ...ex, tips: tipsForExercise(ex.name) }
-  ));
+  return (exercises || []).map((ex) => {
+    const name = stripNameQualifiers(ex.name);
+    const cleaned = name === ex.name ? ex : { ...ex, name };
+    return Array.isArray(cleaned.tips) && cleaned.tips.length > 0 ? cleaned : { ...cleaned, tips: tipsForExercise(name) };
+  });
 }
 export function normalizeProgramTips(program) {
   if (!program) return program;
@@ -2057,25 +2083,52 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
 /* ============================================================
    REST TIMER
 ============================================================ */
+// A floating bar, not a full-screen takeover — real ask: "want to be able
+// to still go through my other workouts when rest timer is on." The old
+// version was a fullscreen-overlay blocking everything else on the
+// workout screen for the entire rest period; this docks at the bottom
+// instead, so the exercise list underneath stays fully scrollable and
+// tappable (checking another set, opening "How to do it", swapping an
+// exercise) while the countdown keeps running alongside it.
 function RestTimer({ seconds, total, onAdd, onSkip }) {
   const pct = Math.max(0, seconds / total);
   const done = seconds <= 0;
   return (
-    <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 60, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-      <style>{FONT_IMPORT}</style>
-      <style>{SHELL_CSS}</style>
-      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 2, color: done ? T.good : T.charge, fontWeight: 700 }}>
-        {done ? "REST COMPLETE" : "RESTING"}
-      </span>
-      <div style={{ position: "relative", margin: "24px 0" }}>
-        <Ring value={pct} max={1} size={200} stroke={10} color={done ? T.good : T.charge}>
-          <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 52, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
+    <div
+      style={{
+        // Docked above the "Finish workout" footer button (not on top of
+        // it) — that footer isn't itself position:fixed, so it can't be
+        // measured here; this offset just needs to comfortably clear it.
+        position: "fixed", left: 12, right: 12, bottom: "calc(88px + env(safe-area-inset-bottom, 0px))", zIndex: 60,
+        background: T.ink, color: "#fff", borderRadius: 16, padding: "10px 14px",
+        display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
+      }}
+    >
+      <div style={{ flexShrink: 0 }}>
+        <Ring value={pct} max={1} size={44} stroke={4} color={done ? T.good : T.charge}>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
         </Ring>
       </div>
-      <div style={{ display: "flex", gap: 12 }}>
-        {!done && <Btn variant="ghost" onClick={onAdd} style={{ color: "#fff", borderColor: "#3A4048" }}><PlusCircle size={16} /> 15s</Btn>}
-        <Btn variant="accent" onClick={onSkip}>{done ? "Continue" : <>Skip <SkipForward size={16} /></>}</Btn>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: 1.5, fontWeight: 700, color: done ? T.good : T.charge }}>
+          {done ? "REST COMPLETE" : "RESTING"}
+        </div>
+        {!done && <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 1 }}>Keep browsing — this stays out of the way</div>}
       </div>
+      {!done && (
+        <button
+          onClick={onAdd} aria-label="Add 15 seconds to rest"
+          style={{ background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}
+        >
+          <PlusCircle size={14} /> 15s
+        </button>
+      )}
+      <button
+        onClick={onSkip}
+        style={{ background: T.charge, border: "none", borderRadius: 8, color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}
+      >
+        {done ? "Continue" : <>Skip <SkipForward size={14} /></>}
+      </button>
     </div>
   );
 }
