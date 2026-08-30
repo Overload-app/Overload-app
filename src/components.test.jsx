@@ -1439,6 +1439,59 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
     expect(await screen.findByText("Incline Dumbbell Press")).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
+
+  // Real ask: "if there's no wifi and the ai can't think of it, it says
+  // needs wifi to find alternatives... and leave the option to choose
+  // your own." A genuine connectivity failure must NOT quietly fall back
+  // to the offline pool (a coarser, sometimes-duplicate-prone guess) —
+  // it should say plainly that it needs a connection, while "request my
+  // own" stays available either way.
+  test("a genuine offline failure says it needs a connection, and does NOT fall back to the offline pool", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    expect(await screen.findByText("Needs a connection to find alternatives — you're offline right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't find a suggested alternative for this one.")).not.toBeInTheDocument();
+    expect(screen.getByText("None of these — request my own")).toBeInTheDocument();
+    expect(screen.getByText("Try again")).toBeInTheDocument();
+  });
+
+  test("a non-connectivity failure (bad response) still falls back to the offline pool as before", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    // "Landmine Twist" is deliberately unclassifiable by the offline pool
+    // too, so this exercise specifically has nothing to fall back to —
+    // proving the empty state here is the generic message, not the
+    // offline-specific one, even though fetch itself never threw.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: "server error" }) }));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    expect(await screen.findByText("Couldn't find a suggested alternative for this one.")).toBeInTheDocument();
+    expect(screen.queryByText(/Needs a connection/)).not.toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutSession /> 'Talk to the Coach' from the alternatives picker", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"], alternatives: ["Incline Dumbbell Press", "Cable Fly"] }] };
+
+  test("shows the prompt once real alternatives are showing, and hands the current sets to onGoToCoach", async () => {
+    const user = userEvent.setup();
+    const onGoToCoach = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onGoToCoach={onGoToCoach}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByText("Find alternative"));
+    const prompt = await screen.findByText("Talk to the Coach about other options");
+    await user.click(prompt);
+    expect(onGoToCoach).toHaveBeenCalledTimes(1);
+    expect(Array.isArray(onGoToCoach.mock.calls[0][0])).toBe(true); // the current sets array
+  });
 });
 
 describe("<Home /> Coach insight card", () => {

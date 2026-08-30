@@ -419,6 +419,37 @@ export function alternativesFor(exerciseName, equipment, injuries) {
   return (pool[group] || []).filter((name) => name !== exerciseName);
 }
 
+function coreNameTokens(name) {
+  return new Set((name || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+}
+
+// "Leg Curl" and "Seated Leg Curl" are the same exercise for this purpose
+// — one name's words are entirely contained in the other's (just missing
+// a stance/equipment qualifier), not merely two DIFFERENT exercises that
+// happen to share a word. A plain exact-string check missed exactly this
+// case (the real report below); this catches it without needing to hand-
+// maintain a list of every stance/equipment qualifier word.
+function isSameCoreExercise(a, b) {
+  const tokensA = coreNameTokens(a);
+  const tokensB = coreNameTokens(b);
+  if (tokensA.size === 0 || tokensB.size === 0) return false;
+  const [smaller, larger] = tokensA.size <= tokensB.size ? [tokensA, tokensB] : [tokensB, tokensA];
+  for (const t of smaller) if (!larger.has(t)) return false;
+  return true;
+}
+
+// Real report: swapping "Deadlift" offered "Leg Curl" as an alternative
+// even though "Seated Leg Curl" was already elsewhere in that same day —
+// a genuinely unhelpful suggestion, since it's not really an alternative
+// at that point, just a duplicate of something already programmed.
+// Applies to every alternatives source (baked-in, live AI lookup, offline
+// pool fallback) alike — none of them knew about the rest of the day on
+// their own.
+export function excludeAlreadyInDay(alternatives, daySets, swapIdx) {
+  const usedNames = daySets.filter((_, i) => i !== swapIdx).map((e) => e.name || "");
+  return alternatives.filter((name) => !usedNames.some((used) => isSameCoreExercise(name, used)));
+}
+
 export function pick(arr, n, offset = 0) {
   const rotated = arr.slice(offset % arr.length).concat(arr.slice(0, offset % arr.length));
   return rotated.slice(0, Math.min(n, arr.length));
@@ -2066,7 +2097,7 @@ export function mergeResumedSets(freshExercises, savedSets, logs) {
   if (!savedSets) return null;
   const savedByName = new Map(savedSets.map((s) => [s.name, s]));
   return freshExercises.map((ex) => savedByName.get(ex.name) || {
-    name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
+    name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
     logged: seedLoggedSets(ex, logs),
   });
 }
@@ -2084,10 +2115,10 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, onAutoSave, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
-      name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips,
+      name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
       logged: seedLoggedSets(ex, logs),
     }))
   );
@@ -2166,6 +2197,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const [customAlt, setCustomAlt] = useState("");
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerOffline, setPickerOffline] = useState(false); // true when the live lookup failed specifically because of connectivity
   const [alternativesRetryToken, setAlternativesRetryToken] = useState(0); // bumped to force the alternatives lookup below to run again
   const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
   const [prCelebration, setPrCelebration] = useState(null); // {name, weight, reps} just beaten, or null
@@ -2186,9 +2218,10 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   // pool-based matching if that's not possible (offline, or the call fails).
   useEffect(() => {
     if (swapPickerIdx === null) return;
+    setPickerOffline(false);
     const current = sets[swapPickerIdx];
     if (Array.isArray(current.alternatives) && current.alternatives.length > 0) {
-      setPickerAlts(current.alternatives);
+      setPickerAlts(excludeAlreadyInDay(current.alternatives, sets, swapPickerIdx));
       return;
     }
     let cancelled = false;
@@ -2197,14 +2230,28 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       .then((alts) => {
         if (cancelled) return;
         if (alts.length > 0) {
-          setPickerAlts(alts);
+          setPickerAlts(excludeAlreadyInDay(alts, sets, swapPickerIdx));
           onCacheAlternatives(swapPickerIdx, alts);
         } else {
-          setPickerAlts(alternativesFor(current.name, equipment, injuries));
+          // A real, successful answer — the AI just didn't have a
+          // suggestion — so the offline pool is still a reasonable
+          // fallback here (unlike the genuine-offline case below).
+          setPickerAlts(excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx));
         }
       })
-      .catch(() => {
-        if (!cancelled) setPickerAlts(alternativesFor(current.name, equipment, injuries));
+      .catch((e) => {
+        if (cancelled) return;
+        if (e?.offline) {
+          // Real ask: don't quietly fall back to the offline pool here —
+          // say plainly that this needs a connection, rather than handing
+          // over a coarser guess with no indication why it's different
+          // from the usual AI-picked suggestions. "Request my own" stays
+          // available either way (rendered unconditionally below).
+          setPickerOffline(true);
+          setPickerAlts([]);
+        } else {
+          setPickerAlts(excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx));
+        }
       })
       .finally(() => {
         if (!cancelled) setPickerLoading(false);
@@ -2610,8 +2657,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                     // empty (a transient hiccup, not a permanent answer) —
                     // softened the wording and added a real Retry, on top
                     // of the "request my own" option already below either way.
+                    // A genuine connectivity failure gets its own honest
+                    // message instead — real ask: say it needs wifi rather
+                    // than quietly falling back to a coarser guess.
                     <div style={{ textAlign: "center", margin: "10px 0" }}>
-                      <p style={{ color: T.steelDark, fontSize: 13, margin: "0 0 8px" }}>Couldn't find a suggested alternative for this one.</p>
+                      <p style={{ color: T.steelDark, fontSize: 13, margin: "0 0 8px" }}>
+                        {pickerOffline ? "Needs a connection to find alternatives — you're offline right now." : "Couldn't find a suggested alternative for this one."}
+                      </p>
                       <button
                         onClick={() => setAlternativesRetryToken((t) => t + 1)}
                         style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0 }}
@@ -2630,6 +2682,16 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                       <ChevronRight size={16} color={T.steelDark} />
                     </button>
                   ))}
+                  {/* Real ask: point people at Coach as another real option,
+                      not just the typed-custom-name path below. */}
+                  {alternatives.length > 0 && (
+                    <button
+                      onClick={() => onGoToCoach?.(sets)}
+                      style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "2px 0", textAlign: "center" }}
+                    >
+                      Don't like any of these? <span style={{ color: T.chargeDeep, fontWeight: 700 }}>Talk to the Coach about other options</span>
+                    </button>
+                  )}
                   {/* Real gap: the picker used to just dead-end here with
                       "no alternatives available" and nothing else to do.
                       Whether the list is empty or just doesn't have what
@@ -5010,7 +5072,24 @@ export default function App() {
     // resumedAt marks the start of THIS active stretch — whether that's a
     // brand-new workout or picking a saved one back up — so duration only
     // ever counts time the workout screen was actually open.
-    setSession({ dayIdx, resume: !!resume, resumedAt: Date.now() });
+    // baselineActiveSeconds is captured ONCE, right here — everything
+    // accumulated in stretches BEFORE this one. Real report: "timer just
+    // skipped from 45 to 53... every time I exit and go back in it goes up
+    // by 10 min." Root cause: autoSaveWorkoutProgress (which now fires on
+    // every checkmark, not just backgrounding) used to read the LIVE,
+    // already-updated state.inProgressWorkout.activeSeconds as its "prior"
+    // baseline and add elapsed-since-resumedAt on TOP of it again — since
+    // resumedAt never moves during one continuous active stretch, each
+    // autosave call re-added the same elapsed span onto an already-updated
+    // total, compounding worse with every checkmark. Freezing the baseline
+    // once here, and always accumulating from THAT (never from whatever
+    // the live state currently says), makes activeSeconds a pure function
+    // of (baseline, resumedAt, now) — safe to recompute any number of
+    // times without ever compounding.
+    const baseline = resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === dayIdx
+      ? (state.inProgressWorkout.activeSeconds || 0)
+      : 0;
+    setSession({ dayIdx, resume: !!resume, resumedAt: Date.now(), baselineActiveSeconds: baseline });
   }
 
   // Applies a chosen swap — this step itself is always instant/offline,
@@ -5069,8 +5148,12 @@ export default function App() {
     persist((prev) => ({ ...prev, gifCache: { ...(prev.gifCache || {}), [key]: gifUrl } }));
   }
 
+  // Always accumulates from session.baselineActiveSeconds (frozen once,
+  // when this active stretch started) — never from whatever
+  // state.inProgressWorkout.activeSeconds currently says, since that
+  // itself gets overwritten by every save and would otherwise compound.
   function saveWorkoutProgress(dayIdx, sets) {
-    const activeSeconds = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
     setSession(null);
   }
@@ -5085,8 +5168,20 @@ export default function App() {
   // the moment the tab is suspended.
   function autoSaveWorkoutProgress(dayIdx, sets) {
     if (!session) return;
-    const activeSeconds = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
+  }
+
+  // "Don't like any of these? Talk to the Coach" — same save as
+  // autoSaveWorkoutProgress (progress preserved, resumable), but also
+  // leaves the workout screen and switches to Coach, since there's no way
+  // to actually have that conversation while the full-screen workout
+  // overlay is still up.
+  function goToCoachFromWorkout(sets) {
+    if (!session) return;
+    autoSaveWorkoutProgress(session.dayIdx, sets);
+    setSession(null);
+    setActiveTab("coach");
   }
 
   function discardWorkoutProgress() {
@@ -5427,12 +5522,13 @@ export default function App() {
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
           logs={state.logs}
           resumedAt={session.resumedAt}
-          priorActiveSeconds={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.activeSeconds : 0}
+          priorActiveSeconds={session.baselineActiveSeconds || 0}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
           onSaveExit={(sets) => saveWorkoutProgress(session.dayIdx, sets)}
           onAutoSave={(sets) => autoSaveWorkoutProgress(session.dayIdx, sets)}
+          onGoToCoach={goToCoachFromWorkout}
           equipment={state.profile.equipment}
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}

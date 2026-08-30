@@ -6,6 +6,7 @@ import {
   injuryDescription,
   tipsForExercise,
   alternativesFor,
+  excludeAlreadyInDay,
   buildProgram,
   inferMuscleGroup,
   splitForDays,
@@ -373,6 +374,39 @@ describe("alternativesFor", () => {
         }
       }
     }
+  });
+});
+
+// Real report: swapping "Deadlift" offered "Leg Curl" as an alternative
+// even though "Seated Leg Curl" was already elsewhere that same day — not
+// a useful alternative, just a duplicate of something already programmed.
+describe("excludeAlreadyInDay", () => {
+  const daySets = [
+    { name: "Trap Bar Deadlift" },
+    { name: "Leg Press" },
+    { name: "Seated Leg Curl" },
+  ];
+
+  test("filters out an alternative that matches another exercise already in the day", () => {
+    const result = excludeAlreadyInDay(["Leg Curl", "Romanian Deadlift"], daySets, 0);
+    expect(result).toEqual(["Romanian Deadlift"]);
+  });
+
+  test("is case-insensitive", () => {
+    const result = excludeAlreadyInDay(["seated leg curl", "Romanian Deadlift"], daySets, 0);
+    expect(result).toEqual(["Romanian Deadlift"]);
+  });
+
+  test("never excludes based on the exercise's own current name (swapIdx itself)", () => {
+    // Swapping index 0 ("Trap Bar Deadlift") — that name shouldn't count
+    // as "already used elsewhere" just because it's the one being swapped.
+    const result = excludeAlreadyInDay(["Trap Bar Deadlift", "Romanian Deadlift"], daySets, 0);
+    expect(result).toEqual(["Trap Bar Deadlift", "Romanian Deadlift"]);
+  });
+
+  test("leaves the list untouched when nothing overlaps", () => {
+    const result = excludeAlreadyInDay(["Romanian Deadlift", "Kettlebell Swing"], daySets, 0);
+    expect(result).toEqual(["Romanian Deadlift", "Kettlebell Swing"]);
   });
 });
 
@@ -1505,6 +1539,17 @@ describe("mergeResumedSets", () => {
 
   test("returns null (so the caller falls back to a fresh build) when there's no saved snapshot", () => {
     expect(mergeResumedSets([{ name: "Squat", sets: 3, reps: "8-12", rest: 90 }], null)).toBeNull();
+  });
+
+  // Real bug found investigating a test failure: the swapped-in-exercise
+  // fallback branch never copied over the AI's own baked-in "alternatives"
+  // for that exercise — meaning "Find alternative" always skipped past
+  // perfectly good, already-generated alternatives and went straight to a
+  // live/offline lookup instead, every single time, for every exercise.
+  test("a swapped-in exercise still carries its own baked-in alternatives through", () => {
+    const freshExercises = [{ name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120, alternatives: ["Cable Pull-Through", "Glute Bridge"] }];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    expect(merged[0].alternatives).toEqual(["Cable Pull-Through", "Glute Bridge"]);
   });
 });
 
