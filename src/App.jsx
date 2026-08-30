@@ -1074,6 +1074,22 @@ export async function loadState(userId, attempt = 0) {
   return { state, fromCache: false };
 }
 
+// Serializes the actual Supabase upsert per user (not the local write,
+// which always stays immediate) — real report: changes were lost
+// specifically while switching between wifi and no wifi. Rapid saves
+// firing close together (a set logged, then a swap, then connectivity
+// flapping) could have their upserts resolve OUT OF ORDER — an older,
+// slower call finishing AFTER a newer one started could clear pendingSync
+// and declare everything confirmed, even though the newer write (the one
+// that actually matters) was still in flight or had already failed. A
+// later reload would then trust a fresh server read that never actually
+// got the newer change. saveQueues chains every call so upserts for one
+// user always run strictly in the order they were issued; saveSeq lets
+// each call recognize whether it's still the LATEST one by the time it
+// finishes — only the latest is allowed to declare the sync confirmed.
+const saveQueues = new Map(); // userId -> tail promise
+const saveSeq = new Map(); // userId -> latest issued sequence number
+
 // Always saves locally first (instant, works with zero connectivity), then
 // tries to push to Supabase. Returns whether the server push succeeded so
 // the UI can show a "saved locally, will sync" indicator when it doesn't.
@@ -1087,15 +1103,28 @@ export async function saveState(userId, state) {
   // happened before it landed, and loadState() had no way to know a newer
   // local write existed to prefer over the still-stale server read.
   setPendingSync(userId, true);
-  try {
-    const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
-    if (error) throw error;
-    setPendingSync(userId, false);
-    return true;
-  } catch (e) {
-    console.error("saveState failed, will retry once back online", e);
-    return false;
-  }
+
+  const mySeq = (saveSeq.get(userId) || 0) + 1;
+  saveSeq.set(userId, mySeq);
+  const tail = saveQueues.get(userId) || Promise.resolve();
+  const run = tail.then(async () => {
+    try {
+      const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
+      if (error) throw error;
+      // Only clear pendingSync if no newer save has been issued since —
+      // otherwise this stale success would wrongly mark a still-unconfirmed
+      // newer write as synced.
+      if (saveSeq.get(userId) === mySeq) setPendingSync(userId, false);
+      return true;
+    } catch (e) {
+      console.error("saveState failed, will retry once back online", e);
+      return false;
+    }
+  });
+  // Keeps the chain alive even after a failure, so the NEXT call still
+  // waits its turn instead of running concurrently with a still-pending one.
+  saveQueues.set(userId, run.then(() => {}, () => {}));
+  return run;
 }
 async function loadProfile(userId, attempt = 0) {
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();

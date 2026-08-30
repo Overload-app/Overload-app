@@ -1222,25 +1222,66 @@ describe("loadState / saveState race with a not-yet-confirmed save", () => {
   }
 
   test("saveState marks the sync pending BEFORE the upsert resolves, so a reload mid-flight can tell local is newer", async () => {
+    // Own userId — saveState serializes upserts per user (see saveQueues),
+    // so sharing an id with another saveState test could queue this one
+    // behind that test's leftover, already-settled chain.
     let resolveUpsert;
     const upsert = vi.fn(() => new Promise((r) => { resolveUpsert = r; }));
     mockSupabase({ maybeSingle: vi.fn(), upsert });
 
-    const savePromise = saveState("user-1", { value: "new" });
+    const savePromise = saveState("user-pending-a", { value: "new" });
     // Still in flight — pending must already be set, not only after failure.
-    expect(hasPendingSync("user-1")).toBe(true);
+    expect(hasPendingSync("user-pending-a")).toBe(true);
+    // saveState queues the actual upsert (see saveQueues) — even an empty
+    // queue's first call is scheduled a microtask tick later, not
+    // invoked synchronously, so resolveUpsert isn't assigned yet here.
+    await Promise.resolve();
     resolveUpsert({ error: null });
     await savePromise;
-    expect(hasPendingSync("user-1")).toBe(false);
+    expect(hasPendingSync("user-pending-a")).toBe(false);
   });
 
   test("saveState leaves the sync pending on a genuine upsert failure", async () => {
     const upsert = vi.fn().mockResolvedValue({ error: new Error("network down") });
     mockSupabase({ maybeSingle: vi.fn(), upsert });
 
-    const ok = await saveState("user-1", { value: "new" });
+    const ok = await saveState("user-pending-b", { value: "new" });
     expect(ok).toBe(false);
-    expect(hasPendingSync("user-1")).toBe(true);
+    expect(hasPendingSync("user-pending-b")).toBe(true);
+  });
+
+  // Real report: changes were lost specifically while switching between
+  // wifi and no wifi. Two saves fired close together used to be able to
+  // hit Supabase concurrently and resolve in either order — an older,
+  // slower upsert finishing AFTER a newer one could clear pendingSync and
+  // declare everything confirmed even though the newer write (the one
+  // that actually matters) hadn't landed. Upserts for one user are now
+  // strictly serialized, so this is no longer just "usually fine" — the
+  // second save's upsert physically cannot even start until the first
+  // one has fully settled, guaranteeing both correct arrival order at
+  // Supabase and that only the truly last save gets to clear pendingSync.
+  test("two saves issued back to back stay correctly ordered, and only the final one's success clears pendingSync", async () => {
+    let resolveFirst;
+    const upsert = vi.fn()
+      .mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; })) // first call — resolves late
+      .mockResolvedValueOnce({ error: null }); // second call — resolves once its turn comes
+    mockSupabase({ maybeSingle: vi.fn(), upsert });
+
+    const firstSave = saveState("user-pending-c", { value: "older" });
+    const secondSave = saveState("user-pending-c", { value: "newer" });
+    await Promise.resolve(); // let the first (and only the first) queued upsert actually fire
+    // The second call's upsert can't even start yet — proves they're
+    // genuinely serialized, not just racing and usually landing in order.
+    expect(upsert).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ error: null });
+    await firstSave;
+    await secondSave;
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert).toHaveBeenNthCalledWith(1, expect.objectContaining({ state: { value: "older" } }));
+    expect(upsert).toHaveBeenNthCalledWith(2, expect.objectContaining({ state: { value: "newer" } }));
+    expect(hasPendingSync("user-pending-c")).toBe(false);
   });
 
   test("loadState prefers the local cache over a successful-but-stale server read when a save is still pending", async () => {
