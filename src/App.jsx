@@ -940,7 +940,7 @@ Rules:
 - Spell equipment out in exercise names ("Dumbbell Bench Press," "Barbell Row") rather than gym-jargon abbreviations like "DB" or "BB" — plenty of people using this app are new to lifting and won't know the shorthand.
 - Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, and no trailing descriptor word or phrase tacked on either (not "Leg Press (Low)," not "Leg Press - Wide Stance," not "Leg Press Moderate Depth," not "Controlled Leg Press" — just "Leg Press"). These names get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance width, range of motion — all of that belongs in that exercise's "tips," never in the name.
 - Use the EXACT SAME spelling for an exercise every time it appears in this program — if "Leg Press" shows up on more than one day, it must be spelled identically both times, not "Leg Press" one day and "Leg Press Machine" or "Machine Leg Press" the next. These are meant to be the same reference name throughout, not restated in different words each time.
-- Where one of these fits what you're trying to program, prefer it exactly as written — real, plain names already known to work well: ${exerciseVocabularyFor(profile.equipment).join(", ")}. Use something else if none of these fit, but don't rename or rephrase one of these if it does fit.
+- ONLY choose exercises from this list, named EXACTLY as written here — every one of these is confirmed to have a real instructional video, which is the whole point of sticking to it: ${exerciseVocabularyFor(profile.equipment).join(", ")}. Only go outside this list for a movement pattern genuinely not covered by anything on it (e.g. their goal needs a specific unilateral or core exercise this list has no equivalent for) — not because a different phrasing occurred to you, and not to add variety for its own sake. When you do have to go outside it, keep the name itself plain and standard (same rules as above) even though it won't be a guaranteed video match.
 - Never include exercises that would aggravate: ${injuryDescription(profile)}.
 ${profile.notes ? `- Actually honor the client's own additional notes above ("${profile.notes}") — a stated split preference, a disliked/avoided exercise, equipment their specific gym doesn't have, or anything else in there. If something in it conflicts with another rule (e.g. asks for equipment outside what's available), prioritize what's actually usable and briefly note the conflict isn't a way to silently ignore it.` : ""}
 - Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
@@ -2277,6 +2277,8 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
   const [showCustomAlt, setShowCustomAlt] = useState(false); // "none of these" typed-in-your-own mode
   const [customAlt, setCustomAlt] = useState("");
+  const [customAltChecking, setCustomAltChecking] = useState(false);
+  const [customAltNoVideo, setCustomAltNoVideo] = useState(null); // the name a "no video available" warning is currently showing for, or null
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerOffline, setPickerOffline] = useState(false); // true when the live lookup failed specifically because of connectivity
@@ -2346,6 +2348,32 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   // reflected right away, mid-workout, without waiting on a re-render from
   // the parent) and separately persists it — "today" only or permanently —
   // via the callback the parent provides.
+  // Real ask: "explain that their own won't have an instructional video."
+  // Checks the real GIF catalog before actually committing to a typed-in
+  // custom exercise — if it's confirmed to have no match, shows a plain
+  // warning and requires one more explicit tap to proceed anyway, rather
+  // than silently swapping to something that'll show "unavailable" the
+  // first time they open it mid-workout. Doesn't block on an unconfirmed/
+  // offline check — only a REAL confirmed miss holds it up.
+  async function confirmCustomAlt() {
+    const name = customAlt.trim();
+    if (!name) return;
+    if (customAltNoVideo === name) {
+      // Already warned about this exact name — proceeding is the second,
+      // explicit tap.
+      setSelectedAlt(name);
+      return;
+    }
+    setCustomAltChecking(true);
+    const { gifUrl, confirmed } = await fetchExerciseGif(name);
+    setCustomAltChecking(false);
+    if (confirmed && !gifUrl) {
+      setCustomAltNoVideo(name);
+      return;
+    }
+    setSelectedAlt(name);
+  }
+
   function applySwap(exIdx, newName, scope) {
     setSets((s) => {
       const copy = [...s];
@@ -2693,7 +2721,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       {swapPickerIdx !== null && (() => {
         const current = sets[swapPickerIdx];
         const alternatives = pickerAlts;
-        function close() { setSwapPickerIdx(null); setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); }
+        function close() { setSwapPickerIdx(null); setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setCustomAltNoVideo(null); }
         return (
           <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
             <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -2784,12 +2812,18 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                         Enter the exercise you'd like instead
                       </label>
                       <input
-                        value={customAlt} onChange={(e) => setCustomAlt(e.target.value)}
+                        value={customAlt}
+                        onChange={(e) => { setCustomAlt(e.target.value); setCustomAltNoVideo(null); }}
                         placeholder="e.g. Cable Fly" autoFocus
                         style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 15, boxSizing: "border-box", marginBottom: 10 }}
                       />
-                      <Btn variant="accent" style={{ width: "100%" }} disabled={!customAlt.trim()} onClick={() => setSelectedAlt(customAlt.trim())}>
-                        Use this exercise
+                      {customAltNoVideo === customAlt.trim() && (
+                        <p style={{ fontSize: 12, color: T.warn, margin: "0 0 10px", lineHeight: 1.4 }}>
+                          Heads up — "{customAltNoVideo}" doesn't have an instructional video available. You can still use it; just tap below again to confirm.
+                        </p>
+                      )}
+                      <Btn variant="accent" style={{ width: "100%" }} disabled={!customAlt.trim() || customAltChecking} onClick={confirmCustomAlt}>
+                        {customAltChecking ? "Checking…" : customAltNoVideo === customAlt.trim() ? "Use it anyway" : "Use this exercise"}
                       </Btn>
                     </div>
                   ) : (
@@ -3313,7 +3347,8 @@ Rules:
 - Only include exercises doable with their equipment (${p.equipment}).
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
 - Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, no trailing descriptor word or phrase either (not "Leg Press (Low)," not "Leg Press Moderate Depth" — just "Leg Press"). These get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance, range of motion — that belongs in "tips," never the name.
-- If an exercise you're including already appears somewhere in "Current program JSON" above (or in the version history), use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Where none of that applies and one of these fits what you're programming, prefer it exactly as written: ${exerciseVocabularyFor(p.equipment).join(", ")}.
+- If an exercise you're including already appears somewhere in "Current program JSON" above (or in the version history), use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Otherwise, ONLY choose from this list, named EXACTLY as written — every one of these is confirmed to have a real instructional video: ${exerciseVocabularyFor(p.equipment).join(", ")}. Only go outside it for a movement pattern this list genuinely has no equivalent for, or because the user explicitly asked for something specific by name — not to add variety for its own sake.
+- If the user names a SPECIFIC exercise not on that list (e.g. asking to swap in something particular), and something on the list is a genuinely similar movement, say so and offer it as the option that'll actually have a demo video — but still give them what they explicitly asked for if they confirm they want it, being upfront in "reply" that their specific pick likely won't have an instructional video available (only the exercise name itself, not the tips — those you write either way).
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.

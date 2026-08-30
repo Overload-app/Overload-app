@@ -1383,6 +1383,58 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
     await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
     expect(screen.getByText("Use this exercise")).not.toBeDisabled();
   });
+
+  // Real ask: "explain that their own won't have an instructional video."
+  describe("checks the real catalog before committing to a typed-in exercise", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    test("a confirmed no-match shows a warning and requires a second, explicit tap before swapping", async () => {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
+      const { user, onSwapExercise } = setup();
+      await user.click(screen.getByText("Find alternative"));
+      await user.click(screen.getByText("None of these — request my own"));
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Made-Up Exercise");
+
+      await user.click(screen.getByText("Use this exercise"));
+      expect(await screen.findByText(/doesn't have an instructional video available/)).toBeInTheDocument();
+      expect(screen.queryByText("Just for today")).not.toBeInTheDocument(); // not swapped yet
+
+      await user.click(screen.getByText("Use it anyway"));
+      await user.click(screen.getByText("Just for today"));
+      expect(onSwapExercise).toHaveBeenCalledWith(0, "Made-Up Exercise", "today");
+    });
+
+    test("a confirmed real match proceeds straight through with no warning", async () => {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/0300.gif", matchCount: 1 }) }));
+      const { user } = setup();
+      await user.click(screen.getByText("Find alternative"));
+      await user.click(screen.getByText("None of these — request my own"));
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Cable Fly");
+
+      await user.click(screen.getByText("Use this exercise"));
+      expect(await screen.findByText("Just for today")).toBeInTheDocument();
+      expect(screen.queryByText(/doesn't have an instructional video/)).not.toBeInTheDocument();
+    });
+
+    test("editing the name after a warning clears it, requiring a fresh check", async () => {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gifUrl: null, matchCount: 0 }) }));
+      const { user } = setup();
+      await user.click(screen.getByText("Find alternative"));
+      await user.click(screen.getByText("None of these — request my own"));
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Made-Up Exercise");
+      await user.click(screen.getByText("Use this exercise"));
+      await screen.findByText(/doesn't have an instructional video/);
+
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "!");
+      expect(screen.queryByText(/doesn't have an instructional video/)).not.toBeInTheDocument();
+      expect(screen.getByText("Use this exercise")).toBeInTheDocument(); // back to the normal label
+    });
+  });
 });
 
 describe("<WorkoutSession /> 'find alternative' — empty result and retry", () => {
