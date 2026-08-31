@@ -9,7 +9,7 @@
 // an index bug in a delete button).
 import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
 
@@ -1434,6 +1434,71 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
       expect(screen.queryByText(/doesn't have an instructional video/)).not.toBeInTheDocument();
       expect(screen.getByText("Use this exercise")).toBeInTheDocument(); // back to the normal label
     });
+  });
+});
+
+describe("<WorkoutSession /> 'find alternative' — instant quick suggestions, background upgrade", () => {
+  // "Bench Press" has no baked-in alternatives, but IS classifiable by the
+  // offline pool (chest) — real ask: "takes a little too long to find
+  // alternative workout." This should show something usable immediately,
+  // not wait on the live AI round-trip.
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 1, reps: "8-12", rest: 90, tips: ["a", "b", "c", "d"] }] };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setup() {
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return user;
+  }
+
+  test("shows real pool-based suggestions immediately, before the live lookup ever resolves", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    // Never resolves within this test — proves the list isn't waiting on it.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    // No "Finding similar exercises…" blocking spinner anymore.
+    expect(screen.queryByText(/Finding similar exercises/)).not.toBeInTheDocument();
+    expect(screen.getByText("Incline Dumbbell Press")).toBeInTheDocument();
+    expect(screen.getByText("Finding more tailored suggestions…")).toBeInTheDocument();
+  });
+
+  test("silently upgrades to the AI's suggestions once the background lookup resolves", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Landmine Press"]}' }] }),
+    }));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    // Quick suggestion shows first, then the list upgrades in place —
+    // findBy rather than a synchronous check since a fast-resolving mock
+    // can settle within the same act() cycle as the click itself.
+    expect(await screen.findByText(/Incline Dumbbell Press|Landmine Press/)).toBeInTheDocument();
+    expect(await screen.findByText("Landmine Press")).toBeInTheDocument(); // upgraded in place
+    expect(screen.queryByText("Finding more tailored suggestions…")).not.toBeInTheDocument();
+  });
+
+  test("a background lookup that goes offline just keeps the quick suggestions on screen, no error shown", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const user = setup();
+
+    await user.click(screen.getByText("Find alternative"));
+    expect(screen.getByText("Incline Dumbbell Press")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Finding more tailored suggestions…")).not.toBeInTheDocument());
+    expect(screen.getByText("Incline Dumbbell Press")).toBeInTheDocument(); // still there, undisturbed
+    expect(screen.queryByText(/Needs a connection/)).not.toBeInTheDocument();
   });
 });
 

@@ -7,6 +7,7 @@ import {
   tipsForExercise,
   alternativesFor,
   excludeAlreadyInDay,
+  isSameCoreExercise,
   buildProgram,
   inferMuscleGroup,
   splitForDays,
@@ -1538,6 +1539,42 @@ describe("exerciseHistory", () => {
   test("returns an empty array for an exercise never logged", () => {
     expect(exerciseHistory(logs, "Never Done This")).toEqual([]);
   });
+
+  // Real report: "some exercises don't show how much you did last time" —
+  // a rename (an equipment-word fix, a stripped qualifier, a Coach edit)
+  // used to sever the connection to everything logged under the old name
+  // entirely, silently, with no way to know it happened.
+  test("still finds history logged under a name that's since been renamed to a close variant", () => {
+    const renamedLogs = { workouts: [{ date: "2026-01-01", exercises: [{ name: "Standing Calf Raise", logged: [{ weight: "90", reps: "12", done: true }] }] }] };
+    const history = exerciseHistory(renamedLogs, "Calf Raise"); // program later simplified the name
+    expect(history).toHaveLength(1);
+    expect(history[0].weight).toBe(90);
+  });
+});
+
+describe("isSameCoreExercise", () => {
+  test("treats a name as the same exercise as a longer version of itself", () => {
+    expect(isSameCoreExercise("Leg Curl", "Seated Leg Curl")).toBe(true);
+    expect(isSameCoreExercise("Back Squat", "Barbell Squat")).toBe(false); // "back" and "barbell" are genuinely different words, not a subset relation
+  });
+
+  test("is order-independent", () => {
+    expect(isSameCoreExercise("Seated Leg Curl", "Leg Curl")).toBe(true);
+  });
+
+  test("is case-insensitive", () => {
+    expect(isSameCoreExercise("leg curl", "SEATED LEG CURL")).toBe(true);
+  });
+
+  test("does not treat two different exercises sharing only a generic word as the same", () => {
+    expect(isSameCoreExercise("Machine Chest Press", "Machine Shoulder Press")).toBe(false);
+  });
+
+  test("handles empty/missing input without throwing", () => {
+    expect(isSameCoreExercise("", "Leg Curl")).toBe(false);
+    expect(isSameCoreExercise(null, "Leg Curl")).toBe(false);
+    expect(isSameCoreExercise(undefined, undefined)).toBe(false);
+  });
 });
 
 // Powers the mid-workout "History & PR" view (WorkoutSession's ExerciseDetailSheet).
@@ -1582,6 +1619,11 @@ describe("exerciseLastSession", () => {
 
   test("returns null for an exercise never logged", () => {
     expect(exerciseLastSession(logs, "Never Done This")).toBeNull();
+  });
+
+  test("still finds the last session logged under a name that's since been renamed to a close variant", () => {
+    const renamedLogs = { workouts: [{ date: "2026-01-01", exercises: [{ name: "Standing Calf Raise", logged: [{ weight: "90", reps: "12", done: true }] }] }] };
+    expect(exerciseLastSession(renamedLogs, "Calf Raise")).toEqual({ date: "2026-01-01", sets: [{ weight: 90, reps: 12 }] });
   });
 });
 

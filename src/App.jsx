@@ -429,7 +429,7 @@ function coreNameTokens(name) {
 // happen to share a word. A plain exact-string check missed exactly this
 // case (the real report below); this catches it without needing to hand-
 // maintain a list of every stance/equipment qualifier word.
-function isSameCoreExercise(a, b) {
+export function isSameCoreExercise(a, b) {
   const tokensA = coreNameTokens(a);
   const tokensB = coreNameTokens(b);
   if (tokensA.size === 0 || tokensB.size === 0) return false;
@@ -2280,7 +2280,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   const [customAltChecking, setCustomAltChecking] = useState(false);
   const [customAltNoVideo, setCustomAltNoVideo] = useState(null); // the name a "no video available" warning is currently showing for, or null
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
-  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerUpgrading, setPickerUpgrading] = useState(false); // a background live lookup is running to possibly improve on the instantly-shown quick suggestions
   const [pickerOffline, setPickerOffline] = useState(false); // true when the live lookup failed specifically because of connectivity
   const [alternativesRetryToken, setAlternativesRetryToken] = useState(0); // bumped to force the alternatives lookup below to run again
   const [detailFor, setDetailFor] = useState(null); // exercise name currently showing history/PR detail, or null
@@ -2297,48 +2297,51 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
 
   // Resolves the alternatives list whenever the picker opens for a new
   // exercise: use what's already baked into the program if present, else
-  // try a one-time live "similar exercises" lookup (caching the result so
-  // it never has to run twice), and only fall back to the coarser
-  // pool-based matching if that's not possible (offline, or the call fails).
+  // show the instant offline-pool match right away and try a one-time
+  // live "similar exercises" lookup in the background (caching the result
+  // so it never has to run twice) to possibly upgrade to something better.
   useEffect(() => {
     if (swapPickerIdx === null) return;
     setPickerOffline(false);
     const current = sets[swapPickerIdx];
     if (Array.isArray(current.alternatives) && current.alternatives.length > 0) {
       setPickerAlts(excludeAlreadyInDay(current.alternatives, sets, swapPickerIdx));
+      setPickerUpgrading(false);
       return;
     }
+    // Real ask: this used to leave the picker blank for however long the
+    // live AI lookup took. The offline pool match is instant and doesn't
+    // need a network round-trip, so it shows immediately as a real,
+    // usable list — pickerUpgrading covers the background live lookup for
+    // a possibly better, more context-aware set, silently upgrading the
+    // list in place if one arrives, without ever blocking on it.
+    const quick = excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx);
+    setPickerAlts(quick);
+    setPickerUpgrading(true);
     let cancelled = false;
-    setPickerLoading(true);
     fetchSimilarExercises(current.name, equipment, injuries)
       .then((alts) => {
         if (cancelled) return;
         if (alts.length > 0) {
           setPickerAlts(excludeAlreadyInDay(alts, sets, swapPickerIdx));
           onCacheAlternatives(swapPickerIdx, alts);
-        } else {
-          // A real, successful answer — the AI just didn't have a
-          // suggestion — so the offline pool is still a reasonable
-          // fallback here (unlike the genuine-offline case below).
-          setPickerAlts(excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx));
         }
+        // An empty (but successful) AI answer just means it agreed there's
+        // nothing better — the quick list already showing is fine as is.
       })
       .catch((e) => {
         if (cancelled) return;
-        if (e?.offline) {
-          // Real ask: don't quietly fall back to the offline pool here —
-          // say plainly that this needs a connection, rather than handing
-          // over a coarser guess with no indication why it's different
-          // from the usual AI-picked suggestions. "Request my own" stays
-          // available either way (rendered unconditionally below).
+        // Only actually replaces the list with "needs wifi" messaging when
+        // there was nothing to show in the first place (the pool itself
+        // came up empty too) — otherwise the quick suggestions already on
+        // screen just stay put; no need to interrupt with an error over a
+        // background upgrade that simply didn't happen.
+        if (e?.offline && quick.length === 0) {
           setPickerOffline(true);
-          setPickerAlts([]);
-        } else {
-          setPickerAlts(excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx));
         }
       })
       .finally(() => {
-        if (!cancelled) setPickerLoading(false);
+        if (!cancelled) setPickerUpgrading(false);
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2546,7 +2549,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
 
   function lastFor(name) {
     if (!lastLog) return null;
-    const found = lastLog.exercises.find((e) => e.name === name);
+    // isSameCoreExercise, not exact equality — real report: "some
+    // exercises don't show how much you did last time," which a rename
+    // (equipment-word fix, stripped qualifier, a Coach edit) would cause
+    // by orphaning the match against what's actually in lastLog.
+    const found = lastLog.exercises.find((e) => isSameCoreExercise(e.name, name));
     if (!found) return null;
     const withWeight = found.logged.filter((l) => l.weight);
     if (withWeight.length === 0) return null;
@@ -2732,11 +2739,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
               <button onClick={close} style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-              {pickerLoading ? (
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 30, fontSize: 13, color: T.steelDark }}>
-                  <Loader2 size={16} className="spin" /> Finding similar exercises…
-                </div>
-              ) : selectedAlt ? (
+              {selectedAlt ? (
                 <div>
                   <Card style={{ marginBottom: 16 }}>
                     <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 700, margin: 0 }}>{selectedAlt}</h3>
@@ -2760,6 +2763,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {pickerUpgrading && alternatives.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.steelDark, marginBottom: 2 }}>
+                      <Loader2 size={12} className="spin" /> Finding more tailored suggestions…
+                    </div>
+                  )}
                   {alternatives.length === 0 && (
                     // Real report: this read as a hard equipment limitation
                     // ("no alternatives... with your current equipment"),
@@ -3311,6 +3319,7 @@ export function buildCoachSystem(state) {
     calories: h.targets?.calories,
   }));
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
+Today's date: ${todayISO()}. Each user message below is prefixed with the date it was actually sent, like "[Sent 2026-06-15]" — use that to judge whether something is genuinely still relevant to right now. A time-sensitive, one-off statement ("I only have 40 minutes today," "my shoulder's sore today," "I'm short on time this week") describes THAT specific day, not a standing fact — never carry it forward and apply it to today's answer just because it's somewhere earlier in this conversation. If today's date doesn't match (or isn't close to) the date on a message like that, treat it as no longer applicable unless the user brings it up again now. A genuinely lasting preference stated without a time qualifier (an injury to avoid long-term, a disliked exercise, a split preference) is different — that keeps applying regardless of when it was said.
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
 Current program JSON: ${JSON.stringify(state.program)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
@@ -3928,11 +3937,19 @@ function MonthlySummary({ logs }) {
   );
 }
 
+// Matched by isSameCoreExercise, not exact string equality — a rename
+// (an equipment-word fix, a stripped qualifier, a Coach edit) used to
+// sever the connection to everything already logged under the old name
+// entirely: no PR, no "last time" hint, no history, as if it had never
+// been done before. Real report: "some exercises don't show how much you
+// did last time" — this session alone renamed exercises in several ways
+// (POOLS corrections, automatic bracket-stripping), each capable of
+// orphaning real history this way.
 export function exerciseHistory(logs, name) {
   return logs.workouts
-    .filter((w) => w.exercises.some((e) => e.name === name))
+    .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
     .map((w) => {
-      const ex = w.exercises.find((e) => e.name === name);
+      const ex = w.exercises.find((e) => isSameCoreExercise(e.name, name));
       const withWeight = ex.logged.filter((l) => l.weight && l.reps);
       if (withWeight.length === 0) return null;
       const top = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) ? l : max), withWeight[0]);
@@ -3950,11 +3967,11 @@ export function exerciseHistory(logs, name) {
 // exercise detail view's "last time" breakdown.
 export function exerciseLastSession(logs, name) {
   const matches = logs.workouts
-    .filter((w) => w.exercises.some((e) => e.name === name))
+    .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
     .sort((a, b) => (a.date > b.date ? -1 : 1)); // most recent first
   if (matches.length === 0) return null;
   const w = matches[0];
-  const ex = w.exercises.find((e) => e.name === name);
+  const ex = w.exercises.find((e) => isSameCoreExercise(e.name, name));
   const loggedSets = ex.logged.filter((l) => l.weight && l.reps);
   if (loggedSets.length === 0) return null;
   return { date: w.date, sets: loggedSets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) };
