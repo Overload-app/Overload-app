@@ -722,9 +722,21 @@ export function secondsPerExercise(goal) {
 }
 
 function capFromSeconds(sessionLength, perExerciseSeconds, experience) {
-  let cap = Math.floor((sessionLength * 60) / perExerciseSeconds);
+  const raw = Math.floor((sessionLength * 60) / perExerciseSeconds);
+  let cap = raw;
   if (experience === "advanced") cap += 1;
-  if (experience === "beginner") cap -= 1;
+  // The beginner -1 is a safety margin on top of genuine slack, never
+  // allowed to eat into the minimum-4 guarantee itself. Real tester
+  // report: a 30-min session gave intermediate the promised 4 exercises
+  // but flatly refused a beginner even 4 ("the hard ceiling is 3") for
+  // the identical time budget — planSetsRest had already trimmed sets/
+  // rest all the way to the floor to reach a raw count of 4, and the -1
+  // then undid that work by design, silently breaking the same "minimum
+  // 4 when the time budget has room for it" promise this whole model
+  // exists to keep. Once the floor-trimmed raw count has actually reached
+  // the target, a beginner keeps it; the -1 only bites when there was
+  // real slack above the target to begin with (raw was already 5+).
+  if (experience === "beginner") cap = Math.max(raw - 1, Math.min(raw, TARGET_MIN_EXERCISES));
   // Absolute last resort, not the everyday answer — planSetsRest() below
   // trims sets/rest first specifically so a real session count (4+) fits
   // without ever reaching this. This only binds for genuinely extreme
@@ -3310,6 +3322,16 @@ export function buildCoachSystem(state) {
   // change that was just made. Falls back to the goal-default ceiling only
   // if there's genuinely no program yet to read real numbers from.
   const liveCap = capForProgram(state.program, p.sessionLength, p.experience) ?? capFor(p);
+  // Real report: a program from before the minimum-4-exercises model
+  // existed was still using its original, more generous sets/rest — so
+  // liveCap (correctly reading what the program ACTUALLY uses right now)
+  // came out below 4, and the Coach flatly told the user "the hard
+  // ceiling is 3" without ever considering that the sets/rest themselves
+  // could be trimmed toward what a fresh plan would use today. Handing
+  // over the tightest sensible sets/rest directly means the Coach can
+  // recognize a stale, never-updated program instead of just reporting
+  // its stale ceiling as a hard fact.
+  const tightestSetsRest = planSetsRest(p);
   const history = state.programHistory || [];
   const historySummary = history.map((h, i) => ({
     index: i,
@@ -3365,7 +3387,9 @@ Rules:
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - MINIMUM 4 exercises on any day you write into "program" or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.
-- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one. If they push back that the number doesn't make sense, explain THAT honestly (fixed per-exercise overhead, unilateral exercises costing double, not just set/rest math) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
+- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
+- If ${liveCap} is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since ${liveCap} reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is ${tightestSetsRest.sets} sets x ${tightestSetsRest.rest}s rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale ${liveCap} as a hard fact. Only if trimming all the way to ${tightestSetsRest.sets}x${tightestSetsRest.rest}s genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
+- If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
 - Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
 - If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.

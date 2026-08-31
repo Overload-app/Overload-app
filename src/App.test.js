@@ -624,6 +624,27 @@ describe("periodic review scheduling and summarization", () => {
 // Real ask: a free-text "anything else your coach should know?" quiz step
 // (preferred split, disliked exercises, missing gym equipment, etc.) that
 // actually reaches both AI prompts, not just gets collected and ignored.
+// Real tester report: a program from before sets/rest were ever tightened
+// gave the Coach a stale, low ceiling ("the hard ceiling is 3") with no
+// awareness that trimming toward the tightest sensible sets/rest for this
+// session length would very likely reclaim room back to the real minimum.
+describe("buildCoachSystem tells the Coach how to recover a stale, un-trimmed program's ceiling", () => {
+  test("includes the tightest sensible sets/rest and trim-first guidance when the current program's ceiling is below the minimum", () => {
+    const state = {
+      profile: { ...baseProfile, sessionLength: 30, goal: "build", experience: "beginner" },
+      program: {
+        splitName: "Full Body",
+        days: [{ name: "Full Body A", exercises: [{ name: "Bench Press", sets: 4, rest: 90 }, { name: "Barbell Row", sets: 4, rest: 90 }] }],
+      },
+      programHistory: [],
+    };
+    const system = buildCoachSystem(state);
+    const { sets, rest } = planSetsRest(state.profile);
+    expect(system).toContain(`${sets} sets x ${rest}s rest`);
+    expect(system).toContain("trim EVERY exercise on the day toward those numbers");
+  });
+});
+
 describe("profile notes reach both AI prompts", () => {
   test("buildProgramGenSystem includes the client's notes verbatim when present", () => {
     const system = buildProgramGenSystem({ ...baseProfile, notes: "Prefer an upper/lower split, no cable machine at my gym" });
@@ -685,6 +706,32 @@ describe("planSetsRest", () => {
   test("a 30-min build session now fits at least 4 exercises — it used to collapse to 2", () => {
     const profile = { sessionLength: 30, goal: "build", experience: "intermediate" };
     expect(capFor(profile)).toBeGreaterThanOrEqual(4);
+  });
+
+  // Real tester report: a 30-min session gave intermediate the promised 4
+  // exercises but flatly refused a beginner even 4 ("the hard ceiling is
+  // 3") for the IDENTICAL time budget — planSetsRest had already trimmed
+  // sets/rest all the way to the floor to reach a raw count of 4, and the
+  // beginner -1 adjustment then undid that work, since it was applied
+  // unconditionally rather than only when there was genuine slack above
+  // the target to give up.
+  test("a beginner gets the same guaranteed minimum of 4 as intermediate does, for the identical session length", () => {
+    for (const goal of ["lose", "build", "recomp"]) {
+      const profile = { sessionLength: 30, goal, experience: "beginner" };
+      expect(capFor(profile)).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  test("the beginner -1 still applies once there's genuine slack above the minimum to give up", () => {
+    // A long enough session that the textbook scheme alone (no trimming
+    // needed) already clears the minimum with real room to spare — the -1
+    // should still shave a beginner's count relative to intermediate here,
+    // since protecting the guarantee doesn't mean removing the adjustment
+    // outright.
+    const intermediateCap = capFor({ sessionLength: 90, goal: "build", experience: "intermediate" });
+    const beginnerCap = capFor({ sessionLength: 90, goal: "build", experience: "beginner" });
+    expect(beginnerCap).toBe(intermediateCap - 1);
+    expect(beginnerCap).toBeGreaterThanOrEqual(4);
   });
 
   test("a beginner still gets at least 4 exercises when the time budget has room for it — planSetsRest used to stop trimming as soon as the RAW count hit 4, before capFor's own beginner -1 adjustment dropped the final cap to 3", () => {
