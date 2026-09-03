@@ -13,6 +13,9 @@ import {
   splitForDays,
   capFor,
   capForProgram,
+  enforceExerciseCeiling,
+  padToMinimum,
+  normalizeExerciseCount,
   isUnilateral,
   exerciseVocabularyFor,
   fetchExerciseGif,
@@ -761,6 +764,97 @@ describe("planSetsRest", () => {
         expect(ex.rest).toBe(rest);
       }
     }
+  });
+});
+
+// Real, repeated pattern this session: an AI response violating the
+// exercise-count rules it was explicitly told to follow. A prompt
+// instruction is a strong nudge, never a hard guarantee — these enforce
+// both the ceiling and the guaranteed minimum deterministically,
+// regardless of whether the model actually complied.
+describe("enforceExerciseCeiling", () => {
+  const exercises = [{ name: "A" }, { name: "B" }, { name: "C" }, { name: "D" }, { name: "E" }];
+
+  test("trims down to the ceiling, keeping the first N (compound/primary lifts are listed first)", () => {
+    expect(enforceExerciseCeiling(exercises, 3)).toEqual([{ name: "A" }, { name: "B" }, { name: "C" }]);
+  });
+
+  test("leaves the list untouched when already at or under the ceiling", () => {
+    expect(enforceExerciseCeiling(exercises, 5)).toEqual(exercises);
+    expect(enforceExerciseCeiling(exercises, 10)).toEqual(exercises);
+  });
+
+  test("leaves the list untouched when there's no real ceiling to enforce", () => {
+    expect(enforceExerciseCeiling(exercises, 0)).toEqual(exercises);
+    expect(enforceExerciseCeiling(exercises, null)).toEqual(exercises);
+  });
+});
+
+describe("padToMinimum", () => {
+  test("pads a short day back up to the target using real pool exercises", () => {
+    const exercises = [{ name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 }];
+    const padded = padToMinimum(exercises, 4, "full", ["none"]);
+    expect(padded.length).toBe(4);
+    expect(padded[0]).toEqual(exercises[0]); // original untouched
+    for (const ex of padded.slice(1)) {
+      expect(ex.tips.length).toBeGreaterThan(0);
+      expect(ex.sets).toBe(3); // matches the day's own scheme, not a generic default
+      expect(ex.rest).toBe(90);
+    }
+  });
+
+  test("never pads in a near-duplicate of something already in the day", () => {
+    // "Leg Curl" (pool) would otherwise be a plausible pad candidate, but
+    // "Seated Leg Curl" already covers the same core exercise.
+    const exercises = [
+      { name: "Trap Bar Deadlift", sets: 3, reps: "8-10", rest: 100 },
+      { name: "Seated Leg Curl", sets: 3, reps: "12", rest: 75 },
+    ];
+    const padded = padToMinimum(exercises, 4, "full", ["none"]);
+    const names = padded.map((e) => e.name.toLowerCase());
+    expect(names.filter((n) => n.includes("curl")).length).toBe(1); // still just the one
+  });
+
+  test("does nothing when already at or above the target", () => {
+    const exercises = [{ name: "A" }, { name: "B" }, { name: "C" }, { name: "D" }];
+    expect(padToMinimum(exercises, 4, "full", ["none"])).toBe(exercises); // same reference, untouched
+  });
+
+  test("respects injury exclusions when choosing pad candidates", () => {
+    const exercises = [{ name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 }];
+    const padded = padToMinimum(exercises, 4, "full", ["knees"]);
+    const names = padded.map((e) => e.name);
+    expect(names).not.toContain("Barbell Squat");
+    expect(names).not.toContain("Leg Press");
+  });
+});
+
+describe("normalizeExerciseCount", () => {
+  test("trims an over-long day down to what its own sets/rest actually allow", () => {
+    // 6 exercises at a scheme this generous won't fit a 30-min session.
+    const exercises = Array.from({ length: 6 }, (_, i) => ({ name: `Exercise ${i}`, sets: 4, reps: "8-12", rest: 90 }));
+    const result = normalizeExerciseCount(exercises, 30, "intermediate", "full", ["none"]);
+    expect(result.length).toBeLessThan(6);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("pads a short day back up to the real minimum for the session length", () => {
+    // Tight sets/rest, only 1 exercise — a 60-min session has real room
+    // for more than that.
+    const exercises = [{ name: "Barbell Bench Press", sets: 2, reps: "8-12", rest: 45 }];
+    const result = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"]);
+    expect(result.length).toBeGreaterThanOrEqual(4);
+  });
+
+  test("leaves an already-reasonable day untouched", () => {
+    const exercises = [
+      { name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 },
+      { name: "Barbell Row", sets: 3, reps: "8-12", rest: 90 },
+      { name: "Overhead Press", sets: 3, reps: "8-12", rest: 90 },
+      { name: "Lat Pulldown", sets: 3, reps: "8-12", rest: 90 },
+    ];
+    const result = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"]);
+    expect(result).toEqual(exercises);
   });
 });
 

@@ -835,12 +835,35 @@ describe("OnboardingSummary", () => {
     expect(screen.getByText(/tell your Coach/i)).toBeInTheDocument();
   });
 
-  test("continuing calls onContinue", async () => {
+  test("continuing calls onContinue, once the AI disclaimer is acknowledged", async () => {
     const user = userEvent.setup();
     const onContinue = vi.fn();
     render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={onContinue} />);
+    await user.click(screen.getByText(/I understand Overload uses AI/));
     await user.click(screen.getByText(/Let's go/));
     expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+
+  // Real ask: the AI disclaimer should be something actively accepted,
+  // not just passive text — "Let's go" is gated on it, not just displayed
+  // alongside it.
+  test("'Let's go' is disabled until the AI disclaimer is checked, and does nothing if clicked anyway", async () => {
+    const user = userEvent.setup();
+    const onContinue = vi.fn();
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={onContinue} />);
+    expect(screen.getByText(/Let's go/).closest("button")).toBeDisabled();
+    await user.click(screen.getByText(/Let's go/));
+    expect(onContinue).not.toHaveBeenCalled();
+  });
+
+  test("checking then unchecking the disclaimer disables 'Let's go' again", async () => {
+    const user = userEvent.setup();
+    render(<OnboardingSummary profile={profile} program={program} targets={targets} onContinue={vi.fn()} />);
+    const checkbox = screen.getByText(/I understand Overload uses AI/);
+    await user.click(checkbox);
+    expect(screen.getByText(/Let's go/).closest("button")).not.toBeDisabled();
+    await user.click(checkbox);
+    expect(screen.getByText(/Let's go/).closest("button")).toBeDisabled();
   });
 });
 

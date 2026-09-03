@@ -822,6 +822,76 @@ export function capForProgram(program, sessionLength, experience) {
   return capFromSeconds(sessionLength, avgSeconds, experience);
 }
 
+// Real, repeated pattern this session: an AI response violating the
+// exercise-count rules it was explicitly told to follow (too many for the
+// ceiling, or too few given the guaranteed minimum) — a prompt instruction
+// is a strong nudge, never a hard guarantee. These enforce both bounds
+// deterministically, client-side, on every AI-written day (fresh
+// generation or a Coach edit) regardless of whether the model actually
+// complied, instead of hoping better wording eventually gets there.
+
+// Keeps the first N exercises (compound/primary lifts are conventionally
+// listed first, accessories last) rather than trimming at random.
+export function enforceExerciseCeiling(exercises, ceiling) {
+  if (!ceiling || exercises.length <= ceiling) return exercises;
+  return exercises.slice(0, ceiling);
+}
+
+// Fills a short day back up using the same real, GIF-confirmed vocabulary
+// the AI itself is told to prefer — favors a muscle group not already
+// covered in the day for balance, falls back to any pool exercise not
+// already present. Matched against what's already there via
+// isSameCoreExercise, not exact equality, so it can't pad in a near-
+// duplicate of something already in the day (the same class of bug fixed
+// for the alternatives picker). New exercises borrow the day's own
+// sets/rest for consistency, defaulting to a sensible scheme if the day
+// was completely empty.
+export function padToMinimum(exercises, targetCount, equipment, injuries) {
+  if (exercises.length >= targetCount) return exercises;
+  const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
+  const usedGroups = new Set(
+    exercises.map((e) => EXERCISE_TO_GROUP[e.name] || inferMuscleGroup(e.name)).filter(Boolean)
+  );
+  const candidates = Object.keys(pool)
+    .flatMap((group) => pool[group].map((name) => ({ name, group })))
+    .filter(({ name }) => !exercises.some((e) => isSameCoreExercise(e.name, name)))
+    // Groups not yet represented in the day come first, for balance.
+    .sort((a, b) => (usedGroups.has(a.group) ? 1 : 0) - (usedGroups.has(b.group) ? 1 : 0));
+
+  const template = exercises[0] || {};
+  const padded = [...exercises];
+  for (const { name } of candidates) {
+    if (padded.length >= targetCount) break;
+    if (padded.some((e) => isSameCoreExercise(e.name, name))) continue;
+    padded.push({
+      name,
+      sets: template.sets ?? GOAL_SCHEME.recomp.sets,
+      reps: template.reps ?? GOAL_SCHEME.recomp.reps,
+      rest: template.rest ?? GOAL_SCHEME.recomp.rest,
+      tips: tipsForExercise(name),
+    });
+  }
+  return padded;
+}
+
+// The single entry point both the fresh-generation path and every Coach
+// edit run every AI-written day through. The ceiling is derived from
+// whatever sets/rest these exact exercises actually specify (same
+// philosophy as capForProgram: what's really there, not a generic
+// assumption), so it stays correct even for a day the AI already trimmed
+// sets/rest on. Real tester report this exists for: asked for more
+// exercises, got told a hard ceiling that was actually just the AI
+// undershooting the real minimum for the session length.
+export function normalizeExerciseCount(exercises, sessionLength, experience, equipment, injuries) {
+  const ceiling = capForProgram({ days: [{ exercises }] }, sessionLength, experience) ?? TARGET_MIN_EXERCISES;
+  let result = enforceExerciseCeiling(exercises, ceiling);
+  const padTarget = Math.min(TARGET_MIN_EXERCISES, ceiling);
+  if (result.length < padTarget) {
+    result = padToMinimum(result, padTarget, equipment, injuries);
+  }
+  return result;
+}
+
 // sets/rest are optional overrides — when omitted, falls back to the
 // goal's own textbook scheme (kept for buildDay's own existing tests);
 // buildProgram() below always passes planSetsRest()'s adapted values
@@ -1881,7 +1951,15 @@ export function Onboarding({ onComplete }) {
       });
       const parsed = parseJSONLoose(raw);
       if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
-        program = { splitName: deriveSplitName(parsed.days) || program.splitName, days: parsed.days };
+        // Deterministic backstop, not just a prompt request — the AI is
+        // told a hard ceiling and a guaranteed minimum, but a prompt
+        // instruction is never a hard guarantee on its own. Enforces both
+        // on every day regardless of whether the model actually complied.
+        const normalizedDays = parsed.days.map((d) => ({
+          ...d,
+          exercises: normalizeExerciseCount(d.exercises || [], profile.sessionLength, profile.experience, profile.equipment, profile.injuries),
+        }));
+        program = { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays };
       }
     } catch (e) {
       // Fall back silently to the rule-based program below.
@@ -2061,6 +2139,12 @@ export function Onboarding({ onComplete }) {
 // before they've even seen the app.
 export function OnboardingSummary({ profile, program, targets, onContinue }) {
   const goalLabel = (GOAL_SCHEME[profile.goal] || GOAL_SCHEME.recomp).label;
+  // Real ask: the AI-can-be-wrong disclaimer should be something someone
+  // actively accepts, not just passive text on the loading screen they
+  // could easily not read while waiting. This is the real decision point
+  // — right before they commit to the plan — so the continue button is
+  // gated on it rather than just showing the text alongside it.
+  const [aiAcknowledged, setAiAcknowledged] = useState(false);
   return (
     <div className="auth-screen" style={{ display: "flex", flexDirection: "column", background: T.paper, padding: "calc(24px + env(safe-area-inset-top, 0px)) 20px calc(20px + env(safe-area-inset-bottom, 0px))", boxSizing: "border-box" }}>
       <style>{FONT_IMPORT}</style>
@@ -2112,9 +2196,26 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
             None of this is locked in — want a different split, different exercises, or your numbers adjusted? Just tell your Coach any time.
           </p>
         </div>
+
+        <button
+          onClick={() => setAiAcknowledged((v) => !v)}
+          style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "none", border: "none", padding: "14px 0 0", width: "100%", textAlign: "left", cursor: "pointer" }}
+        >
+          <span
+            style={{
+              flexShrink: 0, width: 20, height: 20, borderRadius: 5, marginTop: 1, display: "flex", alignItems: "center", justifyContent: "center",
+              border: `1.5px solid ${aiAcknowledged ? T.charge : T.steel}`, background: aiAcknowledged ? T.charge : "#fff",
+            }}
+          >
+            {aiAcknowledged && <Check size={13} color="#fff" strokeWidth={3} />}
+          </span>
+          <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 13, color: T.ink, lineHeight: 1.5 }}>
+            I understand Overload uses AI to build this plan — like any AI, it can occasionally get something wrong, and I'll use my own judgment and check with a doctor or trainer for anything medical.
+          </span>
+        </button>
       </div>
 
-      <Btn variant="accent" onClick={onContinue} style={{ width: "100%", padding: "16px", marginTop: 16, flexShrink: 0 }}>
+      <Btn variant="accent" onClick={onContinue} disabled={!aiAcknowledged} style={{ width: "100%", padding: "16px", marginTop: 16, flexShrink: 0 }}>
         Let's go <ChevronRight size={18} />
       </Btn>
     </div>
@@ -5093,6 +5194,24 @@ export default function App() {
           };
         }
 
+        // Deterministic backstop, not just a prompt request — every Coach
+        // edit runs back through the same exercise-count enforcement as
+        // fresh generation, regardless of whether the model actually
+        // honored the ceiling/minimum it was told. Real tester report this
+        // exists for: asked Coach for more exercises, got a flat refusal
+        // that turned out to be the AI simply not reclaiming room it
+        // actually had.
+        const p = prev.profile;
+        const normalizedProgramDays = hasNewProgram
+          ? parsed.program.days.map((d) => ({
+              ...d,
+              exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries),
+            }))
+          : null;
+        const normalizedOverride = hasOverride
+          ? normalizeExerciseCount(withTips(parsed.todayOverride), p.sessionLength, p.experience, p.equipment, p.injuries)
+          : null;
+
         // A real, non-restore change to program and/or targets: snapshot the
         // current version into history first so it can be reverted to later.
         if (hasNewProgram || hasValidTargets) {
@@ -5103,8 +5222,8 @@ export default function App() {
           return {
             ...prev,
             coachChat: withReply,
-            program: hasNewProgram ? normalizeProgramTips({ splitName: deriveSplitName(parsed.program.days) || prev.program.splitName, days: parsed.program.days }) : prev.program,
-            todayOverride: hasOverride ? withTips(parsed.todayOverride) : prev.todayOverride,
+            program: hasNewProgram ? normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays }) : prev.program,
+            todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
             targets: hasValidTargets
               ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
               : prev.targets,
@@ -5116,7 +5235,7 @@ export default function App() {
         return {
           ...prev,
           coachChat: withReply,
-          todayOverride: hasOverride ? withTips(parsed.todayOverride) : prev.todayOverride,
+          todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
         };
       });
     } catch (e) {
