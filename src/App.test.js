@@ -648,6 +648,27 @@ describe("buildCoachSystem tells the Coach how to recover a stale, un-trimmed pr
   });
 });
 
+// Real transcript: "Hmm, I didn't quite catch that" fired on a genuinely
+// ambiguous request ("make my split 5 workouts" — 5 exercises, or 5 days?)
+// instead of asking what was actually unclear, and a later pushback on an
+// already-explained refusal got the same explanation repeated almost
+// verbatim two more times, which read as "coach is still being an idiot."
+describe("buildCoachSystem: never a blank reply, and don't just repeat an explanation on pushback", () => {
+  test("instructs the Coach to never leave reply blank, and to ask a specific clarifying question for ambiguous requests", () => {
+    const state = { profile: baseProfile, program: null, programHistory: [] };
+    const system = buildCoachSystem(state);
+    expect(system).toContain('"reply" must NEVER be left blank');
+    expect(system).toContain("say specifically what's unclear");
+  });
+
+  test("instructs the Coach not to just repeat itself when a user re-asserts an already-explained request", () => {
+    const state = { profile: baseProfile, program: null, programHistory: [] };
+    const system = buildCoachSystem(state);
+    expect(system).toContain("don't just restate the same explanation again");
+    expect(system).toContain("lead with the concrete next step");
+  });
+});
+
 describe("profile notes reach both AI prompts", () => {
   test("buildProgramGenSystem includes the client's notes verbatim when present", () => {
     const system = buildProgramGenSystem({ ...baseProfile, notes: "Prefer an upper/lower split, no cable machine at my gym" });

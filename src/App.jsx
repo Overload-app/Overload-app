@@ -11,6 +11,89 @@ import {
 import { supabase } from "./supabaseClient.js";
 
 /* ============================================================
+   ERROR LOGGING
+   Real gap this whole session: every bug fixed was found because a tester
+   happened to notice, catch, and describe it — expensive for them, and
+   anything nobody happens to report just sits there unnoticed. This
+   writes real errors (a React render crash, or any other uncaught JS
+   error) to a Supabase table automatically, insert-only from the client
+   (see supabase-migration-error-logs.sql), so problems surface without
+   needing a person to catch and report them first.
+============================================================ */
+// Kept in sync with the current account by the App component (see its own
+// useEffect on `account`) — module-level so the global window error
+// handlers below (which run outside any component's scope) can still tag
+// a log with who hit it, without an async session lookup on every error.
+let currentUserId = null;
+export function setErrorLogUserId(userId) { currentUserId = userId; }
+
+export async function logError(message, extra = {}) {
+  try {
+    await supabase.from("error_logs").insert({
+      user_id: currentUserId,
+      message: String(message).slice(0, 2000),
+      stack: extra.stack ? String(extra.stack).slice(0, 4000) : null,
+      context: extra.context || null,
+      path: typeof window !== "undefined" ? window.location.pathname : null,
+    });
+  } catch (e) {
+    // A logging failure must never cascade into more errors — best-effort
+    // only, and silent (console is enough for local debugging).
+    console.error("logError itself failed:", e);
+  }
+}
+
+// Catches uncaught errors OUTSIDE React's own render cycle (a rejected
+// promise with no .catch, a stray runtime error) — an ErrorBoundary alone
+// only ever sees render-time crashes. Registered once, at module load
+// (App.jsx is imported before anything renders), not inside a component.
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (e) => {
+    logError(e.message || "Uncaught error", { stack: e.error?.stack, context: { type: "window.onerror" } });
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e.reason;
+    logError(reason?.message || String(reason), { stack: reason?.stack, context: { type: "unhandledrejection" } });
+  });
+}
+
+// Catches a crash DURING React's render — without this, a single broken
+// render anywhere in the tree would otherwise blank the whole app with no
+// way back in except a hard reload (and no record it ever happened).
+// Class component: componentDidCatch has no hook equivalent.
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    logError(error.message || String(error), { stack: error.stack, context: { type: "react-render", componentStack: info?.componentStack?.slice(0, 1000) } });
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight: "100vh", minHeight: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#F3F4F6", padding: 28, textAlign: "center", fontFamily: "'Inter', sans-serif" }}>
+          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "0 0 8px", color: "#0D0E15" }}>Something went wrong.</h2>
+          <p style={{ color: "#5B6470", fontSize: 14, maxWidth: 320, marginBottom: 20 }}>
+            This has been logged — reloading the app should get you back to where you were. Your data is safe either way, it's saved as you go.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ background: "#5B46F6", color: "#fff", border: "none", borderRadius: 10, padding: "12px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/* ============================================================
    DESIGN TOKENS
 ============================================================ */
 // How many past program/target versions to keep for the Coach's undo/revert
@@ -3486,6 +3569,8 @@ Rules:
 - Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
+- "reply" must NEVER be left blank or missing, for any message, including a genuinely ambiguous one — a blank reply falls back to a generic "I didn't catch that" with no useful detail, which reads as broken. If a request is ambiguous (e.g. "make my split 5" could mean 5 exercises per day or 5 training days per week), say specifically what's unclear and ask the exact clarifying question that would resolve it — never a generic "mind rephrasing?".
+- If the user repeats or re-asserts a request you already explained isn't possible, don't just restate the same explanation again — that reads as not listening. Acknowledge they've asked again, keep the actual reason brief (one sentence, not the full explanation a second or third time), and lead with the concrete next step: the specific alternative(s) already available to them (extend the session length by a specific amount, accept fewer exercises with more day-to-day variety via rotation, drop a less important exercise to make room, etc.) — give them something to actually decide on, not another repeat of why not.
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - MINIMUM 4 exercises on any day you write into "program" or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.
 - HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
@@ -4792,6 +4877,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
 ============================================================ */
 export default function App() {
   const [account, setAccount] = useState(null);
+  useEffect(() => { setErrorLogUserId(account?.id || null); }, [account]);
   const [subscribed, setSubscribed] = useState(false);
   const [trialStartedAt, setTrialStartedAt] = useState(null);
   const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
