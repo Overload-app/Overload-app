@@ -47,6 +47,32 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // Splits third-party code (stable, rarely changes between deploys)
+        // away from app code (changes on every deploy) into its own chunk.
+        // On a repeat visit — the normal case for a workout app people
+        // open every session — the browser can reuse the cached vendor
+        // chunk across app updates instead of re-downloading it every
+        // single time alongside the app code that actually changed.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          // Split ONLY recharts (and its own dependency tree) into its own
+          // chunk — it's large and used exclusively by the Progress tab.
+          // Everything else (react, supabase-js, lucide-react) shares one
+          // vendor chunk; splitting react out further caused a circular
+          // chunk dependency (recharts' own react-smooth/react-transition-
+          // group sub-dependencies also match "react"), not worth the
+          // added complexity for what's already the bulk of the win.
+          if (id.includes("recharts") || id.includes("d3-") || id.includes("react-smooth") || id.includes("react-transition-group")) {
+            return "vendor-charts";
+          }
+          return "vendor";
+        },
+      },
+    },
+  },
   test: {
     // Plain node by default (fast, no DOM) — component test files opt into
     // jsdom individually via a `// @vitest-environment jsdom` comment.

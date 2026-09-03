@@ -75,7 +75,7 @@ export class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ minHeight: "100vh", minHeight: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#F3F4F6", padding: 28, textAlign: "center", fontFamily: "'Inter', sans-serif" }}>
+        <div style={{ minHeight: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#F3F4F6", padding: 28, textAlign: "center", fontFamily: "'Inter', sans-serif" }}>
           <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "0 0 8px", color: "#0D0E15" }}>Something went wrong.</h2>
           <p style={{ color: "#5B6470", fontSize: 14, maxWidth: 320, marginBottom: 20 }}>
             This has been logged — reloading the app should get you back to where you were. Your data is safe either way, it's saved as you go.
