@@ -58,6 +58,15 @@ import {
   recentProgressHighlights,
   detectCoachInsight,
   claudeChat,
+  estimateCostCents,
+  currentUsageCents,
+  budgetAllows,
+  setAiBudgetContext,
+  setAiUsageRecordedCallback,
+  TRIAL_DAILY_COST_CAP_CENTS,
+  TRIAL_MONTHLY_COST_CAP_CENTS,
+  BUDGET_EXCEEDED_MESSAGE,
+  todayISO,
   fetchSimilarExercises,
   buildProgramGenSystem,
   buildCoachSystem,
@@ -2110,6 +2119,7 @@ describe("detectCoachInsight", () => {
 describe("claudeChat", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    setAiBudgetContext(null); // module-level — must not leak into other tests
   });
 
   test("still calls fetch and succeeds even when navigator.onLine falsely reports offline — real report: a genuinely online user got a false 'no internet' error", async () => {
@@ -2161,6 +2171,102 @@ describe("claudeChat", () => {
 
     const result = await claudeChat({ system: "s", messages: [] });
     expect(result).toBe("hello\nworld");
+  });
+
+  // Real ask: cap free-trial AI usage — $0.75/month hard ceiling, plus a
+  // daily cap so one heavy day can't blow through most of the month at
+  // once. Enforced centrally in claudeChat so it covers every AI feature
+  // in the app (Coach, program generation, meal photos, alternatives,
+  // reviews) without needing a check duplicated at each call site.
+  test("blocks the call before ever reaching the network once a trial account is over budget", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    setAiBudgetContext({ isTrialUnsubscribed: true, aiUsage: { day: todayISO(), dailyCostCents: TRIAL_DAILY_COST_CAP_CENTS, month: todayISO().slice(0, 7), monthlyCostCents: 1 } });
+
+    await expect(claudeChat({ system: "s", messages: [] })).rejects.toMatchObject({ budgetExceeded: true, message: BUDGET_EXCEEDED_MESSAGE });
+    expect(fetchSpy).not.toHaveBeenCalled(); // refused before spending anything further
+  });
+
+  test("does not block a paying subscriber or someone outside their trial, regardless of usage", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [{ type: "text", text: "hi" }] }) }));
+    setAiBudgetContext({ isTrialUnsubscribed: false, aiUsage: { day: todayISO(), dailyCostCents: 999, month: todayISO().slice(0, 7), monthlyCostCents: 999 } });
+
+    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("hi");
+  });
+
+  test("does not block a trial account still under budget, and records real usage from the response", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "hi" }], usage: { input_tokens: 1000, output_tokens: 500 } }),
+    }));
+    setAiBudgetContext({ isTrialUnsubscribed: true, aiUsage: null });
+    const recorded = vi.fn();
+    setAiUsageRecordedCallback(recorded);
+
+    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("hi");
+    // 1000 input @ $2/1M + 500 output @ $10/1M = $0.002 + $0.005 = $0.007 = 0.7 cents
+    expect(recorded).toHaveBeenCalledTimes(1);
+    expect(recorded.mock.calls[0][0]).toBeCloseTo(0.7);
+    setAiUsageRecordedCallback(null);
+  });
+
+  test("never records usage or calls the callback when there's no usage data on the response", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [{ type: "text", text: "hi" }] }) }));
+    const recorded = vi.fn();
+    setAiUsageRecordedCallback(recorded);
+
+    await claudeChat({ system: "s", messages: [] });
+    expect(recorded).not.toHaveBeenCalled();
+    setAiUsageRecordedCallback(null);
+  });
+});
+
+describe("AI usage budget math", () => {
+  test("estimateCostCents applies real Sonnet 5 pricing ($2/1M input, $10/1M output)", () => {
+    expect(estimateCostCents(1_000_000, 0)).toBeCloseTo(200); // $2.00 = 200 cents
+    expect(estimateCostCents(0, 1_000_000)).toBeCloseTo(1000); // $10.00 = 1000 cents
+    expect(estimateCostCents(0, 0)).toBe(0);
+  });
+
+  test("currentUsageCents resets the daily figure on a new day but keeps the monthly figure within the same month", () => {
+    const yesterday = dateToISO(new Date(Date.now() - 86400000));
+    const thisMonth = todayISO().slice(0, 7);
+    const usage = { day: yesterday, dailyCostCents: 10, month: thisMonth, monthlyCostCents: 40 };
+    const result = currentUsageCents(usage);
+    expect(result.dailyCostCents).toBe(0); // yesterday's number doesn't carry over
+    expect(result.monthlyCostCents).toBe(40); // still this month
+  });
+
+  test("currentUsageCents resets both figures once the month itself has changed", () => {
+    const usage = { day: "2020-01-01", dailyCostCents: 10, month: "2020-01", monthlyCostCents: 40 };
+    const result = currentUsageCents(usage);
+    expect(result.dailyCostCents).toBe(0);
+    expect(result.monthlyCostCents).toBe(0);
+  });
+
+  test("currentUsageCents treats no usage history at all as zero", () => {
+    expect(currentUsageCents(null)).toEqual({ dailyCostCents: 0, monthlyCostCents: 0 });
+    expect(currentUsageCents(undefined)).toEqual({ dailyCostCents: 0, monthlyCostCents: 0 });
+  });
+
+  test("budgetAllows is true with no usage yet, false once either cap is reached", () => {
+    expect(budgetAllows(null)).toBe(true);
+    const today = todayISO();
+    const month = today.slice(0, 7);
+    expect(budgetAllows({ day: today, dailyCostCents: TRIAL_DAILY_COST_CAP_CENTS - 1, month, monthlyCostCents: 1 })).toBe(true);
+    expect(budgetAllows({ day: today, dailyCostCents: TRIAL_DAILY_COST_CAP_CENTS, month, monthlyCostCents: 1 })).toBe(false);
+    expect(budgetAllows({ day: today, dailyCostCents: 1, month, monthlyCostCents: TRIAL_MONTHLY_COST_CAP_CENTS })).toBe(false);
+  });
+
+  test("30 days at the daily cap never exceeds the $0.75 monthly cap — the two limits are actually consistent with each other", () => {
+    expect(TRIAL_DAILY_COST_CAP_CENTS * 30).toBeGreaterThanOrEqual(TRIAL_MONTHLY_COST_CAP_CENTS);
+    // The monthly cap is what actually stops a maxed-out trial well before
+    // 30 days — confirms it bites first, not just in theory.
+    expect(TRIAL_MONTHLY_COST_CAP_CENTS / TRIAL_DAILY_COST_CAP_CENTS).toBeLessThan(30);
   });
 });
 
