@@ -73,6 +73,28 @@ const DISTINGUISHING_TERMS = new Set([
   "hamstring", "ab", "abs", "core", "lat", "delt", "forearm", "neck", "hip",
 ]);
 
+// "leg" is commonly used as a generic stand-in for any lower-body isolation
+// exercise — an AI-generated "Seated Leg Extension" and a catalog entry
+// literally named "Quad Extension" describe the exact same machine, but
+// used to get rejected outright because "leg" and "quad" didn't literally
+// match. Real report: this exact exercise (one of the most common leg
+// exercises there is) had no demo video for anyone. The other
+// distinguishing terms don't have this generic/specific split (nobody
+// calls a bicep curl an "arm curl" in practice), so this stays narrowly
+// scoped to "leg" plus its actual lower-body sub-parts, not a general
+// term-grouping that would risk conflating genuinely different exercises.
+const LEG_SUBPARTS = new Set(["quad", "hamstring", "calf", "calve", "glute"]);
+function distinguishingTermsConflict(aTerms, bTerms) {
+  if (aTerms.length === 0 || bTerms.length === 0) return false;
+  for (const a of aTerms) {
+    for (const b of bTerms) {
+      if (a === b) return false;
+      if ((a === "leg" && LEG_SUBPARTS.has(b)) || (b === "leg" && LEG_SUBPARTS.has(a))) return false;
+    }
+  }
+  return true;
+}
+
 // candidates: [{ name_key, gif_url }]. Jaccard token overlap — deliberately
 // conservative (>0.5 = MORE than half the combined vocabulary between the
 // two names actually matches, not just a tie) because showing the WRONG
@@ -88,7 +110,7 @@ export function bestFuzzyMatch(query, candidates) {
     const cTokens = new Set(tokenize(c.name_key));
     if (cTokens.size === 0) continue;
     const cDistinguishing = [...cTokens].filter((t) => DISTINGUISHING_TERMS.has(t));
-    if (qDistinguishing.length > 0 && cDistinguishing.length > 0 && !qDistinguishing.some((t) => cDistinguishing.includes(t))) {
+    if (distinguishingTermsConflict(qDistinguishing, cDistinguishing)) {
       continue; // both name a body part/muscle group, and it's not the same one
     }
     let intersection = 0;

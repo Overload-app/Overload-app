@@ -91,4 +91,20 @@ describe("bestFuzzyMatch", () => {
     const gymCatalog = [{ name_key: "seated cable row machine", gif_url: "https://api.workoutxapp.com/v1/gifs/0900.gif" }];
     expect(bestFuzzyMatch("Seated Row", gymCatalog)).toBeNull();
   });
+
+  // Real, confirmed gap: "Seated Leg Extension" (one of the most common leg
+  // exercises there is) had no video anywhere, because "leg" and "quad"
+  // were treated as two different, conflicting body parts even though a
+  // leg extension IS a quad exercise — the catalog just names it more
+  // anatomically precisely than the generic, casual "leg" AI-generated
+  // programs tend to use.
+  test("treats 'leg' as compatible with its actual lower-body sub-parts (quad/hamstring/calf/glute)", () => {
+    const gymCatalog = [{ name_key: "seated quad extension machine", gif_url: "https://api.workoutxapp.com/v1/gifs/1000.gif" }];
+    expect(bestFuzzyMatch("Seated Leg Extension Machine", gymCatalog)?.name_key).toBe("seated quad extension machine");
+  });
+
+  test("still rejects two different specific lower-body sub-parts from matching each other", () => {
+    const gymCatalog = [{ name_key: "seated hamstring extension machine", gif_url: "https://api.workoutxapp.com/v1/gifs/1001.gif" }];
+    expect(bestFuzzyMatch("Seated Quad Extension Machine", gymCatalog)).toBeNull();
+  });
 });

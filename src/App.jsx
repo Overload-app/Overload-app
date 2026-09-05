@@ -192,34 +192,61 @@ const SHELL_CSS = `
 /* ============================================================
    CLAUDE API HELPERS
 ============================================================ */
-export const OFFLINE_MESSAGE = "No internet connection — try again once you're back online.";
+// Deliberately doesn't claim to know the user is offline — a plain fetch()
+// throw (the only signal available here) means "the request didn't
+// complete," which is just as often a dropped mobile connection, the PWA
+// getting backgrounded mid-request, or (see the timeout below) one that
+// simply took too long, as it is a genuine lack of connectivity. Real
+// report: this used to say "No internet connection" to someone who was
+// definitely online — telling a person confidently they aren't when they
+// are reads as broken, not helpful, so this only ever describes the
+// symptom (couldn't connect), never asserts the cause.
+export const OFFLINE_MESSAGE = "Having trouble connecting right now — check your connection and try again.";
+export const TIMEOUT_MESSAGE = "That took too long to respond — try sending that again.";
+const CLAUDE_REQUEST_TIMEOUT_MS = 45000;
 
 function offlineError() {
   const err = new Error(OFFLINE_MESSAGE);
   err.offline = true;
   return err;
 }
+function timeoutError() {
+  const err = new Error(TIMEOUT_MESSAGE);
+  err.timeout = true;
+  return err;
+}
 
 export async function claudeChat({ system, messages }) {
   // Deliberately NOT gated on navigator.onLine — it's a browser-reported
-  // flag, not a real connectivity check, and real report: a user got "No
-  // internet connection" while genuinely online (known flaky behavior,
-  // especially on mobile/PWA after the tab was backgrounded). The actual
-  // fetch() below is the real test; its catch block already produces the
-  // identical offlineError() for a genuine connectivity failure, so gating
-  // here first only added a way to be wrong, never a way to be right sooner.
+  // flag, not a real connectivity check. The actual fetch() below is the
+  // real test; its catch block already produces an error for a genuine
+  // connectivity failure, so gating here first only added a way to be
+  // wrong, never a way to be right sooner.
   let res;
+  // Real report: "Coach takes too long to respond sometimes" — with no
+  // timeout at all, a stalled request (a dropped connection that never
+  // formally errors, a slow upstream) could just hang indefinitely with
+  // no feedback and no way to know it had failed rather than still being
+  // in progress. Bounding it means a stuck request fails visibly, with an
+  // accurate "took too long" message instead of silence — or, worse,
+  // getting mislabeled as "offline" once it eventually did throw.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CLAUDE_REQUEST_TIMEOUT_MS);
   try {
     res = await fetch("/api/claude", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 6000, system, messages }),
+      signal: controller.signal,
     });
   } catch (networkErr) {
+    if (networkErr.name === "AbortError") throw timeoutError();
     // fetch() itself throws (rather than resolving with a bad status) for a
-    // genuine connectivity failure — DNS, connection refused, offline —
-    // as opposed to the server responding with an HTTP error.
+    // genuine connectivity failure — DNS, connection refused, dropped
+    // mid-request — as opposed to the server responding with an HTTP error.
     throw offlineError();
+  } finally {
+    clearTimeout(timeoutId);
   }
   if (!res.ok) {
     let detail = "";
@@ -2351,7 +2378,6 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: 1.5, fontWeight: 700, color: done ? T.good : T.charge }}>
           {done ? "REST COMPLETE" : "RESTING"}
         </div>
-        {!done && <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 1 }}>Keep browsing — this stays out of the way</div>}
       </div>
       {!done && (
         <button
@@ -2406,7 +2432,7 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
@@ -2424,9 +2450,18 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   // the app immediately shows the true remaining time, background gap and
   // all — the timer effectively keeps running the whole time, it just isn't
   // drawn while backgrounded.
-  const [rest, setRest] = useState(null);
+  // Seeded from the last autosave (see initialRest below) — same "swiping
+  // the app away lost my progress" complaint as the sets themselves, just
+  // for the rest countdown specifically: it lived only in this component's
+  // local state, so it was gone the instant the component unmounted,
+  // reload or not. Being endAt-based (absolute time), restoring it is as
+  // simple as handing the same object back in — no elapsed-time math
+  // needed, it was never paused in the first place.
+  const [rest, setRest] = useState(initialRest || null);
   const [restTick, setRestTick] = useState(0); // bumped to force a re-render; the real value always comes from Date.now() vs rest.endAt, never from this counter
   const restSecondsLeft = rest ? Math.max(0, Math.round((rest.endAt - Date.now()) / 1000)) : null;
+  const restRef = useRef(rest);
+  useEffect(() => { restRef.current = rest; }, [rest]);
   // Live "how long have I been at this" display in the header — same
   // absolute-timestamp technique as the rest timer above (immune to
   // background throttling), reusing the exact accumulateActiveSeconds()
@@ -2468,7 +2503,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
   useEffect(() => {
     if (!onAutoSave) return;
     function handleMaybeHidden() {
-      if (document.visibilityState === "hidden") onAutoSave(setsRef.current);
+      if (document.visibilityState === "hidden") onAutoSave(setsRef.current, restRef.current);
     }
     document.addEventListener("visibilitychange", handleMaybeHidden);
     window.addEventListener("pagehide", handleMaybeHidden);
@@ -2715,9 +2750,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       const copy = s.map((e) => ({ ...e, logged: e.logged.map((l) => ({ ...l })) }));
       const newVal = !copy[exIdx].logged[setIdx].done;
       copy[exIdx].logged[setIdx].done = newVal;
+      // Un-checking a set doesn't touch rest — carries the CURRENT value
+      // through unchanged, same "compute it here, don't read stale state
+      // back out" rule as everything else in this updater.
+      let newRest = restRef.current;
       if (newVal) {
         const restSeconds = copy[exIdx].rest;
-        setRest({ endAt: Date.now() + restSeconds * 1000, total: restSeconds });
+        newRest = { endAt: Date.now() + restSeconds * 1000, total: restSeconds };
+        setRest(newRest);
 
         // Real PR check, computed from the same copy the rest-timer read
         // above (the established safe pattern here — never read a value
@@ -2751,7 +2791,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       // event alone isn't a real guarantee. This way, at worst, only
       // whatever happened AFTER the last checkmark is ever at risk, not
       // the whole session.
-      onAutoSave?.(copy);
+      onAutoSave?.(copy, newRest);
       return copy;
     });
   }
@@ -2903,8 +2943,15 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
       {rest !== null && (
         <RestTimer
           seconds={restSecondsLeft} total={rest.total}
-          onAdd={() => setRest((r) => ({ ...r, endAt: r.endAt + 15000, total: r.total + 15 }))}
-          onSkip={() => setRest(null)}
+          onAdd={() => setRest((r) => {
+            const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
+            onAutoSave?.(setsRef.current, next);
+            return next;
+          })}
+          onSkip={() => {
+            setRest(null);
+            onAutoSave?.(setsRef.current, null);
+          }}
         />
       )}
 
@@ -2913,7 +2960,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
           <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Exit this workout?</h3>
           <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Save your progress to pick it back up later, or discard it completely.</p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
-            <Btn variant="accent" onClick={() => onSaveExit(sets)} style={{ width: "100%" }}>Save & exit</Btn>
+            <Btn variant="accent" onClick={() => onSaveExit(sets, rest)} style={{ width: "100%" }}>Save & exit</Btn>
             <Btn variant="ghost" onClick={() => setConfirmDiscard(true)} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
             <button onClick={() => setConfirmExit(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
           </div>
@@ -3013,7 +3060,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, on
                       not just the typed-custom-name path below. */}
                   {alternatives.length > 0 && (
                     <button
-                      onClick={() => onGoToCoach?.(sets)}
+                      onClick={() => onGoToCoach?.(sets, rest)}
                       style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "2px 0", textAlign: "center" }}
                     >
                       Don't like any of these? <span style={{ color: T.chargeDeep, fontWeight: 700 }}>Talk to the Coach about other options</span>
@@ -3904,7 +3951,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       const parsed = parseJSONLoose(raw);
       setSuggestions(parsed.suggestions || []);
     } catch (e) {
-      setSuggestError(e.offline ? OFFLINE_MESSAGE : "Couldn't get suggestions — try again.");
+      setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Couldn't get suggestions — try again.");
     } finally {
       setSuggestLoading(false);
     }
@@ -5034,6 +5081,20 @@ export default function App() {
 
     const { data: listener } = supabase.auth.onAuthStateChange((event) => {
       if (event === "SIGNED_OUT") {
+        // A genuine, user-initiated sign-out is already handled directly
+        // by handleLogout() itself, right where it calls
+        // supabase.auth.signOut() — it doesn't depend on this event
+        // firing at all. This branch only exists to catch OTHER causes
+        // (a session invalidated or expired elsewhere). Real report:
+        // workout progress was lost specifically when disconnecting wifi
+        // mid-workout — supabase-js can emit SIGNED_OUT on its own when a
+        // background token refresh fails outright while offline, with no
+        // real sign-out having happened. Wiping account/state right then
+        // would destroy an active workout over nothing but a network
+        // blip, and it's already saved locally either way (see saveState)
+        // — refusing to wipe it here costs nothing but a stale screen
+        // until the next real check, which is the far cheaper mistake.
+        if (stateRef.current?.inProgressWorkout) return;
         setAccount(null);
         setState(null);
         setSubscribed(false);
@@ -5344,7 +5405,7 @@ export default function App() {
       });
     } catch (e) {
       console.error("Coach send failed:", e);
-      const failText = e.offline ? OFFLINE_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
+      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
       persist((prev) => ({ ...prev, coachChat: [...withUser, { role: "assistant", text: failText }] }));
     } finally {
       setCoachLoading(false);
@@ -5533,9 +5594,9 @@ export default function App() {
   // when this active stretch started) — never from whatever
   // state.inProgressWorkout.activeSeconds currently says, since that
   // itself gets overwritten by every save and would otherwise compound.
-  function saveWorkoutProgress(dayIdx, sets) {
+  function saveWorkoutProgress(dayIdx, sets, rest) {
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds } }));
     setSession(null);
   }
 
@@ -5547,10 +5608,10 @@ export default function App() {
   // except an explicit "Save & exit" tap; just swiping the whole app away
   // never triggered any save at all, only local React state that vanishes
   // the moment the tab is suspended.
-  function autoSaveWorkoutProgress(dayIdx, sets) {
+  function autoSaveWorkoutProgress(dayIdx, sets, rest) {
     if (!session) return;
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, savedAt: new Date().toISOString(), activeSeconds } }));
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds } }));
   }
 
   // "Don't like any of these? Talk to the Coach" — same save as
@@ -5558,9 +5619,9 @@ export default function App() {
   // leaves the workout screen and switches to Coach, since there's no way
   // to actually have that conversation while the full-screen workout
   // overlay is still up.
-  function goToCoachFromWorkout(sets) {
+  function goToCoachFromWorkout(sets, rest) {
     if (!session) return;
-    autoSaveWorkoutProgress(session.dayIdx, sets);
+    autoSaveWorkoutProgress(session.dayIdx, sets, rest);
     setSession(null);
     setActiveTab("coach");
   }
@@ -5918,10 +5979,11 @@ export default function App() {
           resumedAt={session.resumedAt}
           priorActiveSeconds={session.baselineActiveSeconds || 0}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
+          initialRest={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.rest : null}
           onFinish={finishWorkout}
           onCancel={discardWorkoutProgress}
-          onSaveExit={(sets) => saveWorkoutProgress(session.dayIdx, sets)}
-          onAutoSave={(sets) => autoSaveWorkoutProgress(session.dayIdx, sets)}
+          onSaveExit={(sets, rest) => saveWorkoutProgress(session.dayIdx, sets, rest)}
+          onAutoSave={(sets, rest) => autoSaveWorkoutProgress(session.dayIdx, sets, rest)}
           onGoToCoach={goToCoachFromWorkout}
           equipment={state.profile.equipment}
           injuries={state.profile.injuries}

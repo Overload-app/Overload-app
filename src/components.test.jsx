@@ -1006,6 +1006,69 @@ describe("<WorkoutSession /> timers survive being backgrounded", () => {
   });
 });
 
+describe("<WorkoutSession /> rest timer survives a reload/swipe-away", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Back Squat", sets: 1, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] }] };
+
+  // Real ask: "rest timer should still be there even if you swipe out of
+  // app or reload." Before this, rest lived only in local component
+  // state — gone the instant the component unmounted, unlike the sets
+  // themselves which already autosaved. initialRest is what a reload
+  // resumes from (the same endAt-based object, handed straight back in —
+  // no elapsed-time math needed since it was never paused to begin with).
+  test("resumes a running rest countdown from initialRest instead of starting with no timer at all", () => {
+    const endAt = Date.now() + 40000;
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        initialRest={{ endAt, total: 60 }}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.getByText("RESTING")).toBeInTheDocument();
+    expect(screen.getByText("40")).toBeInTheDocument();
+  });
+
+  test("starting a rest timer autosaves it (second onAutoSave argument), so a reload has it to restore", async () => {
+    const user = userEvent.setup();
+    const onAutoSave = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+
+    expect(onAutoSave).toHaveBeenCalledTimes(1);
+    const [, savedRest] = onAutoSave.mock.calls[0];
+    expect(savedRest).toMatchObject({ total: 60 });
+  });
+
+  test("adding 15s or skipping also autosaves the updated rest state", async () => {
+    const user = userEvent.setup();
+    const onAutoSave = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    onAutoSave.mockClear();
+
+    await user.click(screen.getByLabelText("Add 15 seconds to rest"));
+    expect(onAutoSave).toHaveBeenCalledTimes(1);
+    expect(onAutoSave.mock.calls[0][1]).toMatchObject({ total: 75 });
+
+    await user.click(screen.getByText(/Skip/));
+    expect(onAutoSave).toHaveBeenCalledTimes(2);
+    expect(onAutoSave.mock.calls[1][1]).toBeNull();
+  });
+});
+
 describe("<WorkoutSession /> resuming reflects a Coach change made while saved", () => {
   test("resuming with a saved snapshot of the OLD exercise still shows the NEW one from a fresh todayOverride", () => {
     // day.exercises is what the parent passes in fresh at mount time — by

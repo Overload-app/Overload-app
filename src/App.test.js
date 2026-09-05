@@ -2163,6 +2163,35 @@ describe("claudeChat", () => {
     const result = await claudeChat({ system: "s", messages: [] });
     expect(result).toBe("hello\nworld");
   });
+
+  // Real ask: "Coach takes too long to respond sometimes." With no bound
+  // at all, a hung request just sat there forever with no feedback. This
+  // also matters for the OTHER real complaint ("says not online when I am
+  // online") — a request that hangs and eventually fails used to get
+  // lumped in with a genuine connectivity failure; a timeout is reported
+  // as its own distinct thing instead.
+  test("aborts and reports a timeout (distinct from 'offline') when the request hangs too long", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn((url, opts) => new Promise((resolve, reject) => {
+        opts.signal.addEventListener("abort", () => {
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        });
+      })));
+
+      const promise = claudeChat({ system: "s", messages: [] });
+      const assertion = expect(promise).rejects.toMatchObject({ timeout: true });
+      await vi.advanceTimersByTimeAsync(45000);
+      await assertion;
+      const caught = await promise.catch((e) => e);
+      expect(caught.offline).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("fetchExerciseGif", () => {
