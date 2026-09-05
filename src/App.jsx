@@ -410,7 +410,14 @@ export async function fetchExerciseGif(name) {
     if (data?.matchCount === 0) {
       console.warn(`Exercise GIF lookup: no WorkoutX match for "${name}"`);
     }
-    return { gifUrl: data?.gifUrl || null, confirmed: true, offline: false };
+    // source passed through so callers can tell an exact/confirmed answer
+    // (this name matched a real catalog entry or a live search for THIS
+    // exact string) from a "fuzzy-cache" one (WorkoutX's best approximate
+    // guess for a DIFFERENT, similarly-worded name) — an important
+    // distinction for a raw, user-typed exercise name specifically (see
+    // the custom-alternative flow), where an approximate guess isn't
+    // trustworthy enough to silently show as if it were confirmed.
+    return { gifUrl: data?.gifUrl || null, confirmed: true, offline: false, source: data?.source };
   } catch (e) {
     console.warn(`Exercise GIF lookup threw for "${name}":`, e.message);
     return { gifUrl: null, confirmed: false, offline: true };
@@ -2519,10 +2526,25 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
   const [swapPickerIdx, setSwapPickerIdx] = useState(null); // index of the exercise currently picking an alternative for
   const [selectedAlt, setSelectedAlt] = useState(null); // alternative exercise name chosen, awaiting today/permanent choice
+  // Set alongside selectedAlt specifically when the person typed a custom
+  // name that only found an untrustworthy FUZZY video match, was offered a
+  // more specific real alternative instead, and chose to keep their own
+  // text anyway — see confirmCustomAlt. Marks the resulting exercise so it
+  // never shows that (unverified, possibly-wrong-variant) video, even
+  // though the exact same name string might genuinely have one for
+  // someone who actually meant that specific exercise.
+  const [selectedAltSkipVideo, setSelectedAltSkipVideo] = useState(false);
   const [showCustomAlt, setShowCustomAlt] = useState(false); // "none of these" typed-in-your-own mode
   const [customAlt, setCustomAlt] = useState("");
   const [customAltChecking, setCustomAltChecking] = useState(false);
   const [customAltNoVideo, setCustomAltNoVideo] = useState(null); // the name a "no video available" warning is currently showing for, or null
+  // A more specific, catalog-style alternative the AI suggested because the
+  // typed name only fuzzy-matched (or didn't match at all) — see
+  // confirmCustomAlt. Real ask: "the ai should give you similar exercises
+  // so it can use the video" instead of showing a video for just any
+  // same-ish-named exercise (e.g. "calf raise" shouldn't silently borrow
+  // whichever specific calf raise variant WorkoutX's fuzzy match guessed).
+  const [customAltSuggestion, setCustomAltSuggestion] = useState(null); // { name } | null
   const [pickerAlts, setPickerAlts] = useState([]); // resolved alternatives list for the open picker
   const [pickerUpgrading, setPickerUpgrading] = useState(false); // a background live lookup is running to possibly improve on the instantly-shown quick suggestions
   const [pickerOffline, setPickerOffline] = useState(false); // true when the live lookup failed specifically because of connectivity
@@ -2595,33 +2617,71 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   // reflected right away, mid-workout, without waiting on a re-render from
   // the parent) and separately persists it — "today" only or permanently —
   // via the callback the parent provides.
-  // Real ask: "explain that their own won't have an instructional video."
-  // Checks the real GIF catalog before actually committing to a typed-in
-  // custom exercise — if it's confirmed to have no match, shows a plain
-  // warning and requires one more explicit tap to proceed anyway, rather
-  // than silently swapping to something that'll show "unavailable" the
-  // first time they open it mid-workout. Doesn't block on an unconfirmed/
-  // offline check — only a REAL confirmed miss holds it up.
+  // Real ask: "explain that their own won't have an instructional video" —
+  // and separately, "the ai should give you similar exercises so it can
+  // use the video" rather than silently borrowing whichever specific
+  // variant WorkoutX's fuzzy matcher guessed for an ambiguous typed name
+  // (e.g. "calf raise" isn't confirmed to be the SAME calf raise the
+  // fuzzy match happened to find). Checks the real GIF catalog first —
+  // only a genuine, non-fuzzy match (this exact string, confirmed) is
+  // trusted silently. Anything else asks the AI for a specific, catalog-
+  // style alternative that DOES have a confirmed video and offers it
+  // before falling back to the plain "no video, use anyway" warning.
   async function confirmCustomAlt() {
     const name = customAlt.trim();
     if (!name) return;
-    if (customAltNoVideo === name) {
-      // Already warned about this exact name — proceeding is the second,
-      // explicit tap.
+    if (customAltNoVideo === name || customAltSuggestion) {
+      // Already warned (no usable video found anywhere) or already shown
+      // a suggestion — this tap means "use my own text as typed," the
+      // second, explicit confirmation either way. If a suggestion had
+      // been offered and declined, don't let this exercise use whatever
+      // fuzzy video was originally found for it — that guess was never
+      // confirmed to be the specific thing meant here.
+      setSelectedAltSkipVideo(!!customAltSuggestion);
       setSelectedAlt(name);
       return;
     }
     setCustomAltChecking(true);
-    const { gifUrl, confirmed } = await fetchExerciseGif(name);
-    setCustomAltChecking(false);
-    if (confirmed && !gifUrl) {
-      setCustomAltNoVideo(name);
+    const { gifUrl, confirmed, source } = await fetchExerciseGif(name);
+    // Doesn't block on an UNCONFIRMED check (offline, a transient failure)
+    // — only a genuinely confirmed answer (a real match, a real miss, or
+    // only a fuzzy guess) is worth holding up on. Same reasoning as the
+    // original "no video" warning below: an uncertain answer isn't a
+    // reason to get in the way, only a real one is.
+    if (!confirmed) {
+      setCustomAltChecking(false);
+      setSelectedAltSkipVideo(false);
+      setSelectedAlt(name);
       return;
     }
-    setSelectedAlt(name);
+    if (gifUrl && source !== "fuzzy-cache") {
+      // A real, exact match for this specific string — trustworthy as-is.
+      setCustomAltChecking(false);
+      setSelectedAltSkipVideo(false);
+      setSelectedAlt(name);
+      return;
+    }
+    // No confirmed exact video (or only an unreliable fuzzy guess) — see
+    // if the AI can point at a specific real exercise that DOES have one.
+    try {
+      const alts = await fetchSimilarExercises(name, equipment, injuries);
+      for (const alt of alts || []) {
+        const check = await fetchExerciseGif(alt);
+        if (check.confirmed && check.gifUrl && check.source !== "fuzzy-cache") {
+          setCustomAltChecking(false);
+          setCustomAltSuggestion({ name: alt });
+          return;
+        }
+      }
+    } catch (e) {
+      // Offline, or the AI call failed — fall through to the plain
+      // "no video available" warning below; still lets them proceed.
+    }
+    setCustomAltChecking(false);
+    setCustomAltNoVideo(name);
   }
 
-  function applySwap(exIdx, newName, scope) {
+  function applySwap(exIdx, newName, scope, skipVideoLookup) {
     setSets((s) => {
       const copy = [...s];
       const old = copy[exIdx];
@@ -2630,6 +2690,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         reps: old.reps,
         rest: old.rest,
         tips: tipsForExercise(newName),
+        noVideoLookup: !!skipVideoLookup,
         // A different exercise means previously logged weight/reps for the
         // OLD one don't carry over — but if the NEW one has its own
         // history, pre-fill from that instead of starting blank.
@@ -2637,9 +2698,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       };
       return copy;
     });
-    onSwapExercise(exIdx, newName, scope);
+    onSwapExercise(exIdx, newName, scope, skipVideoLookup);
     setSwapPickerIdx(null);
     setSelectedAlt(null);
+    setSelectedAltSkipVideo(false);
+    setCustomAltSuggestion(null);
   }
 
   // Tips are baked into the exercise data at program-generation time (see
@@ -2694,6 +2757,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   // instead of a small inline expand.
   function openExerciseInfo(exIdx, name) {
     setExerciseInfoIdx(exIdx);
+    // A raw custom name marked noVideoLookup deliberately never gets
+    // looked up — see confirmCustomAlt. The exact same name string might
+    // genuinely have a confirmed video for someone else's more specific
+    // exercise, so this can't just rely on the shared, name-keyed
+    // gifCache; it has to skip the lookup for THIS exercise slot
+    // specifically, regardless of what that cache says.
+    if (sets[exIdx]?.noVideoLookup) return;
     const key = normalizeGifKey(name);
     // Real usage data: the same exercise appearing on more than one day of
     // a program (very common) used to trigger a separate fetch for each
@@ -2875,7 +2945,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                 <ChevronRight size={13} />
               </button>
               <button
-                onClick={() => { setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setSwapPickerIdx(exIdx); }}
+                onClick={() => { setSelectedAlt(null); setSelectedAltSkipVideo(false); setShowCustomAlt(false); setCustomAlt(""); setCustomAltNoVideo(null); setCustomAltSuggestion(null); setSwapPickerIdx(exIdx); }}
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
               >
                 <Repeat size={13} /> Find alternative
@@ -2984,7 +3054,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       {swapPickerIdx !== null && (() => {
         const current = sets[swapPickerIdx];
         const alternatives = pickerAlts;
-        function close() { setSwapPickerIdx(null); setSelectedAlt(null); setShowCustomAlt(false); setCustomAlt(""); setCustomAltNoVideo(null); }
+        function close() { setSwapPickerIdx(null); setSelectedAlt(null); setSelectedAltSkipVideo(false); setShowCustomAlt(false); setCustomAlt(""); setCustomAltNoVideo(null); setCustomAltSuggestion(null); }
         return (
           <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
             <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -3006,13 +3076,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                     </ul>
                   </Card>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    <Btn variant="accent" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "today")}>
+                    <Btn variant="accent" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "today", selectedAltSkipVideo)}>
                       Just for today
                     </Btn>
-                    <Btn variant="ghost" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "permanent")}>
+                    <Btn variant="ghost" style={{ width: "100%" }} onClick={() => applySwap(swapPickerIdx, selectedAlt, "permanent", selectedAltSkipVideo)}>
                       Permanently, going forward
                     </Btn>
-                    <button onClick={() => setSelectedAlt(null)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 13, cursor: "pointer", padding: "8px 0" }}>
+                    <button onClick={() => { setSelectedAlt(null); setSelectedAltSkipVideo(false); }} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 13, cursor: "pointer", padding: "8px 0" }}>
                       Choose a different exercise
                     </button>
                   </div>
@@ -3077,17 +3147,29 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                       </label>
                       <input
                         value={customAlt}
-                        onChange={(e) => { setCustomAlt(e.target.value); setCustomAltNoVideo(null); }}
+                        onChange={(e) => { setCustomAlt(e.target.value); setCustomAltNoVideo(null); setCustomAltSuggestion(null); }}
                         placeholder="e.g. Cable Fly" autoFocus
                         style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 15, boxSizing: "border-box", marginBottom: 10 }}
                       />
-                      {customAltNoVideo === customAlt.trim() && (
+                      {customAltSuggestion ? (
+                        <>
+                          <p style={{ fontSize: 12, color: T.steelDark, margin: "0 0 10px", lineHeight: 1.4 }}>
+                            "{customAlt.trim()}" only loosely matches a video, so it might not be the exact one you mean — <strong>{customAltSuggestion.name}</strong> is a specific match with a confirmed video available.
+                          </p>
+                          <Btn
+                            variant="accent" style={{ width: "100%", marginBottom: 8 }}
+                            onClick={() => { setSelectedAltSkipVideo(false); setSelectedAlt(customAltSuggestion.name); }}
+                          >
+                            Use "{customAltSuggestion.name}" instead
+                          </Btn>
+                        </>
+                      ) : customAltNoVideo === customAlt.trim() && (
                         <p style={{ fontSize: 12, color: T.warn, margin: "0 0 10px", lineHeight: 1.4 }}>
                           Heads up — "{customAltNoVideo}" doesn't have an instructional video available. You can still use it; just tap below again to confirm.
                         </p>
                       )}
-                      <Btn variant="accent" style={{ width: "100%" }} disabled={!customAlt.trim() || customAltChecking} onClick={confirmCustomAlt}>
-                        {customAltChecking ? "Checking…" : customAltNoVideo === customAlt.trim() ? "Use it anyway" : "Use this exercise"}
+                      <Btn variant={customAltSuggestion ? "ghost" : "accent"} style={{ width: "100%" }} disabled={!customAlt.trim() || customAltChecking} onClick={confirmCustomAlt}>
+                        {customAltChecking ? "Checking…" : customAltSuggestion ? `Use "${customAlt.trim()}" as typed` : customAltNoVideo === customAlt.trim() ? "Use it anyway" : "Use this exercise"}
                       </Btn>
                     </div>
                   ) : (
@@ -3128,7 +3210,15 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                 desktop window. */}
             <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
               <div style={{ maxWidth: 480, margin: "0 auto" }}>
-              {gifLoading[key] ? (
+              {ex.noVideoLookup ? (
+                // Deliberately never checked — see confirmCustomAlt. The
+                // exact same name might have a real video for a different,
+                // more specific exercise; showing it here would be
+                // guessing, not confirming.
+                <Card style={{ marginBottom: 14 }}>
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Instructional video unavailable for this exercise.</span>
+                </Card>
+              ) : gifLoading[key] ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: T.steelDark, marginBottom: 14 }}>
                   <Loader2 size={16} className="spin" /> Loading demo…
                 </div>
@@ -5572,12 +5662,12 @@ export default function App() {
   // automatically when the workout finishes, same as a Coach one-time
   // swap); "permanent" updates the actual program going forward,
   // snapshotted into history so it's revertible like any other program change.
-  function swapExercise(dayIdx, exIdx, newExerciseName, scope) {
+  function swapExercise(dayIdx, exIdx, newExerciseName, scope, skipVideoLookup) {
     persist((prev) => {
       const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
       const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
       const newExercises = baseExercises.map((ex, i) =>
-        i === exIdx ? { name: newExerciseName, sets: ex.sets, reps: ex.reps, rest: ex.rest, tips: tipsForExercise(newExerciseName) } : ex
+        i === exIdx ? { name: newExerciseName, sets: ex.sets, reps: ex.reps, rest: ex.rest, tips: tipsForExercise(newExerciseName), noVideoLookup: !!skipVideoLookup } : ex
       );
 
       if (scope === "today") {
@@ -6018,7 +6108,7 @@ export default function App() {
           onGoToCoach={goToCoachFromWorkout}
           equipment={state.profile.equipment}
           injuries={state.profile.injuries}
-          onSwapExercise={(exIdx, newName, scope) => swapExercise(session.dayIdx, exIdx, newName, scope)}
+          onSwapExercise={(exIdx, newName, scope, skipVideoLookup) => swapExercise(session.dayIdx, exIdx, newName, scope, skipVideoLookup)}
           onCacheAlternatives={(exIdx, alts) => cacheAlternatives(session.dayIdx, exIdx, alts)}
           gifCache={state.gifCache || {}}
           onCacheGif={cacheGif}

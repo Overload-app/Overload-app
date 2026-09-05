@@ -1321,6 +1321,32 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // Real ask: a raw custom exercise name that declined an AI-suggested,
+  // confirmed-video alternative should never show a video — even if the
+  // shared, name-keyed gifCache happens to already have one for that exact
+  // string (e.g. from a different, more specific exercise someone else
+  // verified). This is what makes that guarantee actually hold.
+  test("an exercise marked noVideoLookup never shows a video, even with one cached under that same name", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", fetchSpy);
+    const dayOverride = { name: "Full Body A", exercises: [{ name: "Calf Raise", sets: 1, reps: "8-12", rest: 90, tips: ["a"] }] };
+    const initialSets = [{ name: "Calf Raise", reps: "8-12", rest: 90, tips: ["a"], noVideoLookup: true, logged: [{ weight: "", reps: "", done: false }] }];
+    render(
+      <WorkoutSession
+        day={dayOverride} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={initialSets}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+        gifCache={{ "calf raise": "https://api.workoutxapp.com/v1/gifs/9999.gif" }} onCacheGif={vi.fn()}
+      />
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByText("How to do it"));
+    expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
+    expect(screen.queryByAltText("Calf Raise demonstration")).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled(); // never even attempts a lookup
+  });
+
   // No Retry here, deliberately — a confirmed "no match" isn't a glitch,
   // so retrying would just spend another shared WorkoutX request (a real
   // account-wide, not per-user, 500/month quota) on the same answer.
@@ -1479,7 +1505,7 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
     await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Landmine Press");
     await user.click(screen.getByText("Use this exercise"));
     await user.click(screen.getByText("Just for today"));
-    expect(onSwapExercise).toHaveBeenCalledWith(0, "Landmine Press", "today");
+    expect(onSwapExercise).toHaveBeenCalledWith(0, "Landmine Press", "today", false);
   });
 
   test("'Use this exercise' is disabled until something is typed", async () => {
@@ -1511,7 +1537,7 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
 
       await user.click(screen.getByText("Use it anyway"));
       await user.click(screen.getByText("Just for today"));
-      expect(onSwapExercise).toHaveBeenCalledWith(0, "Made-Up Exercise", "today");
+      expect(onSwapExercise).toHaveBeenCalledWith(0, "Made-Up Exercise", "today", false);
     });
 
     test("a confirmed real match proceeds straight through with no warning", async () => {
@@ -1540,6 +1566,63 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
       await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "!");
       expect(screen.queryByText(/doesn't have an instructional video/)).not.toBeInTheDocument();
       expect(screen.getByText("Use this exercise")).toBeInTheDocument(); // back to the normal label
+    });
+
+    // Real ask: "the ai should give you similar exercises so it can use
+    // the video" — a generic typed name (e.g. "calf raise") shouldn't
+    // silently borrow whichever specific variant WorkoutX's fuzzy matcher
+    // happened to guess; it should offer a specific, confirmed alternative
+    // instead.
+    test("a fuzzy-only match offers a specific AI-suggested alternative instead of proceeding silently", async () => {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn((url) => {
+        const u = String(url);
+        if (u.includes("/api/exercise-gif")) {
+          if (u.includes("Standing")) {
+            return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/exact.gif", matchCount: 1, source: "cache" }) });
+          }
+          return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/fuzzy.gif", matchCount: 1, source: "fuzzy-cache" }) });
+        }
+        if (u.includes("/api/claude")) {
+          return Promise.resolve({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify({ alternatives: ["Standing Calf Raise"] }) }] }) });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }));
+      const { user } = setup();
+      await user.click(screen.getByText("Find alternative"));
+      await user.click(screen.getByText("None of these — request my own"));
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Calf Raise");
+      await user.click(screen.getByText("Use this exercise"));
+
+      expect(await screen.findByText('Use "Standing Calf Raise" instead')).toBeInTheDocument();
+      expect(screen.queryByText("Just for today")).not.toBeInTheDocument(); // not swapped yet
+    });
+
+    test("declining the suggestion keeps the typed name, but marks it to never show a (possibly wrong) video", async () => {
+      vi.stubGlobal("navigator", { onLine: true });
+      vi.stubGlobal("fetch", vi.fn((url) => {
+        const u = String(url);
+        if (u.includes("/api/exercise-gif")) {
+          if (u.includes("Standing")) {
+            return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/exact.gif", matchCount: 1, source: "cache" }) });
+          }
+          return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/fuzzy.gif", matchCount: 1, source: "fuzzy-cache" }) });
+        }
+        if (u.includes("/api/claude")) {
+          return Promise.resolve({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify({ alternatives: ["Standing Calf Raise"] }) }] }) });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }));
+      const { user, onSwapExercise } = setup();
+      await user.click(screen.getByText("Find alternative"));
+      await user.click(screen.getByText("None of these — request my own"));
+      await user.type(screen.getByPlaceholderText("e.g. Cable Fly"), "Calf Raise");
+      await user.click(screen.getByText("Use this exercise"));
+      await screen.findByText('Use "Standing Calf Raise" instead');
+
+      await user.click(screen.getByText('Use "Calf Raise" as typed'));
+      await user.click(screen.getByText("Just for today"));
+      expect(onSwapExercise).toHaveBeenCalledWith(0, "Calf Raise", "today", true);
     });
   });
 });
