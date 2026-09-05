@@ -2297,7 +2297,7 @@ describe("fetchSimilarExercises", () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Leg Press", "Hack Squat", "Goblet Squat"]}' }] }),
+      json: async () => ({ alternatives: ["Leg Press", "Hack Squat", "Goblet Squat"], source: "live" }),
     }));
 
     const alts = await fetchSimilarExercises("Back Squat", "full", []);
@@ -2308,7 +2308,7 @@ describe("fetchSimilarExercises", () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: '{"somethingElse": true}' }] }),
+      json: async () => ({ somethingElse: true }),
     }));
 
     expect(await fetchSimilarExercises("Back Squat", "full", [])).toEqual([]);

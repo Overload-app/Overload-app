@@ -424,13 +424,31 @@ export async function fetchExerciseGif(name) {
   }
 }
 
+// Routed through a dedicated server endpoint (not claudeChat/api/claude
+// directly) because the answer is shared, cross-account cacheable —
+// "Bench Press" alternatives for someone with a full gym and no injuries
+// is realistically the same answer for every account that ever asks, so
+// the server checks a global cache before ever spending a real Claude
+// call (see api/exercise-alternatives.js and its migration file). Real
+// ask: "optimize it to save things like alternative workouts across the
+// network... save credits on the ai."
 export async function fetchSimilarExercises(name, equipment, injuries) {
-  const equipDesc = equipment === "full" ? "a fully-equipped gym (barbells, dumbbells, machines, cables)" : equipment === "dumbbell" ? "dumbbells only" : "bodyweight only, no equipment";
-  const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest exactly 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part"). Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
-  const userMsg = `Exercise: ${name}. Available equipment: ${equipDesc}. Injuries/areas to avoid: ${(injuries || []).join(", ") || "none"}.`;
-  const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
-  const parsed = parseJSONLoose(raw);
-  return Array.isArray(parsed.alternatives) ? parsed.alternatives : [];
+  const params = new URLSearchParams({ name, equipment: equipment || "full", injuries: (injuries || []).join(",") });
+  let res;
+  try {
+    res = await fetch(`/api/exercise-alternatives?${params.toString()}`);
+  } catch (networkErr) {
+    // Same reasoning as claudeChat/fetchExerciseGif — a genuine fetch()
+    // throw (not just a bad HTTP status) is the real connectivity signal.
+    throw offlineError();
+  }
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json())?.error || ""; } catch (e) {}
+    throw new Error(detail || `API error ${res.status}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data.alternatives) ? data.alternatives : [];
 }
 
 /* ============================================================

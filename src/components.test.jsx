@@ -1583,8 +1583,8 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
           }
           return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/fuzzy.gif", matchCount: 1, source: "fuzzy-cache" }) });
         }
-        if (u.includes("/api/claude")) {
-          return Promise.resolve({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify({ alternatives: ["Standing Calf Raise"] }) }] }) });
+        if (u.includes("/api/exercise-alternatives")) {
+          return Promise.resolve({ ok: true, json: async () => ({ alternatives: ["Standing Calf Raise"] }) });
         }
         return Promise.resolve({ ok: true, json: async () => ({}) });
       }));
@@ -1608,8 +1608,8 @@ describe("<WorkoutSession /> 'find alternative' — request my own exercise", ()
           }
           return Promise.resolve({ ok: true, json: async () => ({ gifUrl: "https://api.workoutxapp.com/v1/gifs/fuzzy.gif", matchCount: 1, source: "fuzzy-cache" }) });
         }
-        if (u.includes("/api/claude")) {
-          return Promise.resolve({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify({ alternatives: ["Standing Calf Raise"] }) }] }) });
+        if (u.includes("/api/exercise-alternatives")) {
+          return Promise.resolve({ ok: true, json: async () => ({ alternatives: ["Standing Calf Raise"] }) });
         }
         return Promise.resolve({ ok: true, json: async () => ({}) });
       }));
@@ -1666,7 +1666,7 @@ describe("<WorkoutSession /> 'find alternative' — instant quick suggestions, b
   test("silently upgrades to the AI's suggestions once the background lookup resolves", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Landmine Press"]}' }] }),
+      ok: true, json: async () => ({ alternatives: ["Landmine Press"] }),
     }));
     const user = setup();
 
@@ -1722,7 +1722,7 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
   // there either way; this covers the softer wording and the new retry.
   test("an empty live lookup shows a softer message with a working Retry, not a hard equipment claim", async () => {
     vi.stubGlobal("navigator", { onLine: true });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": []}' }] }) }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ alternatives: [] }) }));
     const user = setup();
 
     await user.click(screen.getByText("Find alternative"));
@@ -1735,8 +1735,8 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
   test("clicking Try again re-runs the lookup and shows real suggestions if the retry succeeds", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     const fetchSpy = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": []}' }] }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ content: [{ type: "text", text: '{"alternatives": ["Incline Dumbbell Press"]}' }] }) });
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ alternatives: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ alternatives: ["Incline Dumbbell Press"] }) });
     vi.stubGlobal("fetch", fetchSpy);
     const user = setup();
 
