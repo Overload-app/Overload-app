@@ -203,7 +203,15 @@ const SHELL_CSS = `
 // symptom (couldn't connect), never asserts the cause.
 export const OFFLINE_MESSAGE = "Having trouble connecting right now — check your connection and try again.";
 export const TIMEOUT_MESSAGE = "That took too long to respond — try sending that again.";
-const CLAUDE_REQUEST_TIMEOUT_MS = 45000;
+// Real report: a Coach permanent-change request timed out ("That took too
+// long to respond"). A permanent change means echoing back the ENTIRE
+// program — every day, every exercise, each with 4 tips + 3 alternatives —
+// not just the one exercise that actually changed. For a program with
+// several days and several exercises each, that's a genuinely large
+// generation (thousands of output tokens), which can legitimately take
+// longer than a quick chat reply and is more likely to brush up against
+// max_tokens. 45s was tuned for typical replies, not this heavier case.
+const CLAUDE_REQUEST_TIMEOUT_MS = 60000;
 
 function offlineError() {
   const err = new Error(OFFLINE_MESSAGE);
@@ -236,7 +244,14 @@ export async function claudeChat({ system, messages }) {
     res = await fetch("/api/claude", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 6000, system, messages }),
+      // A full permanent-program-change response echoes back every day and
+      // every exercise (each with 4 tips + 3 alternatives), not just
+      // whatever actually changed — a real multi-day program can genuinely
+      // approach 6000 tokens there, risking a truncated, unparseable
+      // response for exactly the accounts with the most content (i.e. the
+      // most engaged users). Same margin applied everywhere claudeChat is
+      // used (onboarding program generation has the identical shape).
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8000, system, messages }),
       signal: controller.signal,
     });
   } catch (networkErr) {
@@ -3713,6 +3728,8 @@ There are TWO different kinds of training requests — telling them apart matter
 2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, set "program" to null (do NOT echo the current program back — it's unused and just wastes space), and instead put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
 
 Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else changes, "targets" stays null too since a temporary knee-friendly swap doesn't change calorie needs. Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly (returning the full program) and leave "todayOverride" null.
+
+Worked example for "add X to my workout" (e.g. "add abs," "add ab exercises," "add more back work") — this is a real, common, fully actionable request, not an ambiguous one: it's case 1 (permanent) unless they say "today"/"this session." Don't ask which day or wait for more detail — just pick the day(s) it fits best (abs/core: whichever day has the most room, or its own accessory slot on multiple days; a muscle group: the day already built around it) and add 1-2 genuinely appropriate exercises there, respecting the exercise-count ceiling below (cut something lower-priority first if you're already at it). Confirm what you added and where in "reply". Only ask a clarifying question if the request is genuinely unresolvable without more info (e.g. they name a muscle that doesn't map to any clear exercise for their equipment) — "add abs" is never that case.
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 

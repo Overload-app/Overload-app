@@ -2185,7 +2185,7 @@ describe("claudeChat", () => {
 
       const promise = claudeChat({ system: "s", messages: [] });
       const assertion = expect(promise).rejects.toMatchObject({ timeout: true });
-      await vi.advanceTimersByTimeAsync(45000);
+      await vi.advanceTimersByTimeAsync(60000);
       await assertion;
       const caught = await promise.catch((e) => e);
       expect(caught.offline).toBeUndefined();
