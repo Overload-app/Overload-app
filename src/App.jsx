@@ -29,8 +29,21 @@ export function setErrorLogUserId(userId) { currentUserId = userId; }
 
 export async function logError(message, extra = {}) {
   try {
+    // Don't rely solely on currentUserId — it's only set by the App
+    // component's own effect once account has hydrated, so the exact
+    // crash we most want to catch (one on cold start, before that effect
+    // ever runs) would otherwise always log with user_id: null. Asking
+    // Supabase's own auth client directly doesn't depend on our app's
+    // render/effect timing, and also forces the client to finish
+    // restoring its session before this request goes out, which matters
+    // for the RLS check below to actually match.
+    let userId = currentUserId;
+    if (!userId) {
+      const { data } = await supabase.auth.getSession();
+      userId = data?.session?.user?.id || null;
+    }
     await supabase.from("error_logs").insert({
-      user_id: currentUserId,
+      user_id: userId,
       message: String(message).slice(0, 2000),
       stack: extra.stack ? String(extra.stack).slice(0, 4000) : null,
       context: extra.context || null,
