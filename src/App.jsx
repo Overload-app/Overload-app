@@ -4525,7 +4525,7 @@ function ReviewsSection({ reviews, onMarkSeen }) {
           <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{entry.overview}</p>
         ) : (
           <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
-            {entry.summary.workoutCount} workout{entry.summary.workoutCount === 1 ? "" : "s"} logged this period.
+            {entry.summary?.workoutCount ?? 0} workout{entry.summary?.workoutCount === 1 ? "" : "s"} logged this period.
           </p>
         )}
         {entry.advice && entry.advice.length > 0 && (
@@ -5081,8 +5081,13 @@ export default function App() {
           setAccount({ id: lastAccount.id, name: lastAccount.name, email: lastAccount.email });
           setSubscribed(!!lastAccount.subscribed);
           setTrialStartedAt(lastAccount.trialStartedAt || null);
+          // A cached blob missing .program is unusable, not just "not yet
+          // normalized" — every tab in the app assumes it's there with no
+          // check of its own. Falls back to null rather than passing an
+          // incomplete object through, so the render guard below handles
+          // it the same safe way as "no state at all" instead of crashing.
           const loadedLocal = readLocalState(lastAccount.id);
-          setState(loadedLocal && loadedLocal.program ? { ...loadedLocal, program: normalizeProgramTips(loadedLocal.program) } : loadedLocal);
+          setState(loadedLocal && loadedLocal.program ? { ...loadedLocal, program: normalizeProgramTips(loadedLocal.program) } : null);
           setSyncStatus("offline");
         }
         // If the timeout was actually just a slow-but-live connection (not
@@ -5764,7 +5769,20 @@ export default function App() {
 
   const trialActive = isTrialActive(trialStartedAt);
 
-  if (!state) {
+  // Checks state.program specifically, not just that state itself is
+  // truthy — every tab below destructures state.program immediately with
+  // no defensive check of its own (program.days.length, program.splitName,
+  // ...), so a state object that exists but is missing that field crashed
+  // the whole app render with no recovery. Real report: a user opened the
+  // app fresh and hit "Something went wrong" with nothing else done first.
+  // This can happen with a corrupted/partial localStorage entry, or via
+  // the offline cold-start fallback (a device with a stale or incomplete
+  // local cache, genuinely offline, has nothing more complete to fall
+  // back to) — either way, this is safer than crashing: it's the same
+  // "run onboarding" path already used for a genuinely new account, and
+  // going back online self-heals it, since the next real hydrateAccount()
+  // overwrites whatever the corrupted local cache had.
+  if (!state || !state.program) {
     return (
       <div className="auth-screen-outer">
         <style>{FONT_IMPORT}</style>
