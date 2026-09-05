@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
+import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -20,6 +20,27 @@ globalThis.ResizeObserver = class {
   unobserve() {}
   disconnect() {}
 };
+
+// Only the default <App /> smoke test below needs a live-enough Supabase
+// stub to get through the initial session-check effect — every other
+// describe block in this file tests a sub-component directly and never
+// touches this.
+vi.mock("./supabaseClient.js", () => ({
+  supabase: {
+    auth: {
+      getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+      onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
+    },
+    from: vi.fn(() => ({
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+      insert: vi.fn().mockResolvedValue({ data: null, error: null }),
+      upsert: vi.fn().mockResolvedValue({ data: null, error: null }),
+      update: vi.fn().mockReturnThis(),
+    })),
+  },
+}));
 
 /* ============================================================
    LOGIN
@@ -1848,5 +1869,27 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Weekly review"));
     await user.click(screen.getByText("Monthly review"));
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+});
+
+/* ============================================================
+   ROOT APP SMOKE TEST
+   Every other test in this file renders a sub-component directly, so
+   none of them exercise the top-level App component's own hook body at
+   all. That gap let a real bug ship straight to production: a useEffect
+   near the top of App() read the `state` variable (both in its body and
+   its dependency array) before the `const [state, setState] = useState()`
+   line further down had run — a plain "Cannot access 'state' before
+   initialization" ReferenceError, thrown on every single render, for
+   every user, unconditionally. It reached users because nothing in this
+   suite ever mounted <App /> itself to notice.
+============================================================ */
+describe("<App /> smoke test", () => {
+  test("mounts a logged-out session without hitting the ErrorBoundary fallback", async () => {
+    render(<App />);
+    // A real render-phase crash here shows the ErrorBoundary's fallback
+    // screen — assert we land on the real sign-up screen instead.
+    expect(await screen.findByText("Create your account")).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   });
 });

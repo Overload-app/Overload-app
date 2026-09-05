@@ -4965,11 +4965,19 @@ export default function App() {
   useEffect(() => { setErrorLogUserId(account?.id || null); }, [account]);
   const [subscribed, setSubscribed] = useState(false);
   const [trialStartedAt, setTrialStartedAt] = useState(null);
+  const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
+  const [confirmEmailPending, setConfirmEmailPending] = useState(null);
+  const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
+  const [state, setState] = useState(null);
   // Real ask: cap free-trial AI usage, $0.75/month hard ceiling. Kept in
   // sync here (not computed inline inside claudeChat, which has no access
   // to React state) so every AI call anywhere in the app checks against
   // the current, real answer without threading account/subscription/usage
-  // through every call site individually.
+  // through every call site individually. Must come after `state` is
+  // declared above — this crashed every single load with "Cannot access
+  // 'state' before initialization" when it briefly sat above that
+  // declaration instead of below it.
   useEffect(() => {
     setAiBudgetContext({
       isTrialUnsubscribed: !subscribed && isTrialActive(trialStartedAt),
@@ -4980,11 +4988,6 @@ export default function App() {
     setAiUsageRecordedCallback(account ? (costCents) => recordAiUsage(costCents) : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account]);
-  const [showSubscribeOverlay, setShowSubscribeOverlay] = useState(false);
-  const [passwordRecovery, setPasswordRecovery] = useState(false);
-  const [confirmEmailPending, setConfirmEmailPending] = useState(null);
-  const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
-  const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
