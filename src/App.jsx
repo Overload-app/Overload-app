@@ -3649,6 +3649,26 @@ const DEFAULT_COACH_MESSAGES = [
   { role: "assistant", text: "Hey — I'm your coach. Ask me to adjust your program: swap an exercise, work around an injury, add volume, change your split, or anything else." },
 ];
 
+// Real reports: "screen gets frozen a lot, especially after hitting the
+// check mark" and "coach takes too long to respond sometimes." coachChat
+// used to grow forever — every message, every day, for as long as the
+// account existed, with nothing ever trimming it. Two real costs from
+// that: (1) EVERY persist() call — including one for every single
+// checkmark during a workout, unrelated to the Coach at all — stringifies
+// the WHOLE app state to save it locally, so a year of daily Coach use
+// turning coachChat into a multi-megabyte array made that synchronous
+// JSON.stringify measurably slower on every save, not just Coach ones;
+// (2) sendCoachMessage sends the ENTIRE history to Claude as conversation
+// context on every single message, so a long-lived account was paying to
+// re-process (and wait on) thousands of old messages' worth of tokens on
+// every new one. 60 messages (~30 exchanges) is plenty of real
+// conversational context — sliced from the END, so this is always a
+// rolling window of the MOST RECENT conversation, never older history.
+const COACH_CHAT_HISTORY_LIMIT = 60;
+export function trimCoachChat(messages) {
+  return messages.length > COACH_CHAT_HISTORY_LIMIT ? messages.slice(-COACH_CHAT_HISTORY_LIMIT) : messages;
+}
+
 // Ready-to-send examples for the empty-state quick-action chips — concrete
 // enough to tap and go, covering the three kinds of requests Coach
 // actually handles differently (a swap, an injury adjustment, a duration
@@ -5182,6 +5202,17 @@ export default function App() {
       saveState(user.id, finalState);
     }
 
+    // One-time cleanup for an account whose coachChat grew large before
+    // trimCoachChat existed — shrinks it the very first load after this
+    // fix ships, rather than waiting for their next Coach message (which,
+    // until then, would still mean every OTHER save — including one on
+    // every workout checkmark — keeps stringifying that same oversized
+    // history for no reason).
+    if (finalState && finalState.coachChat && finalState.coachChat.length > COACH_CHAT_HISTORY_LIMIT) {
+      finalState = { ...finalState, coachChat: trimCoachChat(finalState.coachChat) };
+      saveState(user.id, finalState);
+    }
+
     setState(finalState);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
@@ -5264,13 +5295,13 @@ export default function App() {
     const today = todayISO();
     const usage = stateRef.current.coachUsage;
     const usedToday = usage && usage.date === today ? usage.count : 0;
-    const baseList = stateRef.current.coachChat && stateRef.current.coachChat.length ? stateRef.current.coachChat : DEFAULT_COACH_MESSAGES;
+    const baseList = trimCoachChat(stateRef.current.coachChat && stateRef.current.coachChat.length ? stateRef.current.coachChat : DEFAULT_COACH_MESSAGES);
 
     if (usedToday >= COACH_DAILY_LIMIT) {
       const withUser = [...baseList, { role: "user", text: trimmed }];
       persist((prev) => ({
         ...prev,
-        coachChat: [...withUser, { role: "assistant", text: "You've hit today's message limit for the coach — it resets tomorrow. Thanks for being an active user!" }],
+        coachChat: trimCoachChat([...withUser, { role: "assistant", text: "You've hit today's message limit for the coach — it resets tomorrow. Thanks for being an active user!" }]),
       }));
       return;
     }
@@ -5279,7 +5310,7 @@ export default function App() {
     // Count this attempt against today's quota now, before the API call —
     // this way a maxed-out user is stopped above without ever costing an
     // API call, and this attempt is counted whether or not it succeeds.
-    persist((prev) => ({ ...prev, coachChat: withUser, coachUsage: { date: today, count: usedToday + 1 } }));
+    persist((prev) => ({ ...prev, coachChat: trimCoachChat(withUser), coachUsage: { date: today, count: usedToday + 1 } }));
     setCoachLoading(true);
     try {
       const system = buildCoachSystem(stateRef.current);
@@ -5304,7 +5335,7 @@ export default function App() {
       console.log("Coach response received:", JSON.stringify(parsed));
       const { hasOverride, hasValidTargets, hasNewProgram, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);
       const replyText = coachReplyText(parsed, madeChange);
-      const withReply = [...withUser, { role: "assistant", text: replyText }];
+      const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
       // Diagnostics: flag cases that look like a bug so they're visible in the
       // console without needing to guess after the fact.
@@ -5406,7 +5437,7 @@ export default function App() {
     } catch (e) {
       console.error("Coach send failed:", e);
       const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
-      persist((prev) => ({ ...prev, coachChat: [...withUser, { role: "assistant", text: failText }] }));
+      persist((prev) => ({ ...prev, coachChat: trimCoachChat([...withUser, { role: "assistant", text: failText }]) }));
     } finally {
       setCoachLoading(false);
     }

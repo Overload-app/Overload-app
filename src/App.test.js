@@ -58,6 +58,7 @@ import {
   recentProgressHighlights,
   detectCoachInsight,
   claudeChat,
+  trimCoachChat,
   todayISO,
   fetchSimilarExercises,
   buildProgramGenSystem,
@@ -2191,6 +2192,37 @@ describe("claudeChat", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("trimCoachChat", () => {
+  function messages(n) {
+    return Array.from({ length: n }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", text: `msg ${i}` }));
+  }
+
+  // Real reports this addresses: "screen gets frozen a lot, especially
+  // after hitting the check mark" (every persist() — including one on
+  // every workout checkmark, unrelated to Coach — stringifies the whole
+  // app state, so an ever-growing coachChat made every single save
+  // slower) and "coach takes too long to respond" (the full history is
+  // sent to Claude as context on every message, so a long-lived account
+  // was paying token cost and latency for thousands of old messages).
+  test("leaves a short history untouched", () => {
+    const short = messages(10);
+    expect(trimCoachChat(short)).toBe(short); // same reference — no unnecessary copy
+  });
+
+  test("keeps only the most recent messages once over the limit, not the oldest", () => {
+    const long = messages(100);
+    const trimmed = trimCoachChat(long);
+    expect(trimmed.length).toBe(60);
+    expect(trimmed[0].text).toBe("msg 40"); // the oldest 40 were dropped
+    expect(trimmed[trimmed.length - 1].text).toBe("msg 99"); // most recent kept
+  });
+
+  test("an exactly-at-limit history is left as-is", () => {
+    const exact = messages(60);
+    expect(trimCoachChat(exact)).toBe(exact);
   });
 });
 
