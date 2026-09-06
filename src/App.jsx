@@ -322,6 +322,24 @@ export function coachParseFailureFallback() {
   };
 }
 
+// LLM JSON output occasionally emits a number as a quoted string ("0"
+// instead of 0, "2400" instead of 2400) — a real, repeatedly-confirmed
+// cause of the Coach confidently describing a change (new targets, a
+// workout edit) while the corresponding structured field silently fails a
+// strict type check and nothing actually gets saved. null/undefined mean
+// "not given" and stay null — Number(null) is 0, which would otherwise
+// wrongly resolve to a real index or a "valid" zero value.
+function coerceInt(n) {
+  if (n === null || n === undefined) return null;
+  const num = Number(n);
+  return Number.isInteger(num) ? num : null;
+}
+function coercePositiveNumber(n) {
+  if (n === null || n === undefined) return null;
+  const num = Number(n);
+  return Number.isFinite(num) && num > 0 ? num : null;
+}
+
 // What the Coach's parsed JSON response actually DOES, independent of what its
 // "reply" text claims — shared by the fallback-reply text below and by the
 // persist logic that applies the change, so the two can never disagree about
@@ -329,14 +347,7 @@ export function coachParseFailureFallback() {
 export function coachResponseFlags(parsed) {
   const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
   const t = parsed.targets;
-  // Real report: the Coach's reply confidently described new calorie/macro
-  // numbers that never actually got saved. A strict typeof-number check
-  // silently rejects the whole targets update if the model ever emits one
-  // of these as a numeric string ("2400" instead of 2400) — an easy LLM
-  // JSON-formatting slip that's otherwise indistinguishable from a real
-  // number to a person reading the reply text. Coercing first means a
-  // stringified number still counts, while non-numeric junk still doesn't.
-  const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => Number.isFinite(Number(n)) && Number(n) > 0);
+  const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => coercePositiveNumber(n) !== null);
   const hasNewProgram = !!(parsed.program && Array.isArray(parsed.program.days) && !hasOverride);
   // Lightweight sibling to hasNewProgram — a single-day edit instead of the
   // whole program. Real ask: full-program regeneration for a one-day
@@ -345,10 +356,10 @@ export function coachResponseFlags(parsed) {
   // same standard as hasNewProgram's own days.
   const dayEdit = parsed.programDayEdit;
   const hasDayEdit = !!(
-    dayEdit && typeof dayEdit.dayIndex === "number" && dayEdit.day &&
+    dayEdit && coerceInt(dayEdit.dayIndex) !== null && dayEdit.day &&
     Array.isArray(dayEdit.day.exercises) && !hasOverride && !hasNewProgram
   );
-  const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
+  const restoreIdx = coerceInt(parsed.restoreIndex);
   const restoreOriginal = parsed.restoreOriginal === true;
   const madeChange = hasOverride || hasValidTargets || hasNewProgram || hasDayEdit || restoreOriginal || restoreIdx !== null;
   return { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange };
@@ -847,9 +858,14 @@ export function normalizeProgramTips(program) {
 // point at a real day — a genuine model error, safer to no-op than guess
 // which day was actually meant.
 export function applyProgramDayEdit(program, dayIndex, dayName, exercises) {
-  const inRange = Number.isInteger(dayIndex) && dayIndex >= 0 && dayIndex < program.days.length;
+  // Coerced independently of coachResponseFlags' own check above — a
+  // string dayIndex ("0") should resolve correctly here regardless of how
+  // this got called, not just when it happens to go through that check
+  // first.
+  const idx = typeof dayIndex === "number" ? dayIndex : Number(dayIndex);
+  const inRange = Number.isInteger(idx) && idx >= 0 && idx < program.days.length;
   if (!inRange) return program;
-  const newDays = program.days.map((d, i) => (i === dayIndex ? { name: dayName || d.name, exercises } : d));
+  const newDays = program.days.map((d, i) => (i === idx ? { name: dayName || d.name, exercises } : d));
   return { ...program, days: newDays };
 }
 
@@ -3798,7 +3814,7 @@ Worked example for reverting to the ORIGINAL — user says "go back to my origin
 In both worked examples above, even though most fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
+{"reply": "<a short, friendly explanation, written directly to the user — as brief as the situation genuinely allows, see the rule below>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
 
 Rules:
 - For a PERMANENT change (case 1 or 2 above), always build the new day(s) by editing the exact "Current program JSON" given above — never reconstruct any of it from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the day(s) you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
@@ -3813,6 +3829,7 @@ Rules:
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - "reply" must NEVER be left blank or missing, for any message, including a genuinely ambiguous one — a blank reply falls back to a generic "I didn't catch that" with no useful detail, which reads as broken. If a request is ambiguous (e.g. "make my split 5" could mean 5 exercises per day or 5 training days per week), say specifically what's unclear and ask the exact clarifying question that would resolve it — never a generic "mind rephrasing?".
+- Keep "reply" as short as the situation genuinely allows — this matters, not just a style preference. A simple confirmed change ("added Cable Crunch to Push day") is ONE sentence, not three. A plain factual question gets a direct, short answer, not a mini-essay. Only go longer when something genuinely needs explaining (why a request isn't fully possible, a nuanced tradeoff, multiple things changing at once) — and even then, say the useful part once instead of restating it with different words.
 - If the user repeats or re-asserts a request you already explained isn't possible, don't just restate the same explanation again — that reads as not listening. Acknowledge they've asked again, keep the actual reason brief (one sentence, not the full explanation a second or third time), and lead with the concrete next step: the specific alternative(s) already available to them (extend the session length by a specific amount, accept fewer exercises with more day-to-day variety via rotation, drop a less important exercise to make room, etc.) — give them something to actually decide on, not another repeat of why not.
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
 - MINIMUM 4 exercises on any day you write into "program", "programDayEdit", or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.

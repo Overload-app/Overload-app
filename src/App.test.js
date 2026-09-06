@@ -1299,6 +1299,22 @@ describe("coachResponseFlags / coachReplyText", () => {
     expect(coachResponseFlags({ programDayEdit: null }).hasDayEdit).toBe(false);
   });
 
+  // Real report: "ai also told me it made changes to my workouts but it
+  // never changed anything" — same root cause as the targets bug above,
+  // just on dayIndex: a strict typeof-number check silently rejected the
+  // whole edit the moment the model emitted a numeric string ("0") for
+  // the index instead of a real number.
+  test("accepts a dayIndex given as a numeric string, not just a real number", () => {
+    const parsed = { programDayEdit: { dayIndex: "0", day: { name: "Push", exercises: [{ name: "Cable Crunch" }] } } };
+    expect(coachResponseFlags(parsed).hasDayEdit).toBe(true);
+  });
+
+  test("a restoreIndex given as a numeric string is still recognized", () => {
+    expect(coachResponseFlags({ restoreIndex: "2" }).restoreIdx).toBe(2);
+    expect(coachResponseFlags({ restoreIndex: null }).restoreIdx).toBeNull();
+    expect(coachResponseFlags({ restoreIndex: "not a number" }).restoreIdx).toBeNull();
+  });
+
   test("a full program takes precedence if the model somehow sets both", () => {
     const parsed = { program: { days: [{ name: "Push", exercises: [] }] }, programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: [] } } };
     const flags = coachResponseFlags(parsed);
@@ -1376,6 +1392,15 @@ describe("applyProgramDayEdit", () => {
     expect(applyProgramDayEdit(program, 5, "Extra Day", [{ name: "Curl" }])).toBe(program);
     expect(applyProgramDayEdit(program, -1, "Extra Day", [{ name: "Curl" }])).toBe(program);
     expect(applyProgramDayEdit(program, 1.5, "Extra Day", [{ name: "Curl" }])).toBe(program);
+  });
+
+  // Coerces independently of coachResponseFlags' own check — correct
+  // regardless of caller, not just when it happens to go through that
+  // check first.
+  test("applies correctly even when dayIndex arrives as a numeric string", () => {
+    const result = applyProgramDayEdit(program, "0", "Push", [{ name: "Cable Crunch" }]);
+    expect(result.days[0].exercises).toEqual([{ name: "Cable Crunch" }]);
+    expect(result.days[1]).toBe(program.days[1]);
   });
 });
 
