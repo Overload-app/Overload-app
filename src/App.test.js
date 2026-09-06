@@ -23,6 +23,7 @@ import {
   withTips,
   stripNameQualifiers,
   normalizeProgramTips,
+  applyProgramDayEdit,
   deriveSplitName,
   overrideDayName,
   coachResponseFlags,
@@ -1277,6 +1278,65 @@ describe("coachResponseFlags / coachReplyText", () => {
 
   test("a real reply from the model always wins over either fallback", () => {
     expect(coachReplyText({ reply: "Removed battle ropes from every day." }, true)).toBe("Removed battle ropes from every day.");
+  });
+
+  // Real ask: full-program regeneration for a change that only touches one
+  // day (e.g. "add abs to my workout") made ordinary Coach requests slow —
+  // sometimes too slow to finish at all. programDayEdit is the lightweight
+  // path: only the one changed day, not the whole program.
+  test("a valid programDayEdit is flagged as a change, distinct from a full program", () => {
+    const parsed = { reply: "Added Cable Crunch to Push day.", program: null, programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: [{ name: "Cable Crunch" }] } }, todayOverride: null };
+    const flags = coachResponseFlags(parsed);
+    expect(flags.hasDayEdit).toBe(true);
+    expect(flags.hasNewProgram).toBe(false);
+    expect(flags.madeChange).toBe(true);
+  });
+
+  test("a malformed programDayEdit (missing dayIndex or exercises) is not treated as a change", () => {
+    expect(coachResponseFlags({ programDayEdit: { day: { exercises: [] } } }).hasDayEdit).toBe(false);
+    expect(coachResponseFlags({ programDayEdit: { dayIndex: 0, day: {} } }).hasDayEdit).toBe(false);
+    expect(coachResponseFlags({ programDayEdit: null }).hasDayEdit).toBe(false);
+  });
+
+  test("a full program takes precedence if the model somehow sets both", () => {
+    const parsed = { program: { days: [{ name: "Push", exercises: [] }] }, programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: [] } } };
+    const flags = coachResponseFlags(parsed);
+    expect(flags.hasNewProgram).toBe(true);
+    expect(flags.hasDayEdit).toBe(false);
+  });
+});
+
+describe("applyProgramDayEdit", () => {
+  const program = {
+    splitName: "Push / Pull / Legs",
+    days: [
+      { name: "Push", exercises: [{ name: "Bench Press" }] },
+      { name: "Pull", exercises: [{ name: "Barbell Row" }] },
+      { name: "Legs", exercises: [{ name: "Back Squat" }] },
+    ],
+  };
+
+  test("replaces only the targeted day's exercises, leaving every other day byte-for-byte untouched", () => {
+    const newExercises = [{ name: "Bench Press" }, { name: "Cable Crunch" }];
+    const result = applyProgramDayEdit(program, 0, "Push", newExercises);
+    expect(result.days[0].exercises).toEqual(newExercises);
+    expect(result.days[1]).toBe(program.days[1]); // same reference — genuinely untouched
+    expect(result.days[2]).toBe(program.days[2]);
+    expect(result.splitName).toBe("Push / Pull / Legs");
+  });
+
+  test("renames the day when a new name is given, keeps the old name if none is given", () => {
+    const renamed = applyProgramDayEdit(program, 1, "Pull (Back/Biceps)", [{ name: "Barbell Row" }]);
+    expect(renamed.days[1].name).toBe("Pull (Back/Biceps)");
+
+    const keptName = applyProgramDayEdit(program, 1, "", [{ name: "Barbell Row" }]);
+    expect(keptName.days[1].name).toBe("Pull");
+  });
+
+  test("a dayIndex outside the program's real range is a no-op, not a guess", () => {
+    expect(applyProgramDayEdit(program, 5, "Extra Day", [{ name: "Curl" }])).toBe(program);
+    expect(applyProgramDayEdit(program, -1, "Extra Day", [{ name: "Curl" }])).toBe(program);
+    expect(applyProgramDayEdit(program, 1.5, "Extra Day", [{ name: "Curl" }])).toBe(program);
   });
 });
 

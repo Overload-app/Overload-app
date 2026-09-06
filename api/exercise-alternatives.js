@@ -31,6 +31,11 @@ export function parseAlternatives(raw) {
   return Array.isArray(parsed.alternatives) ? parsed.alternatives : [];
 }
 
+// Same reasoning as api/claude.js: this calls Anthropic directly on a
+// cache miss, so it needs more than Vercel's 10s default to avoid the
+// function getting killed mid-request on a slow generation.
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });

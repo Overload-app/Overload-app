@@ -308,10 +308,20 @@ export function coachResponseFlags(parsed) {
   const t = parsed.targets;
   const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
   const hasNewProgram = !!(parsed.program && Array.isArray(parsed.program.days) && !hasOverride);
+  // Lightweight sibling to hasNewProgram — a single-day edit instead of the
+  // whole program. Real ask: full-program regeneration for a one-day
+  // change (e.g. "add abs") made ordinary Coach requests slow, sometimes
+  // too slow to finish. Requires a real day object with actual exercises,
+  // same standard as hasNewProgram's own days.
+  const dayEdit = parsed.programDayEdit;
+  const hasDayEdit = !!(
+    dayEdit && typeof dayEdit.dayIndex === "number" && dayEdit.day &&
+    Array.isArray(dayEdit.day.exercises) && !hasOverride && !hasNewProgram
+  );
   const restoreIdx = typeof parsed.restoreIndex === "number" ? parsed.restoreIndex : null;
   const restoreOriginal = parsed.restoreOriginal === true;
-  const madeChange = hasOverride || hasValidTargets || hasNewProgram || restoreOriginal || restoreIdx !== null;
-  return { hasOverride, hasValidTargets, hasNewProgram, restoreIdx, restoreOriginal, madeChange };
+  const madeChange = hasOverride || hasValidTargets || hasNewProgram || hasDayEdit || restoreOriginal || restoreIdx !== null;
+  return { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange };
 }
 
 // Falling back to a confident "Done!" whenever the model left "reply" blank
@@ -794,6 +804,23 @@ export function withTips(exercises) {
 export function normalizeProgramTips(program) {
   if (!program) return program;
   return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
+}
+
+// The actual merge behind Coach's "programDayEdit" (see buildCoachSystem) —
+// replaces ONE day's exercise list, leaving every other day completely
+// untouched. Exists specifically so a single-day change (e.g. "add abs to
+// my workout") doesn't require the model to regenerate the entire program
+// just to get this same result; a real, measured problem ("coach takes way
+// too long to think") since a full rewrite means every day, every
+// exercise, each with 4 tips + 3 alternatives, even for the days that
+// didn't change at all. Returns the program unchanged if dayIndex doesn't
+// point at a real day — a genuine model error, safer to no-op than guess
+// which day was actually meant.
+export function applyProgramDayEdit(program, dayIndex, dayName, exercises) {
+  const inRange = Number.isInteger(dayIndex) && dayIndex >= 0 && dayIndex < program.days.length;
+  if (!inRange) return program;
+  const newDays = program.days.map((d, i) => (i === dayIndex ? { name: dayName || d.name, exercises } : d));
+  return { ...program, days: newDays };
 }
 
 // The AI writes each day's own name freely (e.g. "Push (Chest/Triceps/Shoulders)"
@@ -3723,13 +3750,14 @@ The user will chat with you to adjust their training (swap exercises, change int
 
 You have REAL control over both the training program AND the calorie/macro targets shown in the app's Fuel section — you are not just giving verbal advice, your JSON response actually updates what the person sees and uses. So whenever a change in goal, activity, or body direction would logically change their calorie/macro needs, actually recalculate and set "targets" — don't just describe the change in words and leave the numbers stale. This includes cases where they only asked about training but the goal shift you made (e.g. from a fat-loss deficit to a muscle-building surplus) means the targets are now wrong and should move with it.
 
-There are TWO different kinds of training requests — telling them apart matters:
-1. PERMANENT changes — the user wants their ongoing program itself changed going forward (e.g. "change my split," "my knees hurt in general, adjust my program permanently," "give me more back volume from now on"). For these, modify "program" and leave "todayOverride" null.
-2. ONE-TIME / temporary swaps for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. For these, set "program" to null (do NOT echo the current program back — it's unused and just wastes space), and instead put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+There are THREE different kinds of training requests — telling them apart matters, and it directly affects how long you take to respond (a real, measured problem: regenerating the full multi-day program when only one day actually changed made ordinary requests noticeably slower, and occasionally too slow to finish at all):
+1. PERMANENT change to ONE existing day only (e.g. "add abs to my workout," "swap squat for leg press," "give me more back volume on pull day," "my knees hurt in general, adjust leg day") — by far the most common case. Use "programDayEdit": {"dayIndex": <index into the CURRENT program's "days" array>, "day": {"name": "<string>", "exercises": [...]}} with ONLY that one day's full new exercise list. Leave "program" and "todayOverride" both null. Do NOT echo back the other days — they're untouched and the app keeps them exactly as they are, so re-sending them would only waste time regenerating identical content.
+2. PERMANENT change that's structural or spans MULTIPLE days at once (e.g. "change my split," "add a training day," "give me more back volume across the whole week," renaming/reorganizing days) — genuinely needs the full picture. Use "program" (the complete {"splitName", "days"} object, every day) and leave "programDayEdit" and "todayOverride" null.
+3. ONE-TIME / temporary swap for just their next upcoming session — the user says "today," "this session," "just for now," or gives a clearly temporary reason (short on time right now, a passing ache, etc.), and does NOT ask for a lasting change. Set "program" and "programDayEdit" both to null, and put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
 
-Worked example — user says "my knees hurt, adjust leg day for today": this is case 2. The correct response has "program" set to null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else changes, "targets" stays null too since a temporary knee-friendly swap doesn't change calorie needs. Contrast with "my knees hurt in general, please adjust my program" — that IS case 1: modify "program"'s leg day(s) directly (returning the full program) and leave "todayOverride" null.
+Worked example — user says "my knees hurt, adjust leg day for today": this is case 3. The correct response has "program" and "programDayEdit" both null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else changes, "targets" stays null too since a temporary knee-friendly swap doesn't change calorie needs. Contrast with "my knees hurt in general, please adjust my program" — that's case 1 (it only touches leg day): set "programDayEdit" to that one day's new exercise list, dayIndex pointing at leg day, everything else null.
 
-Worked example for "add X to my workout" (e.g. "add abs," "add ab exercises," "add more back work") — this is a real, common, fully actionable request, not an ambiguous one: it's case 1 (permanent) unless they say "today"/"this session." Don't ask which day or wait for more detail — just pick the day(s) it fits best (abs/core: whichever day has the most room, or its own accessory slot on multiple days; a muscle group: the day already built around it) and add 1-2 genuinely appropriate exercises there, respecting the exercise-count ceiling below (cut something lower-priority first if you're already at it). Confirm what you added and where in "reply". Only ask a clarifying question if the request is genuinely unresolvable without more info (e.g. they name a muscle that doesn't map to any clear exercise for their equipment) — "add abs" is never that case.
+Worked example for "add X to my workout" (e.g. "add abs," "add ab exercises," "add more back work") — this is a real, common, fully actionable request, not an ambiguous one, and it's case 1 (single day) unless it explicitly needs to land on more than one day. Don't ask which day or wait for more detail — just pick the day it fits best (abs/core: whichever day has the most room; a muscle group: the day already built around it) and add 1-2 genuinely appropriate exercises there via "programDayEdit", respecting the exercise-count ceiling below (cut something lower-priority first if you're already at it). Confirm what you added and where in "reply". Only ask a clarifying question if the request is genuinely unresolvable without more info (e.g. they name a muscle that doesn't map to any clear exercise for their equipment) — "add abs" is never that case.
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 
@@ -3740,10 +3768,10 @@ Worked example for reverting to the ORIGINAL — user says "go back to my origin
 In both worked examples above, even though most fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
+{"reply": "<a short, friendly 2-4 sentence explanation, written directly to the user>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false}
 
 Rules:
-- For a PERMANENT change (case 1 above), always build the new "days" by editing the exact "Current program JSON" given above — never reconstruct the program from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the "days" you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
+- For a PERMANENT change (case 1 or 2 above), always build the new day(s) by editing the exact "Current program JSON" given above — never reconstruct any of it from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the day(s) you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
 - Only include exercises doable with their equipment (${p.equipment}).
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
 - Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, no trailing descriptor word or phrase either (not "Leg Press (Low)," not "Leg Press Moderate Depth" — just "Leg Press"). These get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance, range of motion — that belongs in "tips," never the name.
@@ -3751,18 +3779,19 @@ Rules:
 - If the user names a SPECIFIC exercise not on that list (e.g. asking to swap in something particular), and something on the list is a genuinely similar movement, say so and offer it as the option that'll actually have a demo video — but still give them what they explicitly asked for if they confirm they want it, being upfront in "reply" that their specific pick likely won't have an instructional video available (only the exercise name itself, not the tips — those you write either way).
 - Never include exercises that would aggravate stated injuries.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (noted above), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
-- Whenever you include an exercise (in "program" or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
+- Whenever you include an exercise (in "program", "programDayEdit", or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - "reply" must NEVER be left blank or missing, for any message, including a genuinely ambiguous one — a blank reply falls back to a generic "I didn't catch that" with no useful detail, which reads as broken. If a request is ambiguous (e.g. "make my split 5" could mean 5 exercises per day or 5 training days per week), say specifically what's unclear and ask the exact clarifying question that would resolve it — never a generic "mind rephrasing?".
 - If the user repeats or re-asserts a request you already explained isn't possible, don't just restate the same explanation again — that reads as not listening. Acknowledge they've asked again, keep the actual reason brief (one sentence, not the full explanation a second or third time), and lead with the concrete next step: the specific alternative(s) already available to them (extend the session length by a specific amount, accept fewer exercises with more day-to-day variety via rotation, drop a less important exercise to make room, etc.) — give them something to actually decide on, not another repeat of why not.
 - Keep the same number of training days unless the user explicitly asks to change their weekly schedule.
-- MINIMUM 4 exercises on any day you write into "program" or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.
-- HARD CEILING, not a suggestion, on any day you write into "program" or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
+- MINIMUM 4 exercises on any day you write into "program", "programDayEdit", or "todayOverride" — do not let a tight time budget collapse the exercise count below this. If the textbook sets/rest for their goal doesn't leave room for 4 real exercises in their session length, trim REST first (down to a floor of 45s — rest is the single biggest, lowest-cost lever), then SETS if that's still not enough (down to a floor of 2), rather than accepting fewer exercises. Only go below 4 if the user explicitly asks for a shorter/quicker one-off session.
+- HARD CEILING, not a suggestion, on any day you write into "program", "programDayEdit", or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
 - If ${liveCap} is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since ${liveCap} reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is ${tightestSetsRest.sets} sets x ${tightestSetsRest.rest}s rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale ${liveCap} as a hard fact. Only if trimming all the way to ${tightestSetsRest.sets}x${tightestSetsRest.rest}s genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
 - If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".
-- Exactly one of "program" or "todayOverride" should be non-null — never both, never neither (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other two fields is active.
-- If "restoreIndex" is set, leave "program", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
+- Exactly one of "program", "programDayEdit", or "todayOverride" should be non-null — never more than one, never none (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other three is active.
+- Default to "programDayEdit" for any permanent change that only touches one day — it's faster to generate and cheaper to run, and the app merges it in correctly on its own. Only reach for the full "program" when the change is genuinely structural or spans more than one day at once (see case 2 above).
+- If "restoreIndex" is set, leave "program", "programDayEdit", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
 - CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
 - When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" above verbatim — do not recalculate or estimate fresh numbers from scratch. The current targets JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
@@ -5458,7 +5487,7 @@ export default function App() {
         };
       }
       console.log("Coach response received:", JSON.stringify(parsed));
-      const { hasOverride, hasValidTargets, hasNewProgram, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);
+      const { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);
       const replyText = coachReplyText(parsed, madeChange);
       const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
@@ -5474,7 +5503,7 @@ export default function App() {
         console.warn("Coach set restoreOriginal=true but this account has no originalProgram saved.");
       }
       const revertKeywords = /\b(go back|revert|undo|original|before|forget)\b/i;
-      if (revertKeywords.test(trimmed) && restoreIdx === null && !restoreOriginal && !hasNewProgram && !hasValidTargets) {
+      if (revertKeywords.test(trimmed) && restoreIdx === null && !restoreOriginal && !hasNewProgram && !hasDayEdit && !hasValidTargets) {
         console.warn("Message looked like a revert request but nothing changed (no restoreIndex, restoreOriginal, program, or targets set). Full parsed response: " + JSON.stringify(parsed));
       }
 
@@ -5529,21 +5558,38 @@ export default function App() {
               exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries),
             }))
           : null;
+        // Lightweight sibling to normalizedProgramDays — same deterministic
+        // ceiling/minimum enforcement, just for the ONE day the model
+        // actually edited instead of requiring it to regenerate the whole
+        // program to get this same backstop.
+        const normalizedDayEdit = hasDayEdit
+          ? normalizeExerciseCount(parsed.programDayEdit.day.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries)
+          : null;
         const normalizedOverride = hasOverride
           ? normalizeExerciseCount(withTips(parsed.todayOverride), p.sessionLength, p.experience, p.equipment, p.injuries)
           : null;
 
         // A real, non-restore change to program and/or targets: snapshot the
         // current version into history first so it can be reverted to later.
-        if (hasNewProgram || hasValidTargets) {
+        if (hasNewProgram || hasDayEdit || hasValidTargets) {
           const newHistory = [
             { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
             ...history,
           ].slice(0, PROGRAM_HISTORY_LIMIT);
+          let newProgram = prev.program;
+          if (hasNewProgram) {
+            newProgram = normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays });
+          } else if (hasDayEdit) {
+            const { dayIndex, day } = parsed.programDayEdit;
+            newProgram = applyProgramDayEdit(prev.program, dayIndex, day.name, withTips(normalizedDayEdit));
+            if (newProgram === prev.program) {
+              console.warn("Coach set programDayEdit.dayIndex=" + dayIndex + " but the program only has " + prev.program.days.length + " day(s). Ignoring the edit rather than guessing which day was meant.");
+            }
+          }
           return {
             ...prev,
             coachChat: withReply,
-            program: hasNewProgram ? normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays }) : prev.program,
+            program: newProgram,
             todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
             targets: hasValidTargets
               ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
