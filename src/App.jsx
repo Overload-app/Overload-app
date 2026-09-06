@@ -289,6 +289,8 @@ export function parseJSONLoose(text) {
 // length limit), the JSON won't parse — but "reply" is always written first
 // and is almost always complete even when the tail of the response wasn't.
 // Pull it out directly with a regex instead of showing the raw broken JSON.
+// Used only for logging/debugging now (see coachParseFailureFallback below)
+// — never shown to the user as-is.
 export function extractReplyOnly(text) {
   const match = text.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (!match) return null;
@@ -299,6 +301,27 @@ export function extractReplyOnly(text) {
   }
 }
 
+// What sendCoachMessage falls back to whenever the model's JSON response
+// fails to parse. Real report: the previous version showed the
+// successfully-extracted "reply" text verbatim, and it confidently
+// described real changes (new calorie/macro targets, in one report) that
+// were never actually applied — "targets"/"program" live in the exact
+// tail of the response that's lost when parsing fails, but the reply
+// written FIRST usually survives intact and reads like an ordinary
+// success message. That's worse than a plain failure: it tells the user
+// something happened when nothing did. So this NEVER trusts salvaged reply
+// text, no matter how complete or confident it reads — every field here is
+// genuinely null, so nothing gets silently half-applied either.
+export function coachParseFailureFallback() {
+  return {
+    reply: "Sorry, that response didn't come through completely, so nothing was actually changed — please try sending that again.",
+    program: null,
+    programDayEdit: null,
+    todayOverride: null,
+    targets: null,
+  };
+}
+
 // What the Coach's parsed JSON response actually DOES, independent of what its
 // "reply" text claims — shared by the fallback-reply text below and by the
 // persist logic that applies the change, so the two can never disagree about
@@ -306,7 +329,14 @@ export function extractReplyOnly(text) {
 export function coachResponseFlags(parsed) {
   const hasOverride = Array.isArray(parsed.todayOverride) && parsed.todayOverride.length > 0;
   const t = parsed.targets;
-  const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => typeof n === "number" && n > 0);
+  // Real report: the Coach's reply confidently described new calorie/macro
+  // numbers that never actually got saved. A strict typeof-number check
+  // silently rejects the whole targets update if the model ever emits one
+  // of these as a numeric string ("2400" instead of 2400) — an easy LLM
+  // JSON-formatting slip that's otherwise indistinguishable from a real
+  // number to a person reading the reply text. Coercing first means a
+  // stringified number still counts, while non-numeric junk still doesn't.
+  const hasValidTargets = !!t && [t.calories, t.protein, t.carbs, t.fat].every((n) => Number.isFinite(Number(n)) && Number(n) > 0);
   const hasNewProgram = !!(parsed.program && Array.isArray(parsed.program.days) && !hasOverride);
   // Lightweight sibling to hasNewProgram — a single-day edit instead of the
   // whole program. Real ask: full-program regeneration for a one-day
@@ -5477,14 +5507,9 @@ export default function App() {
       try {
         parsed = parseJSONLoose(raw);
       } catch (parseErr) {
-        console.error("Coach JSON parse failed. Raw response was: " + raw);
         const extractedReply = extractReplyOnly(raw);
-        const looksLikePlainText = !raw.includes("{");
-        parsed = {
-          reply: extractedReply || (looksLikePlainText ? raw.trim() : "Got it — though my response got cut off partway through that one. Mind trying again, maybe as a smaller request?"),
-          program: null,
-          todayOverride: null,
-        };
+        console.error("Coach JSON parse failed. Raw response was: " + raw + (extractedReply ? "\nExtracted reply text (not shown to the user, since we can't verify what state change it was describing): " + extractedReply : ""));
+        parsed = coachParseFailureFallback();
       }
       console.log("Coach response received:", JSON.stringify(parsed));
       const { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);

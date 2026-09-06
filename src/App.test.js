@@ -43,6 +43,7 @@ import {
   dateToISO,
   parseISODate,
   extractReplyOnly,
+  coachParseFailureFallback,
   pick,
   buildDay,
   splitDisplayName,
@@ -1303,6 +1304,44 @@ describe("coachResponseFlags / coachReplyText", () => {
     const flags = coachResponseFlags(parsed);
     expect(flags.hasNewProgram).toBe(true);
     expect(flags.hasDayEdit).toBe(false);
+  });
+
+  // Real report: the Coach's reply confidently described new calorie/macro
+  // numbers, but they were never actually saved. A strict typeof-number
+  // check silently rejected the whole update the moment the model emitted
+  // one of these as a numeric string ("2400") instead of a real number —
+  // an easy, otherwise-invisible LLM JSON-formatting slip.
+  test("accepts target numbers given as numeric strings, not just real numbers", () => {
+    const parsed = { targets: { calories: "2400", protein: 180, carbs: "260", fat: 70 } };
+    expect(coachResponseFlags(parsed).hasValidTargets).toBe(true);
+  });
+
+  test("still rejects genuinely non-numeric or missing target values", () => {
+    expect(coachResponseFlags({ targets: { calories: "a lot", protein: 180, carbs: 260, fat: 70 } }).hasValidTargets).toBe(false);
+    expect(coachResponseFlags({ targets: { calories: 2400, protein: 180, carbs: 260 } }).hasValidTargets).toBe(false);
+    expect(coachResponseFlags({ targets: { calories: 0, protein: 180, carbs: 260, fat: 70 } }).hasValidTargets).toBe(false);
+    expect(coachResponseFlags({ targets: null }).hasValidTargets).toBe(false);
+  });
+});
+
+describe("coachParseFailureFallback", () => {
+  // Real report: a Coach reply confidently described new calorie/macro
+  // targets that were never applied. Traced to the JSON-parse-failure
+  // fallback, which used to show the model's own salvaged "reply" text
+  // verbatim (it's written first and usually survives even when the rest
+  // of the response got cut off) while silently setting targets/program to
+  // nothing — a confident success message with zero real change behind it.
+  test("never claims a change happened — every field is null except an honest failure reply", () => {
+    const fallback = coachParseFailureFallback();
+    expect(coachResponseFlags(fallback).madeChange).toBe(false);
+    expect(fallback.reply.toLowerCase()).toContain("try sending that again");
+    expect(fallback.reply.toLowerCase()).not.toMatch(/done|updated|set|adjusted/);
+  });
+
+  test("feeding it through the same functions production uses never produces a false 'Done!'", () => {
+    const fallback = coachParseFailureFallback();
+    const { madeChange } = coachResponseFlags(fallback);
+    expect(coachReplyText(fallback, madeChange)).toBe(fallback.reply);
   });
 });
 
