@@ -332,6 +332,12 @@ export async function requestCoachResponse(system, messages) {
   } catch (parseErr) {
     const extractedReply = extractReplyOnly(raw);
     console.error("Coach JSON parse failed. Raw response was: " + raw + (extractedReply ? "\nExtracted reply text (not shown to the user, since we can't verify what state change it was describing): " + extractedReply : ""));
+    // Real report: this kept happening even after fixing the suspected
+    // cause, with no way to see the ACTUAL response text short of asking
+    // the user to paste it live. Logging the real raw text (not just to
+    // the browser console, which nobody's watching) means the next
+    // occurrence is something to actually read, not guess about.
+    logError("Coach response failed to parse as JSON", { stack: raw?.slice(0, 4000), context: { type: "coach-parse-failure" } });
     // parseFailed distinguishes this from a genuinely blank reply — this
     // fallback's own "reply" text is deliberately non-empty (an honest
     // failure message), so a caller checking only `!parsed.reply` would
