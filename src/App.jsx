@@ -328,11 +328,15 @@ export function coachParseFailureFallback() {
 export async function requestCoachResponse(system, messages) {
   const raw = await claudeChat({ system, messages });
   try {
-    return { parsed: parseJSONLoose(raw), raw };
+    return { parsed: parseJSONLoose(raw), raw, parseFailed: false };
   } catch (parseErr) {
     const extractedReply = extractReplyOnly(raw);
     console.error("Coach JSON parse failed. Raw response was: " + raw + (extractedReply ? "\nExtracted reply text (not shown to the user, since we can't verify what state change it was describing): " + extractedReply : ""));
-    return { parsed: coachParseFailureFallback(), raw };
+    // parseFailed distinguishes this from a genuinely blank reply — this
+    // fallback's own "reply" text is deliberately non-empty (an honest
+    // failure message), so a caller checking only `!parsed.reply` would
+    // never know a retry is worth attempting here.
+    return { parsed: coachParseFailureFallback(), raw, parseFailed: true };
   }
 }
 
@@ -353,7 +357,11 @@ export async function requestCoachResponse(system, messages) {
 // two-call sequence, no live network call needed.
 export async function withBlankReplyRetry(requestFn, apiMessages) {
   const first = await requestFn(apiMessages);
-  if (first.parsed.reply && first.parsed.reply.trim()) return first;
+  // parseFailed is checked explicitly, not just "reply" — coachParseFailureFallback's
+  // own reply text is deliberately non-empty (an honest failure message), so
+  // checking only `!reply` would silently skip retrying the exact case this
+  // exists for: a response that failed to parse at all.
+  if (!first.parseFailed && first.parsed.reply && first.parsed.reply.trim()) return first;
   try {
     const retryMessages = [
       ...apiMessages,
@@ -361,7 +369,7 @@ export async function withBlankReplyRetry(requestFn, apiMessages) {
       { role: "user", content: "Your last response left \"reply\" blank, or didn't come through completely — your instructions say to never leave it blank. Try again now: make the change I actually asked for if it's reasonably clear what I want, or if it's genuinely unclear, ask exactly what's unclear in \"reply\" instead of leaving it blank." },
     ];
     const retry = await requestFn(retryMessages);
-    if (retry.parsed.reply && retry.parsed.reply.trim()) return retry;
+    if (!retry.parseFailed && retry.parsed.reply && retry.parsed.reply.trim()) return retry;
   } catch (retryErr) {
     // Network/timeout on the retry itself — fall through to the original.
   }
@@ -5597,17 +5605,15 @@ export default function App() {
     persist((prev) => ({ ...prev, coachChat: trimCoachChat(withUser), coachUsage: { date: today, count: usedToday + 1 } }));
     setCoachLoading(true);
     try {
-      // The static block (rules/worked-examples, identical for every user)
-      // is marked as a cached prompt block — Anthropic bills a cache hit at
-      // roughly a tenth of normal input price, and since nothing
-      // user-specific lives in this block, ANY user's message keeps it
-      // warm for EVERYONE's next call. Only the dynamic block (this
-      // account's actual profile/program/history) goes uncached, since it
-      // never repeats byte-for-byte. See buildCoachStaticSystem's comment.
-      const system = [
-        { type: "text", text: buildCoachStaticSystem(), cache_control: { type: "ephemeral" } },
-        { type: "text", text: buildCoachDynamicSystem(stateRef.current) },
-      ];
+      // Real report: the prompt-caching version of this (system sent as an
+      // array of {type, text, cache_control} blocks) broke the Coach
+      // outright — every single message came back as "didn't come through
+      // completely," not just occasionally. Reverted to a plain string
+      // (the same combined static+dynamic content, unchanged) to restore
+      // a known-working state immediately; the caching optimization needs
+      // to be revisited separately, more carefully, not live in
+      // production while broken.
+      const system = buildCoachSystem(stateRef.current);
       // The API requires the conversation to start with a "user" turn — drop the
       // assistant's opening greeting bubble (and anything before the first user message).
       const firstUserIdx = withUser.findIndex((m) => m.role === "user");

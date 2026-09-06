@@ -45,6 +45,7 @@ import {
   extractReplyOnly,
   coachParseFailureFallback,
   withBlankReplyRetry,
+  requestCoachResponse,
   pick,
   buildDay,
   splitDisplayName,
@@ -1413,6 +1414,38 @@ describe("coachParseFailureFallback", () => {
   });
 });
 
+describe("requestCoachResponse", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("parseFailed is false and the real parsed object comes through on a clean response", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: '{"reply": "Added it.", "programDayEdit": {"dayIndex": 0, "day": {"exercises": []}}}' }] }),
+    }));
+    const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
+    expect(result.parseFailed).toBe(false);
+    expect(result.parsed.reply).toBe("Added it.");
+  });
+
+  // This is the exact gap withBlankReplyRetry depends on being told about —
+  // coachParseFailureFallback's reply text is deliberately non-empty, so
+  // parseFailed is the only signal that this wasn't actually a normal,
+  // successful response.
+  test("parseFailed is true when the response isn't valid JSON, even though the fallback's own reply text is non-empty", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: '{"reply": "Sure, here' }] }), // cut off mid-string
+    }));
+    const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
+    expect(result.parseFailed).toBe(true);
+    expect(result.parsed.reply).toBeTruthy();
+  });
+});
+
 // Real transcript: "add abs to my workout" (and several other clear,
 // actionable requests) repeatedly got "Hmm, I didn't quite catch that" —
 // a blank "reply" with no change made — despite the Coach's own
@@ -1460,6 +1493,26 @@ describe("withBlankReplyRetry", () => {
     const requestFn = vi.fn().mockResolvedValueOnce(blank).mockRejectedValueOnce(new Error("timed out"));
     const result = await withBlankReplyRetry(requestFn, apiMessages);
     expect(result).toBe(blank);
+  });
+
+  // Real gap: coachParseFailureFallback's own "reply" text is deliberately
+  // non-empty (an honest failure message, not a blank one) — checking
+  // only `!reply` would silently skip retrying exactly the case this
+  // whole mechanism exists for: a response that failed to parse at all.
+  test("also retries a genuine parse failure, not just a literally-blank reply", async () => {
+    const parseFailure = { parsed: { reply: "Sorry, that response didn't come through completely, so nothing was actually changed — please try sending that again." }, raw: "{broken json", parseFailed: true };
+    const requestFn = vi.fn().mockResolvedValueOnce(parseFailure).mockResolvedValueOnce(goodReply);
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(goodReply);
+    expect(requestFn).toHaveBeenCalledTimes(2);
+  });
+
+  test("falls back to the original parse-failure result if the retry ALSO fails to parse", async () => {
+    const parseFailure = { parsed: { reply: "Sorry, that response didn't come through completely, so nothing was actually changed — please try sending that again." }, raw: "{broken json", parseFailed: true };
+    const requestFn = vi.fn().mockResolvedValue(parseFailure);
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(parseFailure);
+    expect(requestFn).toHaveBeenCalledTimes(2);
   });
 });
 
