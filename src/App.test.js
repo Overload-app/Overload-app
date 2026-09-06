@@ -44,6 +44,7 @@ import {
   parseISODate,
   extractReplyOnly,
   coachParseFailureFallback,
+  withBlankReplyRetry,
   pick,
   buildDay,
   splitDisplayName,
@@ -65,6 +66,8 @@ import {
   fetchSimilarExercises,
   buildProgramGenSystem,
   buildCoachSystem,
+  buildCoachStaticSystem,
+  buildCoachDynamicSystem,
   reviewPeriodStart,
   nextReviewDueAt,
   isReviewDue,
@@ -670,6 +673,55 @@ describe("buildCoachSystem: never a blank reply, and don't just repeat an explan
     const system = buildCoachSystem(state);
     expect(system).toContain("don't just restate the same explanation again");
     expect(system).toContain("lead with the concrete next step");
+  });
+});
+
+// Real ask: "ai seems slightly expensive... optimize costs." The static
+// block gets sent as a cached prompt block (see sendCoachMessage) — that
+// only works, and only saves anything, if it's genuinely identical
+// regardless of which account or program asked. This is the property the
+// whole optimization depends on, so it's worth asserting directly rather
+// than just trusting the refactor didn't leak anything user-specific in.
+describe("Coach system prompt caching split", () => {
+  const stateA = {
+    profile: { ...baseProfile, goal: "build", equipment: "full", sessionLength: 60, weightLb: 180 },
+    program: { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 4, rest: 90 }] }] },
+    targets: { calories: 2800, protein: 190, carbs: 300, fat: 80 },
+    programHistory: [],
+  };
+  const stateB = {
+    profile: { ...baseProfile, goal: "lose_fat", equipment: "bodyweight", sessionLength: 20, weightLb: 130, notes: "Bad knees" },
+    program: { splitName: "Full Body", days: [{ name: "Full Body A", exercises: [{ name: "Push-Up", sets: 2, rest: 45 }] }] },
+    targets: { calories: 1600, protein: 120, carbs: 130, fat: 50 },
+    programHistory: [{ program: { splitName: "Old", days: [] }, targets: { calories: 1500 }, savedAt: "2026-01-01" }],
+  };
+
+  test("the static block is byte-for-byte identical across completely different accounts — the property caching depends on", () => {
+    expect(buildCoachStaticSystem()).toBe(buildCoachStaticSystem());
+    expect(buildCoachStaticSystem(stateA)).toBe(buildCoachStaticSystem(stateB)); // takes no arguments at all — passing state is a no-op either way
+  });
+
+  test("the static block carries none of a specific account's actual data", () => {
+    const system = buildCoachStaticSystem();
+    expect(system).not.toContain("180 lb");
+    expect(system).not.toContain("Bad knees");
+    expect(system).not.toContain("2800");
+    expect(system).not.toContain("Bench Press");
+  });
+
+  test("the dynamic block carries this account's real profile, program, and targets", () => {
+    const dynamic = buildCoachDynamicSystem(stateA);
+    expect(dynamic).toContain("180 lb");
+    expect(dynamic).toContain("Bench Press");
+    expect(dynamic).toContain("2800");
+  });
+
+  test("the dynamic block differs between two different accounts", () => {
+    expect(buildCoachDynamicSystem(stateA)).not.toBe(buildCoachDynamicSystem(stateB));
+  });
+
+  test("the combined legacy buildCoachSystem is exactly the static block followed by the dynamic block", () => {
+    expect(buildCoachSystem(stateA)).toBe(buildCoachStaticSystem() + "\n\n" + buildCoachDynamicSystem(stateA));
   });
 });
 
@@ -1358,6 +1410,56 @@ describe("coachParseFailureFallback", () => {
     const fallback = coachParseFailureFallback();
     const { madeChange } = coachResponseFlags(fallback);
     expect(coachReplyText(fallback, madeChange)).toBe(fallback.reply);
+  });
+});
+
+// Real transcript: "add abs to my workout" (and several other clear,
+// actionable requests) repeatedly got "Hmm, I didn't quite catch that" —
+// a blank "reply" with no change made — despite the Coach's own
+// instructions saying that's never a valid response. Since it's never
+// valid, one automatic retry with direct feedback about the exact
+// mistake is always worth attempting before showing the person a dead
+// end. `requestFn` is mocked here — this proves the actual retry
+// decision (not just parsing) without a live network call, per the ask
+// to test the Coach's behavior without spending API credits.
+describe("withBlankReplyRetry", () => {
+  const apiMessages = [{ role: "user", content: "add abs to my workout" }];
+  const blank = { parsed: { reply: "" }, raw: '{"reply":""}' };
+  const goodReply = { parsed: { reply: "Added Cable Crunch to Push day.", programDayEdit: { dayIndex: 0, day: {} } }, raw: "..." };
+
+  test("returns the first response unchanged when it already has a real reply — no retry attempted", async () => {
+    const first = { parsed: { reply: "Sure, here's the plan." }, raw: "..." };
+    const requestFn = vi.fn().mockResolvedValue(first);
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(first);
+    expect(requestFn).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries once and uses the retry's result when the first response has a blank reply", async () => {
+    const requestFn = vi.fn().mockResolvedValueOnce(blank).mockResolvedValueOnce(goodReply);
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(goodReply);
+    expect(requestFn).toHaveBeenCalledTimes(2);
+    // The retry includes the original messages, the model's own blank
+    // answer echoed back, and direct feedback about the exact mistake —
+    // not just a bare repeat of the same request.
+    const retryMessages = requestFn.mock.calls[1][0];
+    expect(retryMessages[0]).toEqual(apiMessages[0]);
+    expect(retryMessages.some((m) => m.role === "assistant" && m.content === blank.raw)).toBe(true);
+    expect(retryMessages.at(-1).content.toLowerCase()).toContain("blank");
+  });
+
+  test("falls back to the original blank result if the retry ALSO comes back blank", async () => {
+    const requestFn = vi.fn().mockResolvedValueOnce(blank).mockResolvedValueOnce({ parsed: { reply: "" }, raw: "still blank" });
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(blank);
+    expect(requestFn).toHaveBeenCalledTimes(2);
+  });
+
+  test("falls back to the original blank result if the retry itself throws (offline/timeout)", async () => {
+    const requestFn = vi.fn().mockResolvedValueOnce(blank).mockRejectedValueOnce(new Error("timed out"));
+    const result = await withBlankReplyRetry(requestFn, apiMessages);
+    expect(result).toBe(blank);
   });
 });
 
