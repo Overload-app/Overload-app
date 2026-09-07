@@ -279,7 +279,13 @@ export async function claudeChat({ system, messages }) {
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
-    throw new Error(detail || `API error ${res.status}`);
+    // Real report: a generic "couldn't reach the coach" failure showed up
+    // with nothing recording what the actual error was. Attaching the
+    // status here means the caller's error logging (see sendCoachMessage)
+    // can capture real evidence instead of guessing at the cause.
+    const httpErr = new Error(detail || `API error ${res.status}`);
+    httpErr.status = res.status;
+    throw httpErr;
   }
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
@@ -5850,6 +5856,21 @@ export default function App() {
       });
     } catch (e) {
       console.error("Coach send failed:", e);
+      // Real report: this generic message showed up in place of the usual
+      // parse-failure text — meaning the request itself failed (a real HTTP
+      // error from Anthropic/api/claude.js, or some other thrown exception),
+      // not a JSON-parsing problem. Nothing captured what that error
+      // actually WAS beyond the browser console, which is useless after the
+      // fact — logging it the same way as the parse-failure path means the
+      // next occurrence is real evidence instead of another guess. Skipped
+      // for offline/timeout since those are already distinguishable and
+      // expected often enough that logging every one would just be noise.
+      if (!e.offline && !e.timeout) {
+        logError("Coach send failed (non-parse error)", {
+          stack: e?.stack || e?.message || String(e),
+          context: { type: "coach-request-failure", status: e?.status },
+        });
+      }
       const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
       persist((prev) => ({ ...prev, coachChat: trimCoachChat([...withUser, { role: "assistant", text: failText }]) }));
     } finally {
