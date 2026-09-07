@@ -390,6 +390,24 @@ export async function claudeChat({ system, messages }) {
   if (data.usage && onAiUsageRecorded) {
     onAiUsageRecorded(estimateCostCents(data.usage.input_tokens, data.usage.output_tokens));
   }
+  // TEMPORARY, remove once confirmed: real verification that Coach's
+  // reinstated system-prompt caching is actually being read, not just
+  // written — a prior attempt at this same thing silently broke Coach and
+  // was reverted without ever confirming what actually happened via real
+  // usage numbers. cache_read_input_tokens > 0 on a second-or-later call
+  // sharing the same static prefix is the only real proof caching is
+  // live; there's no other channel to observe this remotely.
+  if (data.usage && (data.usage.cache_read_input_tokens || data.usage.cache_creation_input_tokens)) {
+    logError("Coach cache diagnostic", {
+      stack: JSON.stringify({
+        cache_read_input_tokens: data.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: data.usage.cache_creation_input_tokens,
+        input_tokens: data.usage.input_tokens,
+        output_tokens: data.usage.output_tokens,
+      }),
+      context: { type: "coach-cache-diagnostic" },
+    });
+  }
   // With tool_choice forcing the "respond" tool, the model's actual answer
   // comes back as a tool_use block whose `input` the API has ALREADY parsed
   // into a real object — there's no text to accidentally reply with prose
@@ -5888,15 +5906,24 @@ export default function App() {
     persist((prev) => ({ ...prev, coachChat: trimCoachChat(withUser), coachUsage: { date: today, count: usedToday + 1 } }));
     setCoachLoading(true);
     try {
-      // Real report: the prompt-caching version of this (system sent as an
-      // array of {type, text, cache_control} blocks) broke the Coach
-      // outright — every single message came back as "didn't come through
-      // completely," not just occasionally. Reverted to a plain string
-      // (the same combined static+dynamic content, unchanged) to restore
-      // a known-working state immediately; the caching optimization needs
-      // to be revisited separately, more carefully, not live in
-      // production while broken.
-      const system = buildCoachSystem(stateRef.current);
+      // Real report, the first time this was tried: the array-of-blocks
+      // caching format broke Coach outright ("didn't come through
+      // completely" on every message) and had to be reverted immediately.
+      // That failure was never actually root-caused — reverted live,
+      // under outage pressure, before this file had tool-forcing (see
+      // claudeChat) or real error logging on both the parse-failure and
+      // HTTP-failure paths. Retried now, deliberately, with real
+      // verification (a temporary cache diagnostic log — see claudeChat)
+      // rather than assuming it's fixed. buildCoachStaticSystem() is
+      // BYTE-IDENTICAL for every account on this app — the exact
+      // "large system prompt shared across many requests" caching pattern
+      // — so a single warm cache entry serves every user's Coach message,
+      // not just one person's own back-to-back turns. Real ask this was
+      // for: "optimize costs... run a lot of tests... save credits."
+      const system = [
+        { type: "text", text: buildCoachStaticSystem(), cache_control: { type: "ephemeral" } },
+        { type: "text", text: buildCoachDynamicSystem(stateRef.current) },
+      ];
       // The API requires the conversation to start with a "user" turn — drop the
       // assistant's opening greeting bubble (and anything before the first user message).
       const firstUserIdx = withUser.findIndex((m) => m.role === "user");
