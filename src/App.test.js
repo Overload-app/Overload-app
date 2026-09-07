@@ -1469,7 +1469,7 @@ describe("requestCoachResponse", () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: '{"reply": "Added it.", "programDayEdit": {"dayIndex": 0, "day": {"exercises": []}}}' }] }),
+      json: async () => ({ content: [{ type: "text", text: '"reply": "Added it.", "programDayEdit": {"dayIndex": 0, "day": {"exercises": []}}}' }] }),
     }));
     const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
     expect(result.parseFailed).toBe(false);
@@ -2450,7 +2450,7 @@ describe("claudeChat", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("hi");
+    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("{hi");
     expect(fetchSpy).toHaveBeenCalled();
   });
 
@@ -2487,7 +2487,42 @@ describe("claudeChat", () => {
     }));
 
     const result = await claudeChat({ system: "s", messages: [] });
-    expect(result).toBe("hello\nworld");
+    expect(result).toBe("{hello\nworld");
+  });
+
+  // Real, confirmed production failure (via error_logs): the model
+  // sometimes ignored "respond ONLY with JSON" entirely and replied with
+  // plain prose — no JSON structure at all, nothing for any parser to
+  // recover. Priming the assistant's own turn to already be inside the
+  // object makes that structurally impossible: the continuation is
+  // syntactically committed to JSON from its first token.
+  test("primes the assistant's turn with an opening brace, so the model can't reply with plain prose instead of JSON", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "hi" }] }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await claudeChat({ system: "s", messages: [{ role: "user", content: "hello" }] });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.messages).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "{" },
+    ]);
+  });
+
+  test("reattaches the leading brace that the API never echoes back, so the returned text is complete JSON again", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: '"reply":"hi"}' }] }),
+    }));
+
+    const result = await claudeChat({ system: "s", messages: [] });
+    expect(result).toBe('{"reply":"hi"}');
+    expect(() => JSON.parse(result)).not.toThrow();
   });
 
   // Real ask: "Coach takes too long to respond sometimes." With no bound

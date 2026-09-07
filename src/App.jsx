@@ -231,6 +231,19 @@ export async function claudeChat({ system, messages }) {
   // connectivity failure, so gating here first only added a way to be
   // wrong, never a way to be right sooner.
   let res;
+  // Real, confirmed failure mode (found via error_logs, not guessed): the
+  // model sometimes just ignores "respond ONLY with JSON" and replies with
+  // ordinary prose instead ("Hey! What would you like to work on...") —
+  // ZERO JSON structure at all. No parser fix can ever recover that; there
+  // is no JSON in the response to find. Every single caller of claudeChat
+  // parses its result as JSON, none of them ever want prose back, so this
+  // forces it structurally instead of hoping the model complies: priming
+  // the assistant's turn to already be inside the object means Claude's
+  // continuation is syntactically committed to JSON from its very first
+  // token — it can no longer choose to open with a greeting or a sentence,
+  // because that turn has already started with "{". The response text
+  // comes back without the prefill itself, so it's stitched back on below.
+  const primedMessages = [...messages, { role: "assistant", content: "{" }];
   // Real report: "Coach takes too long to respond sometimes" — with no
   // timeout at all, a stalled request (a dropped connection that never
   // formally errors, a slow upstream) could just hang indefinitely with
@@ -251,7 +264,7 @@ export async function claudeChat({ system, messages }) {
       // response for exactly the accounts with the most content (i.e. the
       // most engaged users). Same margin applied everywhere claudeChat is
       // used (onboarding program generation has the identical shape).
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8000, system, messages }),
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8000, system, messages: primedMessages }),
       signal: controller.signal,
     });
   } catch (networkErr) {
@@ -269,7 +282,11 @@ export async function claudeChat({ system, messages }) {
     throw new Error(detail || `API error ${res.status}`);
   }
   const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  // The API never echoes the prefill back — Claude's continuation picks up
+  // right after it — so the leading "{" has to be reattached here for the
+  // caller (and parseJSONLoose) to see a complete, valid object again.
+  return "{" + text;
 }
 
 // Finds the index of the closing brace that actually matches the object
