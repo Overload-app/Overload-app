@@ -304,8 +304,57 @@ function findMatchingBrace(text, start) {
   return -1;
 }
 
+// LLMs frequently emit a LITERAL raw newline/tab character inside a JSON
+// string value (e.g. a "reply" that reads, to the model, like two
+// paragraphs) instead of the properly-escaped \n/\t sequence — a real,
+// well-documented class of near-valid JSON these models produce. A raw
+// control character inside a string is invalid per the JSON spec, so
+// JSON.parse throws immediately on it ("Bad control character in string
+// literal") — and it's genuinely invisible when you just look at the
+// text, since a raw newline just renders as an ordinary line break,
+// indistinguishable from intentional formatting, in any table/editor/chat
+// that displays it. A response can look completely well-formed and still
+// fail to parse for exactly this reason. Walks the same string-tracking
+// state this file's brace-matching already uses, escaping any raw
+// control character found strictly INSIDE a string value (never touching
+// the actual JSON structure outside of strings).
+function escapeRawControlCharsInStrings(text) {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
+}
+
 export function parseJSONLoose(text) {
   let clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  clean = escapeRawControlCharsInStrings(clean);
   // The model is instructed to return only JSON, but sometimes adds a stray
   // sentence before or after it anyway — pull out just the {...} block
   // rather than requiring the entire response to be pure JSON.

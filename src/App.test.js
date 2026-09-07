@@ -223,6 +223,29 @@ describe("parseJSONLoose", () => {
     const raw = '{"reply":"Use a tempo like 3-1-1 (not literally \\"{slow}\\")."}';
     expect(parseJSONLoose(raw).reply).toContain("{slow}");
   });
+
+  // Real investigation: a Coach response that looked completely
+  // well-formed when read/copied still failed to parse. LLMs frequently
+  // emit a LITERAL raw newline inside a JSON string value (writing what
+  // reads to them like two paragraphs) instead of the escaped \n — a raw
+  // control character inside a string is invalid JSON and throws
+  // immediately, but it's invisible on inspection since it just renders
+  // as an ordinary line break, indistinguishable from real formatting, in
+  // any table or chat that displays the text.
+  test("recovers from a literal raw newline inside a string value instead of an escaped \\n", () => {
+    const raw = '{"reply":"First part of the answer.\nSecond paragraph here."}';
+    const parsed = parseJSONLoose(raw);
+    expect(parsed.reply).toBe("First part of the answer.\nSecond paragraph here.");
+  });
+
+  test("recovers from a literal raw tab or carriage return inside a string value", () => {
+    expect(parseJSONLoose('{"reply":"col1\tcol2"}').reply).toBe("col1\tcol2");
+    expect(parseJSONLoose('{"reply":"line1\r\nline2"}').reply).toBe("line1\r\nline2");
+  });
+
+  test("still respects an already-properly-escaped \\n — doesn't double-escape it", () => {
+    expect(parseJSONLoose('{"reply":"First.\\nSecond."}').reply).toBe("First.\nSecond.");
+  });
 });
 
 /* ============================================================
