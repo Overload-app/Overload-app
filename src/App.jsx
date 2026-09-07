@@ -5877,18 +5877,41 @@ export default function App() {
             ...history,
           ].slice(0, PROGRAM_HISTORY_LIMIT);
           let newProgram = prev.program;
+          // Real report: "AI told me it made a change but didn't" —
+          // applyProgramDayEdit silently no-ops when dayIndex doesn't
+          // actually exist in the CURRENT program (a valid integer, just
+          // out of range — coerceInt's own check above only confirms it's
+          // a real integer, not that it's in bounds). "reply" and
+          // "withReply" were already built from the model's own confident
+          // text before this ever runs, so without this check a no-op
+          // edit still went out under a reply claiming success. Tracked
+          // separately so the reply actually shown reflects what really
+          // happened, not what the model assumed would happen.
+          let dayEditFailed = false;
           if (hasNewProgram) {
             newProgram = normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays });
           } else if (hasDayEdit) {
             const { dayIndex, day } = parsed.programDayEdit;
-            newProgram = applyProgramDayEdit(prev.program, dayIndex, day.name, withTips(normalizedDayEdit));
-            if (newProgram === prev.program) {
+            const attempted = applyProgramDayEdit(prev.program, dayIndex, day.name, withTips(normalizedDayEdit));
+            if (attempted === prev.program) {
+              dayEditFailed = true;
               console.warn("Coach set programDayEdit.dayIndex=" + dayIndex + " but the program only has " + prev.program.days.length + " day(s). Ignoring the edit rather than guessing which day was meant.");
+            } else {
+              newProgram = attempted;
             }
+          }
+          const finalWithReply = dayEditFailed
+            ? trimCoachChat([...withUser, { role: "assistant", text: "Sorry — that edit didn't actually go through on my end. Mind asking again?" }])
+            : withReply;
+          // Nothing real happened at all (the only change attempted was a
+          // day edit, and it failed) — don't record a history snapshot for
+          // a change that never actually occurred.
+          if (dayEditFailed && !hasValidTargets) {
+            return { ...prev, coachChat: finalWithReply, todayOverride: hasOverride ? normalizedOverride : prev.todayOverride };
           }
           return {
             ...prev,
-            coachChat: withReply,
+            coachChat: finalWithReply,
             program: newProgram,
             todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
             targets: hasValidTargets
