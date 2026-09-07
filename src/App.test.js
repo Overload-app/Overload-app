@@ -200,6 +200,29 @@ describe("parseJSONLoose", () => {
   test("throws on genuinely non-JSON content rather than silently returning garbage", () => {
     expect(() => parseJSONLoose("this is not JSON at all, sorry")).toThrow();
   });
+
+  // Real investigation: a naive lastIndexOf("}") to find where the JSON
+  // ends grabs the LAST closing brace ANYWHERE in the text — if the model
+  // ever appends trailing prose after the real JSON (despite being told
+  // not to) and that prose happens to contain its own "}" further along
+  // (e.g. describing a set/rep scheme, or just stray punctuation), the
+  // old approach silently included that trailing content in the slice and
+  // failed to parse a response that was otherwise completely fine.
+  test("finds the TRUE end of the JSON object even when trailing prose after it contains a stray closing brace", () => {
+    const raw = '{"reply":"Added it."} (note: this uses a 3x10 scheme, e.g. {sets: 3})';
+    expect(parseJSONLoose(raw)).toEqual({ reply: "Added it." });
+  });
+
+  test("correctly matches nested braces rather than stopping at the first one", () => {
+    const raw = '{"reply":"hi","programDayEdit":{"dayIndex":0,"day":{"name":"Push","exercises":[]}}}';
+    const parsed = parseJSONLoose(raw);
+    expect(parsed.programDayEdit.day.name).toBe("Push");
+  });
+
+  test("doesn't miscount a brace character that appears inside a quoted string value", () => {
+    const raw = '{"reply":"Use a tempo like 3-1-1 (not literally \\"{slow}\\")."}';
+    expect(parseJSONLoose(raw).reply).toContain("{slow}");
+  });
 });
 
 /* ============================================================

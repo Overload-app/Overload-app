@@ -272,13 +272,45 @@ export async function claudeChat({ system, messages }) {
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 }
 
+// Finds the index of the closing brace that actually matches the object
+// opening at `start`, by tracking real brace depth (and skipping over
+// braces that appear inside quoted strings, so a literal "{" or "}" in an
+// exercise name or a reply sentence never miscounts). Returns -1 if the
+// object never actually closes. This replaces a naive lastIndexOf("}"),
+// which grabbed the LAST closing brace ANYWHERE in the text — if the
+// model ever appended trailing prose after the real JSON (despite being
+// told not to) and that prose happened to contain its own "}" further
+// along, the old approach would silently include that trailing garbage
+// in the slice and fail to parse for no good reason.
+function findMatchingBrace(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 export function parseJSONLoose(text) {
   let clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
   // The model is instructed to return only JSON, but sometimes adds a stray
   // sentence before or after it anyway — pull out just the {...} block
   // rather than requiring the entire response to be pure JSON.
   const start = clean.indexOf("{");
-  const end = clean.lastIndexOf("}");
+  const end = start !== -1 ? findMatchingBrace(clean, start) : -1;
   if (start !== -1 && end !== -1 && end > start) {
     clean = clean.slice(start, end + 1);
   }
