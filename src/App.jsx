@@ -5874,7 +5874,7 @@ export default function App() {
             program: newProgram,
             todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
             targets: hasValidTargets
-              ? { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat), tdee: prev.targets.tdee }
+              ? { calories: Math.round(parsed.targets.calories), protein: Math.round(parsed.targets.protein), carbs: Math.round(parsed.targets.carbs), fat: Math.round(parsed.targets.fat), tdee: prev.targets.tdee }
               : prev.targets,
             programHistory: newHistory,
           };
