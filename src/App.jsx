@@ -236,14 +236,30 @@ export async function claudeChat({ system, messages }) {
   // ordinary prose instead ("Hey! What would you like to work on...") —
   // ZERO JSON structure at all. No parser fix can ever recover that; there
   // is no JSON in the response to find. Every single caller of claudeChat
-  // parses its result as JSON, none of them ever want prose back, so this
-  // forces it structurally instead of hoping the model complies: priming
-  // the assistant's turn to already be inside the object means Claude's
-  // continuation is syntactically committed to JSON from its very first
-  // token — it can no longer choose to open with a greeting or a sentence,
-  // because that turn has already started with "{". The response text
-  // comes back without the prefill itself, so it's stitched back on below.
-  const primedMessages = [...messages, { role: "assistant", content: "{" }];
+  // parses its result as JSON, none of them ever want prose back.
+  //
+  // First attempt at forcing this was assistant-message prefill (priming
+  // the turn with a leading "{"). That's a real, standard technique in
+  // general, but claude-sonnet-5 specifically rejects it outright — every
+  // request came back with "This model does not support assistant message
+  // prefill," a hard failure on 100% of messages (confirmed via error_logs
+  // immediately after that shipped, then reverted here).
+  //
+  // Forcing a tool call instead achieves the same goal through a path this
+  // model does support: `tool_choice` requires the model to invoke this
+  // tool, and a tool call's `input` is returned as an already-parsed JSON
+  // object by the API itself — there is no way to invoke a tool with plain
+  // prose. The tool's own schema stays fully open (`{}` accepts any object)
+  // because the actual required shape differs per call site (Coach's
+  // response shape, program generation, meal analysis, review writing) and
+  // is already fully specified in each one's own system prompt — this tool
+  // exists purely to make structured output the ONLY possible output, not
+  // to constrain its shape itself.
+  const JSON_RESPONSE_TOOL = {
+    name: "respond",
+    description: "Submit your response. Its shape is defined by the system prompt's instructions, not by this schema.",
+    input_schema: { type: "object" },
+  };
   // Real report: "Coach takes too long to respond sometimes" — with no
   // timeout at all, a stalled request (a dropped connection that never
   // formally errors, a slow upstream) could just hang indefinitely with
@@ -264,7 +280,14 @@ export async function claudeChat({ system, messages }) {
       // response for exactly the accounts with the most content (i.e. the
       // most engaged users). Same margin applied everywhere claudeChat is
       // used (onboarding program generation has the identical shape).
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8000, system, messages: primedMessages }),
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 8000,
+        system,
+        messages,
+        tools: [JSON_RESPONSE_TOOL],
+        tool_choice: { type: "tool", name: "respond" },
+      }),
       signal: controller.signal,
     });
   } catch (networkErr) {
@@ -288,11 +311,21 @@ export async function claudeChat({ system, messages }) {
     throw httpErr;
   }
   const data = await res.json();
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  // The API never echoes the prefill back — Claude's continuation picks up
-  // right after it — so the leading "{" has to be reattached here for the
-  // caller (and parseJSONLoose) to see a complete, valid object again.
-  return "{" + text;
+  // With tool_choice forcing the "respond" tool, the model's actual answer
+  // comes back as a tool_use block whose `input` the API has ALREADY parsed
+  // into a real object — there's no text to accidentally reply with prose
+  // in, and no raw JSON text to fail parsing. Re-stringified here so every
+  // existing caller (which all call parseJSONLoose on the result) keeps
+  // working unchanged — that parse will now always succeed.
+  const toolUse = (data.content || []).find((b) => b.type === "tool_use" && b.name === "respond");
+  if (!toolUse) {
+    // Shouldn't happen with tool_choice forcing it, but fall back to any
+    // text block rather than throwing on something unexpected in the
+    // response shape (e.g. a future API change) — better to hand the
+    // caller SOMETHING to try parsing than a hard failure.
+    return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  }
+  return JSON.stringify(toolUse.input);
 }
 
 // Finds the index of the closing brace that actually matches the object

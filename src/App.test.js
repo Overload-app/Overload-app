@@ -1469,7 +1469,7 @@ describe("requestCoachResponse", () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: '"reply": "Added it.", "programDayEdit": {"dayIndex": 0, "day": {"exercises": []}}}' }] }),
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "Added it.", programDayEdit: { dayIndex: 0, day: { exercises: [] } } } }] }),
     }));
     const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
     expect(result.parseFailed).toBe(false);
@@ -1484,6 +1484,9 @@ describe("requestCoachResponse", () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
+      // No tool_use block — claudeChat's own "shouldn't happen" fallback,
+      // exercised here to prove requestCoachResponse still handles
+      // genuinely unparseable text gracefully either way.
       json: async () => ({ content: [{ type: "text", text: '{"reply": "Sure, here' }] }), // cut off mid-string
     }));
     const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
@@ -2446,11 +2449,11 @@ describe("claudeChat", () => {
     vi.stubGlobal("navigator", { onLine: false });
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: "hi" }] }),
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "hi" } }] }),
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe("{hi");
+    await expect(claudeChat({ system: "s", messages: [] })).resolves.toBe('{"reply":"hi"}');
     expect(fetchSpy).toHaveBeenCalled();
   });
 
@@ -2479,50 +2482,53 @@ describe("claudeChat", () => {
     expect(caught.message).toBe("Internal server error");
   });
 
-  test("on success, joins only the text content blocks from the response", async () => {
+  test("on success, stringifies the forced tool call's already-parsed input", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: "hello" }, { type: "tool_use" }, { type: "text", text: "world" }] }),
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "hello world" } }] }),
     }));
 
     const result = await claudeChat({ system: "s", messages: [] });
-    expect(result).toBe("{hello\nworld");
+    expect(result).toBe('{"reply":"hello world"}');
   });
 
   // Real, confirmed production failure (via error_logs): the model
   // sometimes ignored "respond ONLY with JSON" entirely and replied with
   // plain prose — no JSON structure at all, nothing for any parser to
-  // recover. Priming the assistant's own turn to already be inside the
-  // object makes that structurally impossible: the continuation is
-  // syntactically committed to JSON from its first token.
-  test("primes the assistant's turn with an opening brace, so the model can't reply with plain prose instead of JSON", async () => {
+  // recover. First fix attempt (assistant-message prefill) turned out to
+  // be flatly rejected by claude-sonnet-5 ("This model does not support
+  // assistant message prefill"), breaking 100% of requests — confirmed via
+  // error_logs and reverted. Forcing a tool call is the fix that actually
+  // works on this model: tool_choice requires the model to invoke it, and
+  // there's no way to invoke a tool with plain prose instead of structured
+  // input.
+  test("forces a tool call so the model can't reply with plain prose instead of JSON", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: "hi" }] }),
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "hi" } }] }),
     });
     vi.stubGlobal("fetch", fetchSpy);
 
     await claudeChat({ system: "s", messages: [{ role: "user", content: "hello" }] });
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.messages).toEqual([
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "{" },
-    ]);
+    expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(body.tool_choice).toEqual({ type: "tool", name: "respond" });
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0].name).toBe("respond");
   });
 
-  test("reattaches the leading brace that the API never echoes back, so the returned text is complete JSON again", async () => {
+  test("falls back to any text block if the response somehow has no tool_use block, rather than throwing", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ content: [{ type: "text", text: '"reply":"hi"}' }] }),
+      json: async () => ({ content: [{ type: "text", text: "unexpected plain text" }] }),
     }));
 
     const result = await claudeChat({ system: "s", messages: [] });
-    expect(result).toBe('{"reply":"hi"}');
-    expect(() => JSON.parse(result)).not.toThrow();
+    expect(result).toBe("unexpected plain text");
   });
 
   // Real ask: "Coach takes too long to respond sometimes." With no bound
