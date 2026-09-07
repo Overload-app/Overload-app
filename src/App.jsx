@@ -4194,7 +4194,11 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
   const list = messages && messages.length > 0 ? messages : DEFAULT_COACH_MESSAGES;
   const today = todayISO();
   const usedToday = coachUsage && coachUsage.date === today ? coachUsage.count : 0;
-  const remaining = Math.max(0, (dailyLimit || 30) - usedToday);
+  // Real ask: no daily cap for paid accounts — App passes dailyLimit=null
+  // for those, and this counter (which exists to warn a trial account
+  // it's about to get cut off) has nothing true to say in that case, so
+  // it stays hidden entirely rather than showing a stale, unenforced number.
+  const remaining = dailyLimit == null ? null : Math.max(0, dailyLimit - usedToday);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -4213,7 +4217,7 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
         <div>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>AI COACH</span>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: "2px 0 4px", color: T.ink }}>Ask your coach</h1>
-          {remaining <= 10 && (
+          {remaining !== null && remaining <= 10 && (
             <div style={{ fontSize: 11, color: remaining === 0 ? T.protein : T.steelDark, fontWeight: 600, marginBottom: 8 }}>
               {remaining} message{remaining === 1 ? "" : "s"} left today
             </div>
@@ -5744,7 +5748,11 @@ export default function App() {
     const usedToday = usage && usage.date === today ? usage.count : 0;
     const baseList = trimCoachChat(stateRef.current.coachChat && stateRef.current.coachChat.length ? stateRef.current.coachChat : DEFAULT_COACH_MESSAGES);
 
-    if (usedToday >= COACH_DAILY_LIMIT) {
+    // Real ask: remove the daily message cap for actually-paying accounts —
+    // trial accounts still get it (it's meant to bound free-trial cost),
+    // but someone already subscribed shouldn't be told to wait until
+    // tomorrow for a feature they're paying for.
+    if (!subscribed && usedToday >= COACH_DAILY_LIMIT) {
       const withUser = [...baseList, { role: "user", text: trimmed }];
       persist((prev) => ({
         ...prev,
@@ -6411,7 +6419,7 @@ export default function App() {
               onOpenHistoryEntry={(idx) => { setHistoryEditorInitialIdx(idx); setHistoryEditorOpen(true); }}
             />
           )}
-          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={COACH_DAILY_LIMIT} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && (
             <Progress
