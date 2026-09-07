@@ -390,24 +390,6 @@ export async function claudeChat({ system, messages }) {
   if (data.usage && onAiUsageRecorded) {
     onAiUsageRecorded(estimateCostCents(data.usage.input_tokens, data.usage.output_tokens));
   }
-  // TEMPORARY, remove once confirmed: real verification that Coach's
-  // reinstated system-prompt caching is actually being read, not just
-  // written — a prior attempt at this same thing silently broke Coach and
-  // was reverted without ever confirming what actually happened via real
-  // usage numbers. cache_read_input_tokens > 0 on a second-or-later call
-  // sharing the same static prefix is the only real proof caching is
-  // live; there's no other channel to observe this remotely.
-  if (data.usage && (data.usage.cache_read_input_tokens || data.usage.cache_creation_input_tokens)) {
-    logError("Coach cache diagnostic", {
-      stack: JSON.stringify({
-        cache_read_input_tokens: data.usage.cache_read_input_tokens,
-        cache_creation_input_tokens: data.usage.cache_creation_input_tokens,
-        input_tokens: data.usage.input_tokens,
-        output_tokens: data.usage.output_tokens,
-      }),
-      context: { type: "coach-cache-diagnostic" },
-    });
-  }
   // With tool_choice forcing the "respond" tool, the model's actual answer
   // comes back as a tool_use block whose `input` the API has ALREADY parsed
   // into a real object — there's no text to accidentally reply with prose
