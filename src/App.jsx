@@ -5838,23 +5838,27 @@ export default function App() {
       const next = typeof updater === "function" ? updater(prev) : updater;
       // Real, unconfirmed report (twice now): a day's logged meals, and
       // separately a weigh-in, disappeared — both times noticed "after an
-      // update." Nothing here has actually pinned down a root cause yet —
-      // the sync path already has real protections (pendingSync-aware
-      // loads, sequenced saves), and guessing at another fix without
-      // evidence is exactly the mistake this whole session already made
-      // once, at real cost, on a different bug. This logs the actual
-      // shrink the next time it happens — today's meal count and total
-      // weigh-in count, prev vs next, plus what call site did it — so the
-      // next report comes with a real stack trace instead of another
-      // guess.
+      // update." Standing rule since: an update must never reset a user's
+      // own progress — weight, diet, AND workouts. Nothing here has
+      // actually pinned down a root cause yet — the sync path already has
+      // real protections (pendingSync-aware loads, sequenced saves), and
+      // guessing at another fix without evidence is exactly the mistake
+      // this whole session already made once, at real cost, on a
+      // different bug. This logs the actual shrink the next time it
+      // happens — today's meal count, total weigh-in count, and total
+      // logged-workout count, prev vs next, plus what call site did it —
+      // so the next report comes with a real stack trace instead of
+      // another guess.
       const prevMealCount = prev ? (prev.logs?.nutrition?.find((d) => d.date === todayISO())?.meals?.length ?? 0) : 0;
       const nextMealCount = next ? (next.logs?.nutrition?.find((d) => d.date === todayISO())?.meals?.length ?? 0) : 0;
       const prevWeighInCount = prev?.logs?.bodyweight?.length ?? 0;
       const nextWeighInCount = next?.logs?.bodyweight?.length ?? 0;
-      if (nextMealCount < prevMealCount || nextWeighInCount < prevWeighInCount) {
-        logError("persist() shrank today's meals or weigh-ins", {
+      const prevWorkoutCount = prev?.logs?.workouts?.length ?? 0;
+      const nextWorkoutCount = next?.logs?.workouts?.length ?? 0;
+      if (nextMealCount < prevMealCount || nextWeighInCount < prevWeighInCount || nextWorkoutCount < prevWorkoutCount) {
+        logError("persist() shrank a user's weight, diet, or workout logs", {
           stack: new Error().stack,
-          context: { type: "data-shrink", prevMealCount, nextMealCount, prevWeighInCount, nextWeighInCount },
+          context: { type: "data-shrink", prevMealCount, nextMealCount, prevWeighInCount, nextWeighInCount, prevWorkoutCount, nextWorkoutCount },
         });
       }
       // Computed and used for the save right here, inside the updater —
