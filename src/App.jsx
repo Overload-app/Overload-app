@@ -224,7 +224,83 @@ function timeoutError() {
   return err;
 }
 
+/* ============================================================
+   AI USAGE BUDGET (free trial)
+   Real ask: cap what a free-trial account can spend on AI, both per day
+   and per month — $0.75/month hard ceiling. Enforced centrally here since
+   claudeChat is the one function every AI feature in the app already
+   routes through (Coach, program generation, meal photo analysis,
+   exercise-alternatives lookup, periodic reviews) — covers all of them
+   automatically, including anything added later, with nothing to
+   duplicate at each call site.
+
+   Real second report, after this was removed for a few days: with
+   nothing capping it, one day's usage climbed to $2 with no single
+   runaway bug found behind it — just real, uncapped usage (several
+   testers' onboarding generations, back-and-forth Coach edits, retries)
+   with nothing bounding the total. Reinstated for that reason; the
+   version that existed briefly before this was removed entirely after a
+   crash in its OWN wiring (a `state` variable referenced before its
+   declaration in the App component's effect, now fixed by declaring
+   these effects after state/subscribed/trialStartedAt below, not before)
+   — the budget math itself was never the problem.
+
+   Sonnet 5 pricing (confirmed current rate for "claude-sonnet-5"):
+   $2/1M input tokens, $10/1M output tokens — no prompt caching is in use
+   here, so that's the whole calculation.
+
+   Applies to trial (unsubscribed) accounts only — a paying subscriber's
+   usage is between them and their subscription, not this cap.
+============================================================ */
+const SONNET5_INPUT_DOLLARS_PER_TOKEN = 2 / 1_000_000;
+const SONNET5_OUTPUT_DOLLARS_PER_TOKEN = 10 / 1_000_000;
+export const TRIAL_DAILY_COST_CAP_CENTS = 15; // $0.15/day
+export const TRIAL_MONTHLY_COST_CAP_CENTS = 75; // $0.75/month — the hard ceiling
+
+export function estimateCostCents(inputTokens, outputTokens) {
+  const dollars = (inputTokens || 0) * SONNET5_INPUT_DOLLARS_PER_TOKEN + (outputTokens || 0) * SONNET5_OUTPUT_DOLLARS_PER_TOKEN;
+  return dollars * 100;
+}
+
+// today/month bucketing lives here (not just inline in claudeChat) so the
+// exact same reset rule that decides "is this still today's number" also
+// governs what actually gets checked before every call.
+export function currentUsageCents(aiUsage) {
+  const today = todayISO();
+  const month = today.slice(0, 7);
+  return {
+    dailyCostCents: aiUsage && aiUsage.day === today ? aiUsage.dailyCostCents : 0,
+    monthlyCostCents: aiUsage && aiUsage.month === month ? aiUsage.monthlyCostCents : 0,
+  };
+}
+
+export function budgetAllows(aiUsage) {
+  const { dailyCostCents, monthlyCostCents } = currentUsageCents(aiUsage);
+  return dailyCostCents < TRIAL_DAILY_COST_CAP_CENTS && monthlyCostCents < TRIAL_MONTHLY_COST_CAP_CENTS;
+}
+
+export const BUDGET_EXCEEDED_MESSAGE = "You've used up this trial's AI limit for now — subscribing removes the cap, or this resets tomorrow.";
+function budgetExceededError() {
+  const err = new Error(BUDGET_EXCEEDED_MESSAGE);
+  err.budgetExceeded = true;
+  return err;
+}
+
+// Synced by the App component (see its own useEffect, declared AFTER
+// state/subscribed/trialStartedAt — see the comment above about why)
+// whenever the account, subscription, trial, or usage-so-far changes —
+// module-level so claudeChat, called from many different places, always
+// has the latest answer without threading account/usage through every
+// call site.
+let aiBudgetContext = null; // { isTrialUnsubscribed, aiUsage } | null
+export function setAiBudgetContext(ctx) { aiBudgetContext = ctx; }
+let onAiUsageRecorded = null; // (costCents) => void — persists the running total
+export function setAiUsageRecordedCallback(cb) { onAiUsageRecorded = cb; }
+
 export async function claudeChat({ system, messages }) {
+  if (aiBudgetContext?.isTrialUnsubscribed && !budgetAllows(aiBudgetContext.aiUsage)) {
+    throw budgetExceededError();
+  }
   // Deliberately NOT gated on navigator.onLine — it's a browser-reported
   // flag, not a real connectivity check. The actual fetch() below is the
   // real test; its catch block already produces an error for a genuine
@@ -311,6 +387,9 @@ export async function claudeChat({ system, messages }) {
     throw httpErr;
   }
   const data = await res.json();
+  if (data.usage && onAiUsageRecorded) {
+    onAiUsageRecorded(estimateCostCents(data.usage.input_tokens, data.usage.output_tokens));
+  }
   // With tool_choice forcing the "respond" tool, the model's actual answer
   // comes back as a tool_use block whose `input` the API has ALREADY parsed
   // into a real object — there's no text to accidentally reply with prose
@@ -5416,6 +5495,24 @@ export default function App() {
   const [confirmEmailPending, setConfirmEmailPending] = useState(null);
   const [justConfirmedEmail, setJustConfirmedEmail] = useState(false);
   const [state, setState] = useState(null);
+  // Real ask: cap free-trial AI usage, $0.75/month hard ceiling. Kept in
+  // sync here (not computed inline inside claudeChat, which has no access
+  // to React state) so every AI call anywhere in the app checks against
+  // the current, real answer without threading account/subscription/usage
+  // through every call site individually. Must come after `state` is
+  // declared above — this crashed every single load with "Cannot access
+  // 'state' before initialization" when it briefly sat above that
+  // declaration instead of below it, the last time this existed.
+  useEffect(() => {
+    setAiBudgetContext({
+      isTrialUnsubscribed: !subscribed && isTrialActive(trialStartedAt),
+      aiUsage: state?.aiUsage,
+    });
+  }, [subscribed, trialStartedAt, state?.aiUsage]);
+  useEffect(() => {
+    setAiUsageRecordedCallback(account ? (costCents) => recordAiUsage(costCents) : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
@@ -5730,6 +5827,29 @@ export default function App() {
     });
   }
 
+  // Accumulates real AI spend into today's/this-month's running total —
+  // called from claudeChat's own usage-recorded callback (see
+  // setAiUsageRecordedCallback above) right after every real API response,
+  // so it reflects exactly what was actually spent, not an estimate made
+  // before the call. currentUsageCents' own day/month reset logic decides
+  // whether to add onto today's number or start a fresh one.
+  function recordAiUsage(costCents) {
+    persist((prev) => {
+      const today = todayISO();
+      const month = today.slice(0, 7);
+      const { dailyCostCents, monthlyCostCents } = currentUsageCents(prev.aiUsage);
+      return {
+        ...prev,
+        aiUsage: {
+          day: today,
+          dailyCostCents: dailyCostCents + costCents,
+          month,
+          monthlyCostCents: monthlyCostCents + costCents,
+        },
+      };
+    });
+  }
+
   // Lives at the App level (not inside the Coach tab component) so an in-flight
   // request keeps running — and its reply gets saved — even if the person
   // switches to Train, Fuel, etc. while waiting on it.
@@ -5945,15 +6065,16 @@ export default function App() {
       // actually WAS beyond the browser console, which is useless after the
       // fact — logging it the same way as the parse-failure path means the
       // next occurrence is real evidence instead of another guess. Skipped
-      // for offline/timeout since those are already distinguishable and
-      // expected often enough that logging every one would just be noise.
-      if (!e.offline && !e.timeout) {
+      // for offline/timeout/budgetExceeded since those are already
+      // distinguishable and expected often enough that logging every one
+      // would just be noise.
+      if (!e.offline && !e.timeout && !e.budgetExceeded) {
         logError("Coach send failed (non-parse error)", {
           stack: e?.stack || e?.message || String(e),
           context: { type: "coach-request-failure", status: e?.status },
         });
       }
-      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
+      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
       persist((prev) => ({ ...prev, coachChat: trimCoachChat([...withUser, { role: "assistant", text: failText }]) }));
     } finally {
       setCoachLoading(false);
