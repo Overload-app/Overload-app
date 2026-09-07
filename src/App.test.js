@@ -980,6 +980,24 @@ describe("normalizeExerciseCount", () => {
     const result = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"]);
     expect(result).toEqual(exercises);
   });
+
+  // Real tester report: directly asked for 5 exercises, got fewer anyway —
+  // the ceiling used to apply even over an explicit, direct instruction.
+  test("overrideCeiling lets an explicit request through untrimmed, even past the normal ceiling", () => {
+    // Same 6-exercise, 30-min day as the trimming test above — would
+    // normally get cut down.
+    const exercises = Array.from({ length: 6 }, (_, i) => ({ name: `Exercise ${i}`, sets: 4, reps: "8-12", rest: 90 }));
+    const trimmed = normalizeExerciseCount(exercises, 30, "intermediate", "full", ["none"], false);
+    const overridden = normalizeExerciseCount(exercises, 30, "intermediate", "full", ["none"], true);
+    expect(trimmed.length).toBeLessThan(6);
+    expect(overridden.length).toBe(6);
+  });
+
+  test("overrideCeiling still pads a too-short day up to the real minimum — it's not asking for fewer", () => {
+    const exercises = [{ name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 }];
+    const result = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"], true);
+    expect(result.length).toBeGreaterThanOrEqual(4);
+  });
 });
 
 // Regression coverage for a real report: a tester reduced their program's
