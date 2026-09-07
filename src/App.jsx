@@ -363,6 +363,17 @@ export async function claudeChat({ system, messages }) {
         messages,
         tools: [JSON_RESPONSE_TOOL],
         tool_choice: { type: "tool", name: "respond" },
+        // Real ask: cut cost further. Nothing here ever set an effort
+        // level, so every call — including a plain "what's the best time
+        // to train" Q&A — ran Sonnet 5's full default reasoning depth.
+        // This app's calls are exactly the shape effort tuning targets
+        // best (structured chat/classification-style output, not deep
+        // multi-step agentic work), so "low" is the starting point, not a
+        // guess split down the middle. No eval exists to prove this holds
+        // reply quality — that's a real gap, not a formality — so this
+        // needs a genuine spot-check against real Coach replies, and an
+        // easy way back to "medium" if answers start feeling thin.
+        output_config: { effort: "low" },
       }),
       signal: controller.signal,
     });
@@ -3304,7 +3315,16 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
           </div>
         )}
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      {/* Real report: scrolled to the bottom of a workout mid-rest, and the
+          floating RestTimer sat slightly over the last exercise's set rows.
+          The timer floats at a fixed distance from the viewport bottom (to
+          clear the separate, non-scrolling "Finish workout" footer below
+          it), but this scroll area's own bottom padding never accounted
+          for the timer's height on top of that — only the footer did.
+          Scrolling all the way down put the last card in the exact screen
+          space the timer occupies. Extra bottom padding while resting
+          reserves that space so the last card can scroll clear of it. */}
+      <div style={{ flex: 1, overflowY: "auto", padding: `16px 16px ${rest !== null ? 96 : 16}px` }}>
         {/* Direct answer to real beta-tester confusion: she didn't realize
             the checkmark both logs the set AND starts a rest timer. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.card, border: `1px solid ${T.steel}`, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
