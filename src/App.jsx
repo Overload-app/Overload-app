@@ -3,7 +3,7 @@ import {
   Dumbbell, Utensils, TrendingUp, User, Check, Plus, X, Flame,
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
-  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, Repeat, Clock,
+  Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, Repeat, Clock, FileText,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -702,6 +702,16 @@ function compressImageToBase64(file, maxDim = 1024, quality = 0.72) {
 }
 
 const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estimate the food and its nutrition. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}";
+
+// Real ask: "add an option where you can describe what you ate... I forgot
+// to take a picture and don't want to research the numbers myself." Same
+// shape/contract as MEAL_PHOTO_SYSTEM (and reuses its result-review UI) —
+// just from a plain-text description instead of an image. A free-text
+// description is often vaguer than a photo ("a bagel," "some chicken and
+// rice"), so this leans on reasonable real-world default portion sizes
+// rather than refusing to estimate — same spirit as a photo estimate,
+// which is also never exact.
+const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person's own plain-text description of what they ate (no photo). Use reasonable, realistic default portion sizes for anything not specified (e.g. \"a bagel\" means one standard plain bagel, \"chicken and rice\" means a normal single-meal portion of each) rather than asking for more detail — the person deliberately chose to describe instead of measuring precisely. If the description is genuinely too vague to estimate at all (e.g. just \"food\" or a single unclear word), still give your best reasonable single-serving guess rather than refusing. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate and what portion size you assumed, under 20 words>\"}";
 
 // One-time smart backfill for the "Find alternative" swap picker, used only
 // when an exercise doesn't already have AI-sourced alternatives baked in
@@ -1567,6 +1577,22 @@ ${profile.notes ? `- Actually honor the client's own additional notes above ("${
 /* ============================================================
    NUTRITION CALC
 ============================================================ */
+// Real report: a tester's other calorie app gave them ~2000 kcal for fat
+// loss; this app gave 1600 — a flat percentage cut off TDEE with no floor
+// at all can land below what's medically considered a safe sustained-
+// deficit minimum for a smaller, older, or less active person (a real,
+// common combination among this app's own users, not an edge case).
+// Widely-cited adult minimums (NIH/Mayo Clinic-style guidance): ~1200
+// kcal/day for women, ~1500 for men — never recommend below that,
+// regardless of what the deficit math alone would produce. Shared between
+// calcTargets (initial onboarding numbers) and Coach's own target-setting
+// (sendCoachMessage) — Coach computes its own calorie numbers
+// independently and nothing enforced this floor there before either.
+export function enforceSafeCalorieFloor(calories, sex) {
+  const floor = sex === "male" ? 1500 : 1200;
+  return Math.max(calories, floor);
+}
+
 export function calcTargets(profile) {
   const { sex, age, heightIn, weightLb, activity, goal } = profile;
   const kg = weightLb * 0.453592;
@@ -1578,6 +1604,7 @@ export function calcTargets(profile) {
   if (goal === "lose") calories = tdee * 0.8;
   if (goal === "build") calories = tdee * 1.1;
   if (goal === "recomp") calories = tdee * 0.97;
+  calories = enforceSafeCalorieFloor(calories, sex);
   calories = Math.round(calories / 5) * 5;
   const protein = Math.round(weightLb * 1.0);
   const fat = Math.round((calories * 0.25) / 9);
@@ -4131,6 +4158,7 @@ Rules:
 - Default to "programDayEdit" for any permanent change that only touches one day — it's faster to generate and cheaper to run, and the app merges it in correctly on its own. Only reach for the full "program" when the change is genuinely structural or spans more than one day at once (see case 2 above).
 - If "restoreIndex" is set, leave "program", "programDayEdit", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
 - When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
+- NEVER set "calories" below 1200 for a female client or 1500 for a male client, even for an aggressive fat-loss request — those are widely-recognized minimum safe daily intakes, not a target to approach. If a deficit that would normally fit their numbers falls below that floor, use the floor instead and say so plainly in "reply" (e.g. "capped this at a safe minimum rather than cutting further").
 - CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
 - When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" in your context below verbatim — do not recalculate or estimate fresh numbers from scratch. That JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
@@ -4441,6 +4469,15 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carb: "", fat: "" });
 
+  // "Describe what you ate" — real ask: forgot to take a photo of a
+  // bagel and didn't want to look up its numbers manually. Shares the
+  // exact same result-review/edit card as the photo flow below (same
+  // {name, cal, protein, carb, fat, note} shape), so it reuses photoResult/
+  // photoError rather than duplicating that whole UI for a second time.
+  const [showDescribe, setShowDescribe] = useState(false);
+  const [describeText, setDescribeText] = useState("");
+  const [describeLoading, setDescribeLoading] = useState(false);
+
   const [suggestions, setSuggestions] = useState(null);
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestError, setSuggestError] = useState(null);
@@ -4507,6 +4544,31 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     addMeal({ name: form.name, cal: Number(form.cal) || 0, protein: Number(form.protein) || 0, carb: Number(form.carb) || 0, fat: Number(form.fat) || 0 });
     setForm({ name: "", cal: "", protein: "", carb: "", fat: "" });
     setShowForm(false);
+  }
+
+  async function handleDescribe() {
+    const text = describeText.trim();
+    if (!text) return;
+    setPhotoError(null);
+    setPhotoResult(null);
+    setDescribeLoading(true);
+    try {
+      const raw = await claudeChat({
+        system: MEAL_TEXT_SYSTEM,
+        messages: [{ role: "user", content: text }],
+      });
+      const parsed = parseJSONLoose(raw);
+      setPhotoResult(parsed);
+      setDescribeText("");
+      setShowDescribe(false);
+    } catch (err) {
+      // No offline-queue path here (unlike the photo flow) — there's
+      // nothing to defer-and-retry the same way a saved photo can be;
+      // a text description costs nothing to just resend once back online.
+      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : "Couldn't estimate that meal — try again or add manually.");
+    } finally {
+      setDescribeLoading(false);
+    }
   }
 
   async function getSuggestions() {
@@ -4636,16 +4698,39 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         </Card>
       )}
 
-      {!showForm && (
+      {/* Real ask: "add an option where you can describe what you ate" —
+          forgot to photograph a bagel, didn't want to look up its numbers.
+          Third option alongside manual entry and photo scanning, same
+          "AI estimate, double-check it" caveat as the other AI-driven path. */}
+      {showDescribe && (
+        <Card style={{ marginTop: 12 }}>
+          <textarea
+            placeholder={'What did you eat? e.g. "a plain bagel with cream cheese" or "grilled chicken breast and a cup of rice"'}
+            value={describeText}
+            onChange={(e) => setDescribeText(e.target.value)}
+            rows={3}
+            style={{ width: "100%", padding: 12, borderRadius: 8, border: `1.5px solid ${T.steel}`, marginBottom: 10, boxSizing: "border-box", fontFamily: "'Inter', sans-serif", fontSize: 15, resize: "vertical" }}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn variant="ghost" onClick={() => { setShowDescribe(false); setDescribeText(""); }} style={{ flex: 1 }} disabled={describeLoading}>Cancel</Btn>
+            <Btn variant="accent" onClick={handleDescribe} style={{ flex: 1 }} disabled={describeLoading || !describeText.trim()}>
+              {describeLoading ? <Loader2 size={16} className="spin" /> : "Estimate"}
+            </Btn>
+          </div>
+        </Card>
+      )}
+
+      {!showForm && !showDescribe && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", gap: 8 }}>
             <Btn variant="primary" style={{ flex: 1 }} onClick={() => setShowForm(true)}><Plus size={16} /> Add meal</Btn>
             <Btn variant="ghost" style={{ flex: 1 }} onClick={() => fileInputRef.current?.click()}><Camera size={16} /> Photo</Btn>
+            <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setShowDescribe(true)}><FileText size={16} /> Describe</Btn>
           </div>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 5, marginTop: 8 }}>
             <Info size={12} color={T.steelDark} style={{ flexShrink: 0, marginTop: 2 }} />
             <span style={{ fontSize: 11, color: T.steelDark, lineHeight: 1.4 }}>
-              Photo scanning uses AI and is usually close, but not exact — always worth a quick double-check.
+              Photo scanning and description both use AI and are usually close, but not exact — always worth a quick double-check.
             </span>
           </div>
         </div>
@@ -6096,8 +6181,24 @@ export default function App() {
             coachChat: finalWithReply,
             program: newProgram,
             todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
+            // Deterministic backstop, same reasoning as the exercise-count
+            // ceiling above — Coach computes its own calorie numbers
+            // independently of calcTargets, so nothing enforced the same
+            // safe-minimum floor here before. If the floor actually raises
+            // calories, carbs (the remainder macro, same as calcTargets)
+            // absorbs the difference so protein/fat stay exactly what
+            // Coach actually calculated.
             targets: hasValidTargets
-              ? { calories: Math.round(parsed.targets.calories), protein: Math.round(parsed.targets.protein), carbs: Math.round(parsed.targets.carbs), fat: Math.round(parsed.targets.fat), tdee: prev.targets.tdee }
+              ? (() => {
+                  const protein = Math.round(parsed.targets.protein);
+                  const fat = Math.round(parsed.targets.fat);
+                  const rawCalories = Math.round(parsed.targets.calories);
+                  const calories = enforceSafeCalorieFloor(rawCalories, p.sex);
+                  const carbs = calories === rawCalories
+                    ? Math.round(parsed.targets.carbs)
+                    : Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
+                  return { calories, protein, carbs, fat, tdee: prev.targets.tdee };
+                })()
               : prev.targets,
             programHistory: newHistory,
           };

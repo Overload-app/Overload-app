@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   calcTargets,
+  enforceSafeCalorieFloor,
   parseJSONLoose,
   filterPool,
   injuryDescription,
@@ -164,6 +165,33 @@ describe("calcTargets", () => {
         expect(calories % 5).toBe(0);
       }
     }
+  });
+
+  // Real report: a tester's other calorie app gave them ~2000 kcal for fat
+  // loss; this app gave 1600 — a flat percentage deficit with no floor can
+  // land below a safe minimum for a smaller/older/less active person.
+  test("never recommends below the safe calorie floor, even for a small, older, sedentary client on a fat-loss goal", () => {
+    const female = calcTargets({ ...baseProfile, sex: "female", weightLb: 110, heightIn: 60, age: 65, activity: "sedentary", goal: "lose" });
+    expect(female.calories).toBeGreaterThanOrEqual(1200);
+    const male = calcTargets({ ...baseProfile, sex: "male", weightLb: 130, heightIn: 62, age: 70, activity: "sedentary", goal: "lose" });
+    expect(male.calories).toBeGreaterThanOrEqual(1500);
+  });
+
+  test("does not touch a genuinely safe calorie number by clamping it down or otherwise altering it", () => {
+    const t = calcTargets({ ...baseProfile, sex: "male", weightLb: 200, activity: "active", goal: "build" });
+    expect(t.calories).toBeGreaterThan(1500);
+  });
+});
+
+describe("enforceSafeCalorieFloor", () => {
+  test("raises a below-floor number up to the sex-specific minimum", () => {
+    expect(enforceSafeCalorieFloor(1000, "female")).toBe(1200);
+    expect(enforceSafeCalorieFloor(1300, "male")).toBe(1500);
+  });
+
+  test("leaves an already-safe number untouched", () => {
+    expect(enforceSafeCalorieFloor(1800, "female")).toBe(1800);
+    expect(enforceSafeCalorieFloor(2200, "male")).toBe(2200);
   });
 
   test("macros reconstruct back to roughly the target calorie count", () => {
