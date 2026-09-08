@@ -363,17 +363,17 @@ export async function claudeChat({ system, messages }) {
         messages,
         tools: [JSON_RESPONSE_TOOL],
         tool_choice: { type: "tool", name: "respond" },
-        // Real ask: cut cost further. Nothing here ever set an effort
-        // level, so every call — including a plain "what's the best time
-        // to train" Q&A — ran Sonnet 5's full default reasoning depth.
-        // This app's calls are exactly the shape effort tuning targets
-        // best (structured chat/classification-style output, not deep
-        // multi-step agentic work), so "low" is the starting point, not a
-        // guess split down the middle. No eval exists to prove this holds
-        // reply quality — that's a real gap, not a formality — so this
-        // needs a genuine spot-check against real Coach replies, and an
-        // easy way back to "medium" if answers start feeling thin.
-        output_config: { effort: "low" },
+        // Bumped back up from "low" the same day it shipped: real report
+        // right after — Coach needing to be told multiple times to make a
+        // change, and often not making it at all. That's exactly the
+        // quality risk flagged when "low" went in (no eval existed to
+        // prove it held up on this task), and correctly picking a
+        // dayIndex/following through on a structured edit is precisely
+        // the kind of reasoning effort tuning trades away. "Medium" is the
+        // documented middle ground — real cost savings over the old
+        // unset default, without gambling compliance on the one thing
+        // this whole session was already fighting hardest to fix.
+        output_config: { effort: "medium" },
       }),
       signal: controller.signal,
     });
@@ -5322,11 +5322,19 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
   // entries stay reachable from there.
   const [openIdx, setOpenIdx] = useState(initialOpenIndex);
   const [editedExercises, setEditedExercises] = useState(null); // working copy while editing, or null (not yet touched)
+  // Real report: a workout discarded halfway through still recorded
+  // whatever partial time had elapsed (18 min), with no way to correct it
+  // afterward. Stored as a string (the input's own raw minutes value) so
+  // it's null (untouched) rather than 0 until the person actually types
+  // something — same "null means don't touch this field" convention as
+  // editedExercises above.
+  const [editedMinutes, setEditedMinutes] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   function closeDetail() {
     setOpenIdx(null);
     setEditedExercises(null);
+    setEditedMinutes(null);
     setConfirmDelete(false);
   }
 
@@ -5349,6 +5357,20 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
           <button onClick={closeDetail} aria-label="Close workout detail" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {/* Real report: a workout discarded halfway through still
+              recorded whatever partial time had elapsed (18 min), with no
+              way to fix it afterward. */}
+          <Card style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 10 }}>
+            <Clock size={16} color={T.steelDark} style={{ flexShrink: 0 }} />
+            <label style={{ fontSize: 13, color: T.ink, fontWeight: 600, flex: 1 }}>Duration (minutes)</label>
+            <input
+              type="number" placeholder="min"
+              value={editedMinutes ?? (entry.durationSec ? Math.round(entry.durationSec / 60) : "")}
+              onChange={(e) => setEditedMinutes(e.target.value)}
+              aria-label="Workout duration in minutes"
+              style={{ width: 70, padding: "8px 6px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 15, boxSizing: "border-box", textAlign: "center" }}
+            />
+          </Card>
           {exercises.map((ex, exIdx) => (
             <Card key={exIdx} style={{ marginBottom: 10 }}>
               <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, margin: "0 0 8px" }}>{ex.name}</h3>
@@ -5378,7 +5400,19 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
             variant="accent"
             style={{ flex: 1 }}
             onClick={() => {
-              if (editedExercises) onUpdate(openIdx, editedExercises);
+              if (editedExercises || editedMinutes !== null) {
+                // Blank/invalid minutes input is treated as "leave it
+                // alone," not as zeroing out the duration — clearing the
+                // field isn't how you'd express "make this 0 minutes," so
+                // that case omits the third argument entirely rather than
+                // passing an explicit undefined.
+                const parsedMinutes = editedMinutes !== null ? Number(editedMinutes) : null;
+                if (parsedMinutes !== null && Number.isFinite(parsedMinutes) && parsedMinutes >= 0) {
+                  onUpdate(openIdx, exercises, Math.round(parsedMinutes * 60));
+                } else {
+                  onUpdate(openIdx, exercises);
+                }
+              }
               closeDetail();
             }}
           >
@@ -6505,10 +6539,18 @@ export default function App() {
     persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: prev.logs.workouts.filter((_, i) => i !== index) } }));
   }
 
-  function updateWorkoutLog(index, updatedExercises) {
+  // Real report: a workout discarded halfway through still recorded
+  // whatever partial duration had elapsed (18 min) with no way to fix it
+  // afterward — durationSec is now an optional third argument alongside
+  // the exercise edits, left untouched (undefined) when the editor's
+  // duration field was never actually changed.
+  function updateWorkoutLog(index, updatedExercises, durationSec) {
     persist((prev) => ({
       ...prev,
-      logs: { ...prev.logs, workouts: prev.logs.workouts.map((w, i) => (i === index ? { ...w, exercises: updatedExercises } : w)) },
+      logs: {
+        ...prev.logs,
+        workouts: prev.logs.workouts.map((w, i) => (i === index ? { ...w, exercises: updatedExercises, ...(durationSec !== undefined ? { durationSec } : {}) } : w)),
+      },
     }));
   }
 

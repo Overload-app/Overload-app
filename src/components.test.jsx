@@ -386,6 +386,21 @@ describe("<WorkoutHistoryEditor />", () => {
     expect(onUpdate).toHaveBeenCalledWith(0, [{ name: "Bench Press", logged: [{ weight: "145", reps: "8", done: true }] }]);
   });
 
+  // Real report: a workout discarded halfway through still recorded
+  // whatever partial time had elapsed (18 min), with no way to fix it.
+  test("editing the duration and saving calls onUpdate with the new duration in seconds", async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    render(<WorkoutHistoryEditor workouts={workouts()} onClose={vi.fn()} onDelete={vi.fn()} onUpdate={onUpdate} />);
+    await user.click(screen.getByText("Push")); // real index 0, currently 2400s = 40 min
+    const durationInput = screen.getByLabelText("Workout duration in minutes");
+    expect(durationInput).toHaveValue(40);
+    await user.clear(durationInput);
+    await user.type(durationInput, "18");
+    await user.click(screen.getByText("Save changes"));
+    expect(onUpdate).toHaveBeenCalledWith(0, workouts()[0].exercises, 1080); // 18 min = 1080s
+  });
+
   test("saving without editing anything does not call onUpdate", async () => {
     const user = userEvent.setup();
     const onUpdate = vi.fn();
