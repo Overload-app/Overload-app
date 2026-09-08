@@ -1029,10 +1029,21 @@ describe("normalizeExerciseCount", () => {
     expect(overridden.length).toBe(6);
   });
 
-  test("overrideCeiling still pads a too-short day up to the real minimum — it's not asking for fewer", () => {
+  // Real, confirmed report: asked Coach to remove one specific exercise
+  // (no total count stated) 3 times — never actually took, because the
+  // deterministic minimum-padding backstop silently added a replacement
+  // back in every time, with no mention of it in Coach's own reply (which
+  // was already generated before this padding ever runs). overrideCeiling
+  // previously only ever skipped the MAX side; a deliberate removal that
+  // dropped the count below 4 still got forced back up regardless of the
+  // flag. This is the fix: overrideCeiling now means "trust the explicit
+  // count in EITHER direction," not just "allow exceeding the ceiling."
+  test("overrideCeiling also skips padding a too-short day back up — a deliberate removal is not asking for a replacement", () => {
     const exercises = [{ name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 }];
-    const result = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"], true);
-    expect(result.length).toBeGreaterThanOrEqual(4);
+    const notOverridden = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"], false);
+    const overridden = normalizeExerciseCount(exercises, 60, "intermediate", "full", ["none"], true);
+    expect(notOverridden.length).toBeGreaterThanOrEqual(4); // normal behavior: pads up
+    expect(overridden.length).toBe(1); // override: left exactly as given, no backfill
   });
 });
 

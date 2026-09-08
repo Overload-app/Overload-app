@@ -363,17 +363,15 @@ export async function claudeChat({ system, messages }) {
         messages,
         tools: [JSON_RESPONSE_TOOL],
         tool_choice: { type: "tool", name: "respond" },
-        // Bumped back up from "low" the same day it shipped: real report
-        // right after — Coach needing to be told multiple times to make a
-        // change, and often not making it at all. That's exactly the
-        // quality risk flagged when "low" went in (no eval existed to
-        // prove it held up on this task), and correctly picking a
-        // dayIndex/following through on a structured edit is precisely
-        // the kind of reasoning effort tuning trades away. "Medium" is the
-        // documented middle ground — real cost savings over the old
-        // unset default, without gambling compliance on the one thing
-        // this whole session was already fighting hardest to fix.
-        output_config: { effort: "medium" },
+        // Back to "low" per the user's own explicit call: a real repro
+        // (repeatedly asking to remove one exercise, 3 tries, never took)
+        // pointed at a real app bug, not reasoning depth — see
+        // normalizeExerciseCount/padToMinimum, where removing an exercise
+        // that drops a day below the 4-minimum can trigger the
+        // deterministic padding backstop to silently re-add something,
+        // making a correct removal look like it never happened regardless
+        // of what effort level generated it.
+        output_config: { effort: "low" },
       }),
       signal: controller.signal,
     });
@@ -1429,7 +1427,19 @@ export function padToMinimum(exercises, targetCount, equipment, injuries) {
 export function normalizeExerciseCount(exercises, sessionLength, experience, equipment, injuries, overrideCeiling) {
   const ceiling = overrideCeiling ? Infinity : (capForProgram({ days: [{ exercises }] }, sessionLength, experience) ?? TARGET_MIN_EXERCISES);
   let result = enforceExerciseCeiling(exercises, ceiling);
-  const padTarget = Math.min(TARGET_MIN_EXERCISES, ceiling);
+  // Real, confirmed report: asked Coach to remove one exercise from a day
+  // that was already at (or one above) the 4-exercise minimum — 3 tries,
+  // never actually took. Root cause: overrideCeiling only ever skipped the
+  // MAX side (enforceExerciseCeiling above); padTarget below still forced
+  // the result back UP to the normal minimum regardless of the override
+  // flag, so a deliberate removal that dropped the count below 4 got
+  // silently padded back up with an unrelated pool exercise — Coach's own
+  // reply, already generated before this ever runs, never mentioned that
+  // substitution, so the removal looked like it had simply been ignored.
+  // The minimum protects against the model choosing a lazy short list on
+  // its own; it was never meant to override a user's own explicit removal
+  // — same reasoning as the ceiling override, just the other direction.
+  const padTarget = overrideCeiling ? 0 : Math.min(TARGET_MIN_EXERCISES, ceiling);
   if (result.length < padTarget) {
     result = padToMinimum(result, padTarget, equipment, injuries);
   }
@@ -4207,7 +4217,7 @@ Exercise vocabulary for their equipment (${p.equipment}) — named EXACTLY as wr
 
 Your numeric limits for this message — see the matching rules in your instructions above:
 - CEILING (not absolute — see the override rule right below) on any day you write into "program", "programDayEdit", or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
-- OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with ${liveCap} or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual ${p.sessionLength} min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This only applies to an explicit number from the user, never something you decide to add on your own — your own additions still respect the normal ceiling/minimum.
+- OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with ${liveCap} or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual ${p.sessionLength} min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This ALSO applies when they ask to remove one specific named exercise without stating a total count at all (e.g. "remove Assault Bike Sprints," "take out the leg extension") — if the day is already at (or one above) the 4-minimum, removing it without replacing it is still exactly what they explicitly asked for, so set "overrideCeiling": true here too rather than backfilling the slot with something they never asked for. Only leave "overrideCeiling" false for your OWN additions/removals that you're making unprompted as part of a broader change — those still respect the normal ceiling/minimum.
 - If ${liveCap} is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since ${liveCap} reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is ${tightestSetsRest.sets} sets x ${tightestSetsRest.rest}s rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale ${liveCap} as a hard fact. Only if trimming all the way to ${tightestSetsRest.sets}x${tightestSetsRest.rest}s genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
 - If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".`;
 }
