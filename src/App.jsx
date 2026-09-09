@@ -647,7 +647,24 @@ export function coachResponseFlags(parsed) {
   const restoreIdx = coerceInt(parsed.restoreIndex);
   const restoreOriginal = parsed.restoreOriginal === true;
   const madeChange = hasOverride || hasValidTargets || hasNewProgram || hasDayEdit || restoreOriginal || restoreIdx !== null;
-  return { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange };
+  // Real, DEFINITIVELY confirmed report (a direct database check, not
+  // inference): asked to remove an exercise, Coach named the correct day
+  // and replied with confident success — the actual saved program was
+  // completely unchanged. This narrows it to the structured field itself
+  // failing validation for some reason OTHER than the one already covered
+  // (an out-of-range dayIndex, handled separately in sendCoachMessage) —
+  // most likely Coach setting more than one of program/programDayEdit/
+  // todayOverride at once despite being told they're mutually exclusive.
+  // Detects "a structural field was actually attempted (non-null, roughly
+  // the right shape) but NOTHING ended up actually changing" — deliberately
+  // gated on `!madeChange` overall, not just this one field's own flag,
+  // since programDayEdit legitimately losing to a full "program" the model
+  // ALSO set (a real, already-handled precedence case, not a failure) must
+  // never get flagged just because its own narrow flag came back false.
+  const dayEditAttempted = !!dayEdit;
+  const programAttempted = !!(parsed.program && Array.isArray(parsed.program.days));
+  const intendedButInvalid = !madeChange && (dayEditAttempted || programAttempted);
+  return { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid };
 }
 
 // Falling back to a confident "Done!" whenever the model left "reply" blank
@@ -6095,8 +6112,28 @@ export default function App() {
         apiMessages
       );
       console.log("Coach response received:", JSON.stringify(parsed));
-      const { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange } = coachResponseFlags(parsed);
-      const replyText = coachReplyText(parsed, madeChange);
+      const { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid } = coachResponseFlags(parsed);
+      // Real, DEFINITIVELY confirmed report (direct database check): asked
+      // to remove an exercise, Coach named the correct day and replied
+      // with confident success — the real saved program was completely
+      // unchanged. intendedButInvalid catches this: a structural field was
+      // actually attempted but failed validation for a reason other than
+      // the out-of-range-dayIndex case already handled below (most likely
+      // Coach setting more than one of program/programDayEdit/todayOverride
+      // at once, which silently invalidates every one of them). Never let
+      // "reply" go out claiming success in that case — same honesty
+      // principle as coachParseFailureFallback, just for a different
+      // failure point — and log the actual raw JSON so the next
+      // occurrence is real evidence instead of another guess.
+      if (intendedButInvalid) {
+        logError("Coach set a structural field that failed validation, but replied with confident success anyway", {
+          stack: JSON.stringify(parsed).slice(0, 4000),
+          context: { type: "coach-invalid-structural-field" },
+        });
+      }
+      const replyText = intendedButInvalid
+        ? "Sorry — that change didn't actually go through on my end. Mind asking again?"
+        : coachReplyText(parsed, madeChange);
       const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
       // Diagnostics: flag cases that look like a bug so they're visible in the

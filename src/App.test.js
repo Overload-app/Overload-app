@@ -1484,6 +1484,38 @@ describe("coachResponseFlags / coachReplyText", () => {
     const flags = coachResponseFlags(parsed);
     expect(flags.hasNewProgram).toBe(true);
     expect(flags.hasDayEdit).toBe(false);
+    // "program" winning is a real, already-handled precedence case (the
+    // edit still applies via hasNewProgram) — must NOT be flagged as a
+    // failure just because programDayEdit's own narrow flag lost.
+    expect(flags.intendedButInvalid).toBe(false);
+  });
+
+  // Real, DEFINITIVELY confirmed report (a direct database check, not
+  // inference): asked to remove an exercise, Coach named the correct day
+  // and replied with confident success — the real saved program was
+  // completely unchanged. intendedButInvalid exists to catch exactly this:
+  // a structural field was actually attempted but nothing ended up
+  // actually changing, for some reason other than the already-handled
+  // out-of-range dayIndex case.
+  test("intendedButInvalid is true when a programDayEdit was attempted but invalid, and nothing else succeeded", () => {
+    // Missing "exercises" — a real, malformed attempt, not a null/absent field.
+    const parsed = { reply: "Removed it.", programDayEdit: { dayIndex: 0, day: { name: "Push" } } };
+    const flags = coachResponseFlags(parsed);
+    expect(flags.hasDayEdit).toBe(false);
+    expect(flags.madeChange).toBe(false);
+    expect(flags.intendedButInvalid).toBe(true);
+  });
+
+  test("intendedButInvalid is false when nothing was attempted at all — a plain question is not a failure", () => {
+    expect(coachResponseFlags({ reply: "Train legs twice a week for best results." }).intendedButInvalid).toBe(false);
+  });
+
+  test("intendedButInvalid is false whenever a real change actually succeeded, even a different field than the one that looks malformed", () => {
+    // programDayEdit itself is malformed, but targets legitimately succeeded —
+    // an overall real change happened, so this isn't the "claimed but nothing
+    // happened" failure case.
+    const parsed = { programDayEdit: { dayIndex: 0, day: { name: "Push" } }, targets: { calories: 2400, protein: 180, carbs: 260, fat: 70 } };
+    expect(coachResponseFlags(parsed).intendedButInvalid).toBe(false);
   });
 
   // Real report: the Coach's reply confidently described new calorie/macro
