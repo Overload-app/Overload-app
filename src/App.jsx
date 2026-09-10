@@ -4366,8 +4366,9 @@ IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_
 Exercise vocabulary for their equipment (${p.equipment}) — named EXACTLY as written, every one confirmed to have a real instructional video: ${exerciseVocabularyFor(p.equipment).join(", ")}.
 
 Your numeric limits for this message — see the matching rules in your instructions above:
-- CEILING (not absolute — see the override rule right below) on any day you write into "program", "programDayEdit", or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
+- CEILING (not absolute — see the override rule right below, and the reality check right after it) on any day you write into "program", "programDayEdit", or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
 - OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with ${liveCap} or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual ${p.sessionLength} min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This ALSO applies when they ask to remove one specific named exercise without stating a total count at all (e.g. "remove Assault Bike Sprints," "take out the leg extension") — if the day is already at (or one above) the 4-minimum, removing it without replacing it is still exactly what they explicitly asked for, so set "overrideCeiling": true here too rather than backfilling the slot with something they never asked for. Only leave "overrideCeiling" false for your OWN additions/removals that you're making unprompted as part of a broader change — those still respect the normal ceiling/minimum.
+- REALITY CHECK, and this matters more than the number above: ${liveCap} is a TIME-BUDGET estimate, not a description of what their program actually contains right now. Several days in "Current program JSON" above may already have MORE exercises than ${liveCap}. Real report this exists for: a day genuinely holding 6 exercises, with this number reading 4, led to repeatedly insisting the day was "already at your exercise limit" and offering to cut an exercise to make room that was never actually needed — then contradicting itself about whether the day had 4 or 5. Before you claim a day is full, or offer to cut something to make room, COUNT the exercises that day actually has in "Current program JSON" and say that real number. If a day already exceeds ${liveCap}, that is normal and not something to quietly correct: do not strip it back down to ${liveCap} unless they specifically asked you to shorten that day. When they explicitly ask you to ADD one exercise to a day that is at or over the budget, add it, set "overrideCeiling": true, and note the time tradeoff in one short clause — the same way you would for an explicit removal.
 - If ${liveCap} is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since ${liveCap} reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is ${tightestSetsRest.sets} sets x ${tightestSetsRest.rest}s rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale ${liveCap} as a hard fact. Only if trimming all the way to ${tightestSetsRest.sets}x${tightestSetsRest.rest}s genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
 - If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".`;
 }
@@ -6341,12 +6342,32 @@ export default function App() {
               exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling),
             }))
           : null;
-        // Lightweight sibling to normalizedProgramDays — same deterministic
-        // ceiling/minimum enforcement, just for the ONE day the model
-        // actually edited instead of requiring it to regenerate the whole
-        // program to get this same backstop.
+        // A programDayEdit is ALWAYS a direct response to something the
+        // person just asked for, so it is applied exactly as sent — no
+        // ceiling trim, no minimum padding.
+        //
+        // Real, confirmed report, and the cause of most of a very bad
+        // session: this day edit used to run through the same deterministic
+        // ceiling as fresh generation. For a real account whose computed
+        // ceiling was 4 while the day genuinely had 6 exercises, EVERY edit
+        // was silently truncated to the first 4 — so "add a conditioning
+        // finisher" saved a day with the finisher gone AND Hanging Leg
+        // Raise deleted, an exercise the person never asked to remove,
+        // while Coach's reply said "day's now at 5." It also left Coach
+        // reading back a day the app had quietly gutted, which is why it
+        // then contradicted itself about whether the day had 4 or 5
+        // exercises and offered to cut Hammer Curl for room it already had.
+        //
+        // Silently deleting someone's exercises is exactly the kind of
+        // "an update must never lose your progress" failure that is never
+        // acceptable, and the standing instruction here is explicit: when
+        // someone gives a direct order, do it and warn them, don't quietly
+        // overrule it. The ceiling still applies to a full-program
+        // regeneration and a todayOverride below, where the model is
+        // designing freely rather than carrying out one specific request;
+        // Coach's own prompt carries the time-budget guidance for day edits.
         const normalizedDayEdit = hasDayEdit
-          ? normalizeExerciseCount(parsed.programDayEdit.day.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
+          ? withTips(parsed.programDayEdit.day.exercises || [])
           : null;
         const normalizedOverride = hasOverride
           ? normalizeExerciseCount(withTips(parsed.todayOverride), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
@@ -6375,7 +6396,7 @@ export default function App() {
             newProgram = normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays });
           } else if (hasDayEdit) {
             const { dayIndex, day } = parsed.programDayEdit;
-            const attempted = applyProgramDayEdit(prev.program, dayIndex, day.name, withTips(normalizedDayEdit));
+            const attempted = applyProgramDayEdit(prev.program, dayIndex, day.name, normalizedDayEdit);
             if (attempted === prev.program) {
               dayEditFailed = true;
               console.warn("Coach set programDayEdit.dayIndex=" + dayIndex + " but the program only has " + prev.program.days.length + " day(s). Ignoring the edit rather than guessing which day was meant.");

@@ -1624,6 +1624,51 @@ describe("requestCoachResponse", () => {
   });
 });
 
+describe("a Coach day edit is applied exactly as sent — never silently trimmed", () => {
+  // Real, confirmed report and the cause of most of a very bad session:
+  // this account's computed ceiling was 4 while the Pull day genuinely had
+  // 6 exercises, so EVERY day edit was silently truncated to the first 4.
+  // "Add a conditioning finisher" saved a day with the finisher gone AND
+  // Hanging Leg Raise deleted — an exercise never asked about — while
+  // Coach's reply said "day's now at 5."
+  const sixExercises = [
+    { name: "Lat Pulldown", sets: 4, reps: "6-8", rest: 120 },
+    { name: "Chest-Supported Row", sets: 4, reps: "8-10", rest: 100 },
+    { name: "Pull-Up", sets: 3, reps: "10", rest: 90 },
+    { name: "Hammer Curl", sets: 3, reps: "10", rest: 75 },
+    { name: "Hanging Leg Raise", sets: 3, reps: "15", rest: 60 },
+    { name: "Rowing Machine Sprints", sets: 4, reps: "30s", rest: 60 },
+  ];
+
+  test("the old deterministic path would have destroyed the edit (documents the bug)", () => {
+    const trimmed = normalizeExerciseCount(sixExercises, 60, "intermediate", "full", ["none"], false);
+    expect(trimmed.length).toBe(4);
+    expect(trimmed.map((e) => e.name)).not.toContain("Rowing Machine Sprints");
+    expect(trimmed.map((e) => e.name)).not.toContain("Hanging Leg Raise");
+  });
+
+  test("applyProgramDayEdit keeps every exercise the edit actually contained", () => {
+    const program = { splitName: "PPL", days: [
+      { name: "Push", exercises: [{ name: "Bench Press" }] },
+      { name: "Pull", exercises: sixExercises.slice(0, 5) },
+    ] };
+    const updated = applyProgramDayEdit(program, 1, "Pull", sixExercises);
+    const names = updated.days[1].exercises.map((e) => e.name);
+    expect(names).toHaveLength(6);
+    expect(names).toContain("Rowing Machine Sprints"); // the add survives
+    expect(names).toContain("Hanging Leg Raise");      // nothing silently deleted
+    expect(updated.days[0].exercises).toHaveLength(1); // other days untouched
+  });
+
+  test("a day edit that removes an exercise stays removed, with no padding back up", () => {
+    const fiveLeft = sixExercises.slice(0, 5).filter((e) => e.name !== "Hammer Curl");
+    const program = { splitName: "PPL", days: [{ name: "Pull", exercises: sixExercises.slice(0, 5) }] };
+    const updated = applyProgramDayEdit(program, 0, "Pull", fiveLeft);
+    expect(updated.days[0].exercises.map((e) => e.name)).not.toContain("Hammer Curl");
+    expect(updated.days[0].exercises).toHaveLength(4);
+  });
+});
+
 describe("repairTruncatedJSON", () => {
   // Reproduced directly against the live API (full real system prompt, real
   // 5-day program, real tool schema): "programDayEdit" reliably comes back
