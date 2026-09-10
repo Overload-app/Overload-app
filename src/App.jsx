@@ -592,6 +592,53 @@ export function coachParseFailureFallback() {
 // completely correct (right day, right edit) while the structured field
 // still failed validation every time.
 const COACH_STRUCTURED_FIELDS = ["programDayEdit", "program", "todayOverride", "targets"];
+
+// Closes containers the model left open, so a JSON string it hand-wrote
+// but didn't quite finish can still be read.
+//
+// Reproduced directly against the live API, not inferred: sending the REAL
+// production request (full ~9k-token system prompt, real 5-day program,
+// the real tool schema) reliably comes back with "programDayEdit" as a
+// hand-written JSON STRING that is missing its own final closing brace —
+// every time, on a response that stopped normally (stop_reason "tool_use",
+// 1007 of 8000 output tokens used, so NOT a token-limit truncation). The
+// model simply drops the last character when writing JSON as string
+// content. Repairing it recovers the complete, correct object: on the
+// captured real failure this appends exactly ONE character and yields the
+// full edit, every exercise and tip intact.
+//
+// Deliberately conservative — it only ever appends closers for containers
+// that were genuinely left open (tracking string literals so a brace
+// inside an exercise name never miscounts), never invents or alters
+// content. If the result still isn't valid JSON, the caller keeps treating
+// it as a real failure rather than guessing.
+export function repairTruncatedJSON(text) {
+  if (typeof text !== "string") return text;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  if (!inString && stack.length === 0) return text; // already balanced
+  let repaired = text;
+  if (inString) repaired += '"';
+  else repaired = repaired.replace(/,\s*$/, ""); // a dangling comma can't be followed by a closer
+  for (let i = stack.length - 1; i >= 0; i--) {
+    repaired += stack[i] === "{" ? "}" : "]";
+  }
+  return repaired;
+}
+
 export function normalizeCoachStructuredFields(parsed) {
   const normalized = { ...parsed };
   for (const field of COACH_STRUCTURED_FIELDS) {
@@ -599,9 +646,21 @@ export function normalizeCoachStructuredFields(parsed) {
       try {
         normalized[field] = JSON.parse(normalized[field]);
       } catch (e) {
-        // Leave it as the original string — a genuinely malformed value
-        // should still fail the normal validation checks downstream and
-        // be treated as a real failure, not silently swallowed here.
+        // The model routinely hand-writes these nested fields as JSON
+        // strings and drops the final closing brace (see
+        // repairTruncatedJSON) — reliably reproduced against the live API.
+        // Try the repair before giving up; a value that still won't parse
+        // is left as the original string so it fails the normal validation
+        // checks downstream and is reported as a real failure.
+        try {
+          normalized[field] = JSON.parse(repairTruncatedJSON(normalized[field]));
+          logError("Coach sent a truncated JSON string field; repaired it", {
+            stack: String(normalized[field] && JSON.stringify(normalized[field])).slice(0, 2000),
+            context: { type: "coach-repaired-truncated-field", field },
+          });
+        } catch (e2) {
+          // Genuinely unparseable even after repair — leave it alone.
+        }
       }
     }
   }

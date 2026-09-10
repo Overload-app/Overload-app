@@ -48,6 +48,7 @@ import {
   withBlankReplyRetry,
   requestCoachResponse,
   normalizeCoachStructuredFields,
+  repairTruncatedJSON,
   pick,
   buildDay,
   splitDisplayName,
@@ -1620,6 +1621,77 @@ describe("requestCoachResponse", () => {
     const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
     expect(result.parseFailed).toBe(true);
     expect(result.parsed.reply).toBeTruthy();
+  });
+});
+
+describe("repairTruncatedJSON", () => {
+  // Reproduced directly against the live API (full real system prompt, real
+  // 5-day program, real tool schema): "programDayEdit" reliably comes back
+  // as a hand-written JSON STRING missing its own final closing brace, on a
+  // response that stopped normally (stop_reason "tool_use", 1007 of 8000
+  // output tokens — NOT a token-limit truncation). Repairing it recovers
+  // the complete, correct edit.
+  test("closes a single missing brace — the exact real-world failure", () => {
+    const broken = '{"dayIndex":4,"day":{"name":"Pull","exercises":[{"name":"Lat Pulldown","tips":["a","b"]}]}';
+    expect(() => JSON.parse(broken)).toThrow();
+    const fixed = repairTruncatedJSON(broken);
+    expect(fixed.length - broken.length).toBe(1);
+    const parsed = JSON.parse(fixed);
+    expect(parsed.dayIndex).toBe(4);
+    expect(parsed.day.exercises[0].name).toBe("Lat Pulldown");
+  });
+
+  test("leaves already-valid JSON completely untouched", () => {
+    const good = '{"dayIndex":2,"day":{"name":"Legs","exercises":[]}}';
+    expect(repairTruncatedJSON(good)).toBe(good);
+  });
+
+  test("closes several nested containers at once", () => {
+    const broken = '{"a":[{"b":[1,2';
+    expect(JSON.parse(repairTruncatedJSON(broken))).toEqual({ a: [{ b: [1, 2] }] });
+  });
+
+  test("closes a string left dangling mid-value", () => {
+    const broken = '{"name":"Lat Pulld';
+    expect(JSON.parse(repairTruncatedJSON(broken))).toEqual({ name: "Lat Pulld" });
+  });
+
+  test("drops a dangling comma that no closer could legally follow", () => {
+    const broken = '{"a":1,';
+    expect(JSON.parse(repairTruncatedJSON(broken))).toEqual({ a: 1 });
+  });
+
+  test("a brace inside an exercise name never miscounts the nesting", () => {
+    const broken = '{"name":"Curl {weird}","sets":3';
+    expect(JSON.parse(repairTruncatedJSON(broken))).toEqual({ name: "Curl {weird}", sets: 3 });
+  });
+
+  test("non-string input passes straight through", () => {
+    const obj = { dayIndex: 1 };
+    expect(repairTruncatedJSON(obj)).toBe(obj);
+  });
+});
+
+describe("normalizeCoachStructuredFields — truncated string repair", () => {
+  // The end-to-end version of the real bug: a truncated hand-written
+  // programDayEdit string must end up as a real object that passes
+  // coachResponseFlags, instead of silently failing validation and
+  // reporting "that change didn't actually go through."
+  test("recovers a truncated programDayEdit so the edit actually validates", () => {
+    const broken = '{"dayIndex":4,"day":{"name":"Pull (Back/Biceps + Conditioning)","exercises":[{"name":"Lat Pulldown","sets":4,"reps":"6-8","rest":120,"tips":["a","b","c","d"],"alternatives":["x","y","z"]}]}';
+    const result = normalizeCoachStructuredFields({ reply: "Removed it.", programDayEdit: broken });
+    expect(typeof result.programDayEdit).toBe("object");
+    expect(result.programDayEdit.dayIndex).toBe(4);
+    const flags = coachResponseFlags(result);
+    expect(flags.hasDayEdit).toBe(true);
+    expect(flags.intendedButInvalid).toBe(false);
+  });
+
+  test("a string that is genuinely unparseable even after repair is left alone and still reported as a failure", () => {
+    const garbage = "this is not json at all";
+    const result = normalizeCoachStructuredFields({ reply: "hi", programDayEdit: garbage });
+    expect(result.programDayEdit).toBe(garbage);
+    expect(coachResponseFlags(result).hasDayEdit).toBe(false);
   });
 });
 
