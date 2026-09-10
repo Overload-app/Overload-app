@@ -550,10 +550,41 @@ export function coachParseFailureFallback() {
 // One call-and-parse attempt — pulled out of sendCoachMessage so the
 // retry orchestration below can reuse it verbatim for a second attempt
 // instead of duplicating the same try/catch.
+// Real, DEFINITIVELY confirmed root cause (the actual raw tool_use input,
+// pulled directly from error_logs): "programDayEdit" came back as a JSON-
+// encoded STRING — '"{\"dayIndex\":4,...}"' — instead of a real nested
+// object. This is a documented Claude tool-call quirk (models can
+// double-encode a nested structured field as an escaped string inside a
+// forced tool call), and it's a direct side effect of switching Coach to
+// forced tool_choice a few commits ago — that fix genuinely solved the
+// "replies with plain prose" bug, but exposed this different one for any
+// nested object/array field. Every downstream check (hasDayEdit's
+// dayEdit.dayIndex, hasNewProgram's program.days, etc.) reads straight
+// through .property access, which silently returns undefined on a
+// string — explaining exactly why Coach's own reasoning could be
+// completely correct (right day, right edit) while the structured field
+// still failed validation every time.
+const COACH_STRUCTURED_FIELDS = ["programDayEdit", "program", "todayOverride", "targets"];
+export function normalizeCoachStructuredFields(parsed) {
+  const normalized = { ...parsed };
+  for (const field of COACH_STRUCTURED_FIELDS) {
+    if (typeof normalized[field] === "string") {
+      try {
+        normalized[field] = JSON.parse(normalized[field]);
+      } catch (e) {
+        // Leave it as the original string — a genuinely malformed value
+        // should still fail the normal validation checks downstream and
+        // be treated as a real failure, not silently swallowed here.
+      }
+    }
+  }
+  return normalized;
+}
+
 export async function requestCoachResponse(system, messages) {
   const raw = await claudeChat({ system, messages });
   try {
-    return { parsed: parseJSONLoose(raw), raw, parseFailed: false };
+    return { parsed: normalizeCoachStructuredFields(parseJSONLoose(raw)), raw, parseFailed: false };
   } catch (parseErr) {
     const extractedReply = extractReplyOnly(raw);
     console.error("Coach JSON parse failed. Raw response was: " + raw + (extractedReply ? "\nExtracted reply text (not shown to the user, since we can't verify what state change it was describing): " + extractedReply : ""));

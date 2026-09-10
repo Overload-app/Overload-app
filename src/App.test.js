@@ -47,6 +47,7 @@ import {
   coachParseFailureFallback,
   withBlankReplyRetry,
   requestCoachResponse,
+  normalizeCoachStructuredFields,
   pick,
   buildDay,
   splitDisplayName,
@@ -1573,6 +1574,26 @@ describe("requestCoachResponse", () => {
     expect(result.parsed.reply).toBe("Added it.");
   });
 
+  // Real, DEFINITIVELY confirmed report (the actual raw tool_use input,
+  // pulled directly from error_logs): Coach named the correct day and
+  // replied with confident success, but "programDayEdit" came back as a
+  // JSON-encoded STRING, not a real object — a documented Claude tool-
+  // call quirk, and a direct side effect of switching Coach to forced
+  // tool_choice (which fixed a different real bug: replying with plain
+  // prose). Every downstream check reads straight through .property
+  // access, which silently returns undefined on a string.
+  test("unwraps a double-encoded programDayEdit string into a real object", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const dayEdit = { dayIndex: 4, day: { name: "Pull", exercises: [{ name: "Lat Pulldown" }] } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "Removed it.", programDayEdit: JSON.stringify(dayEdit) } }] }),
+    }));
+    const result = await requestCoachResponse("system prompt", [{ role: "user", content: "remove assault bike sprints" }]);
+    expect(result.parsed.programDayEdit).toEqual(dayEdit);
+    expect(coachResponseFlags(result.parsed).hasDayEdit).toBe(true);
+  });
+
   // This is the exact gap withBlankReplyRetry depends on being told about —
   // coachParseFailureFallback's reply text is deliberately non-empty, so
   // parseFailed is the only signal that this wasn't actually a normal,
@@ -1589,6 +1610,39 @@ describe("requestCoachResponse", () => {
     const result = await requestCoachResponse("system prompt", [{ role: "user", content: "add abs" }]);
     expect(result.parseFailed).toBe(true);
     expect(result.parsed.reply).toBeTruthy();
+  });
+});
+
+describe("normalizeCoachStructuredFields", () => {
+  test("unwraps a JSON-encoded string field into a real object", () => {
+    const dayEdit = { dayIndex: 2, day: { name: "Legs", exercises: [] } };
+    const result = normalizeCoachStructuredFields({ reply: "Done.", programDayEdit: JSON.stringify(dayEdit) });
+    expect(result.programDayEdit).toEqual(dayEdit);
+  });
+
+  test("leaves an already-real object untouched", () => {
+    const dayEdit = { dayIndex: 2, day: { name: "Legs", exercises: [] } };
+    const result = normalizeCoachStructuredFields({ reply: "Done.", programDayEdit: dayEdit });
+    expect(result.programDayEdit).toBe(dayEdit); // same reference — never rewrapped
+  });
+
+  test("leaves null/absent fields as null, not an error", () => {
+    const result = normalizeCoachStructuredFields({ reply: "Just a question.", programDayEdit: null, program: null });
+    expect(result.programDayEdit).toBeNull();
+    expect(result.program).toBeNull();
+  });
+
+  test("a genuinely malformed string is left as-is, not silently swallowed", () => {
+    const result = normalizeCoachStructuredFields({ reply: "Done.", programDayEdit: "not valid json at all" });
+    expect(result.programDayEdit).toBe("not valid json at all");
+  });
+
+  test("handles todayOverride (an array) and targets, not just programDayEdit", () => {
+    const override = [{ name: "Bodyweight Squat", sets: 3 }];
+    const targets = { calories: 2200, protein: 180, carbs: 220, fat: 70 };
+    const result = normalizeCoachStructuredFields({ todayOverride: JSON.stringify(override), targets: JSON.stringify(targets) });
+    expect(result.todayOverride).toEqual(override);
+    expect(result.targets).toEqual(targets);
   });
 });
 
