@@ -1520,8 +1520,17 @@ export function padToMinimum(exercises, targetCount, equipment, injuries) {
   const candidates = Object.keys(pool)
     .flatMap((group) => pool[group].map((name) => ({ name, group })))
     .filter(({ name }) => !exercises.some((e) => isSameCoreExercise(e.name, name)))
-    // Groups not yet represented in the day come first, for balance.
-    .sort((a, b) => (usedGroups.has(a.group) ? 1 : 0) - (usedGroups.has(b.group) ? 1 : 0));
+    // Muscle groups the day ALREADY trains come first, so a focused day
+    // stays focused. Real report: "it gave them bench press on leg day."
+    // This used to sort the opposite way — preferring groups NOT yet in
+    // the day "for balance" — which is right for a full-body day and
+    // completely wrong for every focused one: a 3-exercise leg day got
+    // padded with Barbell Bench Press, and a 2-exercise leg day got Bench
+    // Press AND Incline Dumbbell Press. Preferring already-trained groups
+    // is still correct for a full-body day too, since such a day already
+    // covers the major groups, so it just adds a second movement for one
+    // of them rather than an unrelated one.
+    .sort((a, b) => (usedGroups.has(b.group) ? 1 : 0) - (usedGroups.has(a.group) ? 1 : 0));
 
   const template = exercises[0] || {};
   const padded = [...exercises];

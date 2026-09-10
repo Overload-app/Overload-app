@@ -963,6 +963,39 @@ describe("enforceExerciseCeiling", () => {
 });
 
 describe("padToMinimum", () => {
+  // Real report: "it gave them bench press on leg day," and separately
+  // "other exercises on the wrong day." The sort used to PREFER muscle
+  // groups not yet in the day "for balance" — right for a full-body day,
+  // completely wrong for every focused one. Reproduced exactly before the
+  // fix: a 3-exercise leg day padded with Barbell Bench Press, a
+  // 2-exercise leg day with Bench Press AND Incline Dumbbell Press.
+  const mkDay = (names) => names.map((name) => ({ name, sets: 3, reps: "8-10", rest: 75 }));
+  const CHEST_PRESSES = ["Barbell Bench Press", "Incline Dumbbell Press", "Machine Chest Press", "Dumbbell Bench Press"];
+
+  test("a short LEG day is never padded with chest work", () => {
+    const padded = padToMinimum(mkDay(["Barbell Squat", "Leg Press", "Leg Curl"]), 4, "full", ["none"]);
+    expect(padded).toHaveLength(4);
+    for (const name of padded.map((e) => e.name)) expect(CHEST_PRESSES).not.toContain(name);
+  });
+
+  test("even a 2-exercise leg day stays lower-body — the worst observed case", () => {
+    const padded = padToMinimum(mkDay(["Barbell Squat", "Leg Curl"]), 4, "full", ["none"]);
+    expect(padded).toHaveLength(4);
+    for (const name of padded.map((e) => e.name)) expect(CHEST_PRESSES).not.toContain(name);
+  });
+
+  test("a short PULL day is padded with pulling work, not pressing", () => {
+    const padded = padToMinimum(mkDay(["Lat Pulldown", "Barbell Row", "Dumbbell Curl"]), 4, "full", ["none"]);
+    for (const name of padded.map((e) => e.name)) expect(CHEST_PRESSES).not.toContain(name);
+  });
+
+  test("a full-body day still gets a sensible pad rather than nothing", () => {
+    const day = mkDay(["Barbell Squat", "Barbell Bench Press", "Barbell Row"]);
+    const padded = padToMinimum(day, 4, "full", ["none"]);
+    expect(padded).toHaveLength(4);
+    expect(padded.slice(0, 3)).toEqual(day); // originals untouched
+  });
+
   test("pads a short day back up to the target using real pool exercises", () => {
     const exercises = [{ name: "Barbell Bench Press", sets: 3, reps: "8-12", rest: 90 }];
     const padded = padToMinimum(exercises, 4, "full", ["none"]);
