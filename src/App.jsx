@@ -346,24 +346,27 @@ export async function claudeChat({ system, messages }) {
   // photo analysis, meal suggestions, review writing) return a
   // completely different shape (splitName/days, name/cal/protein, etc.)
   // and must remain free to use fields not listed here.
+  // Left deliberately OPEN ({type:"object"}, no properties). A previous
+  // attempt typed the fields Coach uses, hoping that would stop the model
+  // hand-writing nested fields as JSON strings. It did NOT stop that (see
+  // repairTruncatedJSON, which is what actually handles it) and it broke
+  // every OTHER caller: this one tool is shared by meal photo analysis,
+  // the "describe what you ate" estimate, meal suggestions, program
+  // generation and review writing, which return completely different
+  // shapes (name/cal/protein/carb/fat, splitName/days, suggestions,
+  // overview/advice). Real report: photo and description logging showed
+  // "blank spots" for every number, because with a Coach-shaped field list
+  // advertised, the model packed the whole meal estimate into "reply" —
+  // the only string field the schema named — instead of returning cal,
+  // protein, carb and fat at all. Confirmed directly against the live API.
+  // Each caller's required shape is specified in its own system prompt;
+  // this tool exists only to make structured output the ONLY possible
+  // output, never to constrain its shape.
   const JSON_RESPONSE_TOOL = {
     name: "respond",
-    description: "Submit your response. Its exact shape is defined by the system prompt's instructions — this schema only types the fields Coach itself uses, as real nested objects/arrays rather than leaving the model to decide, since every other caller returns a completely different, unlisted shape.",
-    input_schema: {
-      type: "object",
-      properties: {
-        reply: { type: "string" },
-        program: { type: ["object", "null"] },
-        programDayEdit: { type: ["object", "null"] },
-        todayOverride: { type: ["array", "null"] },
-        targets: { type: ["object", "null"] },
-        restoreIndex: { type: ["number", "null"] },
-        restoreOriginal: { type: "boolean" },
-        overrideCeiling: { type: "boolean" },
-      },
-    },
-  };
-  // Real report: "Coach takes too long to respond sometimes" — with no
+    description: "Submit your response. Its shape is defined by the system prompt's instructions, not by this schema.",
+    input_schema: { type: "object" },
+  };  // Real report: "Coach takes too long to respond sometimes" — with no
   // timeout at all, a stalled request (a dropped connection that never
   // formally errors, a slow upstream) could just hang indefinitely with
   // no feedback and no way to know it had failed rather than still being
