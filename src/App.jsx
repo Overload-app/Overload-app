@@ -325,16 +325,43 @@ export async function claudeChat({ system, messages }) {
   // model does support: `tool_choice` requires the model to invoke this
   // tool, and a tool call's `input` is returned as an already-parsed JSON
   // object by the API itself — there is no way to invoke a tool with plain
-  // prose. The tool's own schema stays fully open (`{}` accepts any object)
-  // because the actual required shape differs per call site (Coach's
-  // response shape, program generation, meal analysis, review writing) and
-  // is already fully specified in each one's own system prompt — this tool
-  // exists purely to make structured output the ONLY possible output, not
-  // to constrain its shape itself.
+  // prose.
+  //
+  // Real, DEFINITIVELY confirmed follow-up bug (the actual raw tool_use
+  // input, read directly): with NO "properties" defined here, the schema
+  // gave the model zero guidance on what shape a nested field like
+  // "programDayEdit" should take — so instead of using the API's own
+  // native object encoding, it sometimes hand-wrote that nested structure
+  // as a plain STRING containing JSON text. That's inherently less
+  // reliable than letting the API encode real nested JSON directly: a
+  // model manually "typing out" JSON as string content can drop a
+  // character exactly like handwritten text can (confirmed directly — a
+  // real logged failure's "programDayEdit" string was missing its own
+  // final closing brace, a genuine malformed value at the source, not a
+  // logging artifact). Typing the known structured fields as real
+  // objects/arrays below removes the ambiguity that let the model choose
+  // string-encoding in the first place. Left WITHOUT
+  // "additionalProperties: false" and without a top-level "required" list
+  // — the other five callers of claudeChat (program generation, meal
+  // photo analysis, meal suggestions, review writing) return a
+  // completely different shape (splitName/days, name/cal/protein, etc.)
+  // and must remain free to use fields not listed here.
   const JSON_RESPONSE_TOOL = {
     name: "respond",
-    description: "Submit your response. Its shape is defined by the system prompt's instructions, not by this schema.",
-    input_schema: { type: "object" },
+    description: "Submit your response. Its exact shape is defined by the system prompt's instructions — this schema only types the fields Coach itself uses, as real nested objects/arrays rather than leaving the model to decide, since every other caller returns a completely different, unlisted shape.",
+    input_schema: {
+      type: "object",
+      properties: {
+        reply: { type: "string" },
+        program: { type: ["object", "null"] },
+        programDayEdit: { type: ["object", "null"] },
+        todayOverride: { type: ["array", "null"] },
+        targets: { type: ["object", "null"] },
+        restoreIndex: { type: ["number", "null"] },
+        restoreOriginal: { type: "boolean" },
+        overrideCeiling: { type: "boolean" },
+      },
+    },
   };
   // Real report: "Coach takes too long to respond sometimes" — with no
   // timeout at all, a stalled request (a dropped connection that never

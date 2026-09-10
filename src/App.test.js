@@ -2683,6 +2683,40 @@ describe("claudeChat", () => {
     expect(body.tools[0].name).toBe("respond");
   });
 
+  // Real, DEFINITIVELY confirmed follow-up bug (the actual raw tool_use
+  // input, read directly from a live failure): with the tool's schema
+  // left fully untyped ({type:"object"}, no properties), the model
+  // sometimes hand-wrote a nested field like "programDayEdit" as a STRING
+  // containing JSON text instead of using the API's own native object
+  // encoding — and a manually hand-typed JSON string is exactly the kind
+  // of thing that can come out malformed (a real logged case was missing
+  // its own closing brace). Typing the known structured fields as real
+  // objects/arrays removes the ambiguity that let the model choose
+  // string-encoding in the first place.
+  test("types the known structured fields as real objects/arrays in the tool schema, not left fully open", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: "tool_use", name: "respond", input: { reply: "hi" } }] }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await claudeChat({ system: "s", messages: [{ role: "user", content: "hello" }] });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const props = body.tools[0].input_schema.properties;
+    expect(props.programDayEdit.type).toEqual(["object", "null"]);
+    expect(props.program.type).toEqual(["object", "null"]);
+    expect(props.todayOverride.type).toEqual(["array", "null"]);
+    expect(props.targets.type).toEqual(["object", "null"]);
+    // No additionalProperties:false and no "required" — the other five
+    // callers of claudeChat (program generation, meal photo analysis,
+    // meal suggestions, review writing) return a completely different,
+    // unlisted shape and must remain free to use fields not listed here.
+    expect(body.tools[0].input_schema.additionalProperties).toBeUndefined();
+    expect(body.tools[0].input_schema.required).toBeUndefined();
+  });
+
   test("falls back to any text block if the response somehow has no tool_use block, rather than throwing", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
