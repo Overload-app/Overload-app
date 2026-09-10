@@ -535,11 +535,21 @@ describe("POOLS structural integrity", () => {
 });
 
 describe("splitForDays", () => {
-  test("3 days or fewer is always a full-body split, any experience level", () => {
-    for (const experience of ["beginner", "intermediate", "advanced"]) {
+  // Real ask: Full Body was showing up far too often relative to how well
+  // it fits an intermediate/advanced lifter at 3 days/week — reserved for
+  // beginners now (the deterministic fallback's part of this; the AI
+  // generation prompt separately handles "explicitly requested it").
+  test("3 days or fewer is full-body ONLY for a beginner", () => {
+    const beginner = splitForDays(3, "beginner");
+    expect(beginner.kinds).toEqual(["full", "full", "full"]);
+    expect(beginner.labels).toHaveLength(3);
+  });
+
+  test("3 days or fewer is a single Push/Pull/Legs rotation for intermediate/advanced", () => {
+    for (const experience of ["intermediate", "advanced"]) {
       const split = splitForDays(3, experience);
-      expect(split.kinds).toEqual(["full", "full", "full"]);
-      expect(split.labels).toHaveLength(3);
+      expect(split.kinds).toEqual(["push", "pull", "legs"]);
+      expect(split.key).toBe("ppl3");
     }
   });
 
@@ -2086,7 +2096,7 @@ describe("buildDay", () => {
 
 describe("splitDisplayName", () => {
   test("maps every real split key to a non-empty display name", () => {
-    for (const key of ["full3", "ul4", "ppl_ul5", "ppl6", "bodypart5", "bodypart6"]) {
+    for (const key of ["full3", "ppl3", "ul4", "ppl_ul5", "ppl6", "bodypart5", "bodypart6"]) {
       const name = splitDisplayName(key);
       expect(typeof name).toBe("string");
       expect(name.length).toBeGreaterThan(0);

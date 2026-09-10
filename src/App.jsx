@@ -1517,7 +1517,21 @@ export function buildDay(kind, pool, goal, cap, offset, sets, rest) {
 // necessarily land on the same split. This mirrors the guidance given to the AI
 // generator and is used as the offline fallback if that call ever fails.
 export function splitForDays(days, experience) {
-  if (days <= 3) return { key: "full3", labels: ["Full Body A", "Full Body B", "Full Body C"], kinds: ["full", "full", "full"] };
+  // Real ask: Full Body was showing up too often — this deterministic
+  // fallback (used when AI generation fails or is offline) previously
+  // gave it to every 3-day profile regardless of experience. Reserved
+  // for beginners now (where it's genuinely the standard, lowest-
+  // complexity choice); everyone else gets a single Push/Pull/Legs
+  // rotation instead. Whether someone EXPLICITLY requested Full Body is
+  // a judgment call this deterministic path has no way to make from a
+  // profile alone — that part is handled in the AI generation prompt
+  // (splitGuidanceFor below), which this fallback only backs up.
+  if (days <= 3) {
+    if (experience === "beginner") {
+      return { key: "full3", labels: ["Full Body A", "Full Body B", "Full Body C"], kinds: ["full", "full", "full"] };
+    }
+    return { key: "ppl3", labels: ["Push", "Pull", "Legs"], kinds: ["push", "pull", "legs"] };
+  }
   if (days === 4) return { key: "ul4", labels: ["Upper A", "Lower A", "Upper B", "Lower B"], kinds: ["upper", "lower", "upper", "lower"] };
   if (days === 5) {
     if (experience === "advanced") {
@@ -1534,6 +1548,7 @@ export function splitForDays(days, experience) {
 export function splitDisplayName(key) {
   return {
     full3: "Full Body",
+    ppl3: "Push / Pull / Legs",
     ul4: "Upper / Lower",
     ppl_ul5: "Push / Pull / Legs / Upper / Lower",
     ppl6: "Push / Pull / Legs",
@@ -1569,7 +1584,7 @@ export function buildProgram(profile) {
 
 function splitGuidanceFor(days) {
   const map = {
-    3: "Full Body (every session trains all major muscle groups) is the standard, most time-efficient choice for 3 days/week.",
+    3: "Full Body (every session trains all major muscle groups) is the right default ONLY for a true beginner, or if the client explicitly asked for it by name. For anyone else, a single Push/Pull/Legs rotation (one push day, one pull day, one leg day) is the standard, most time-efficient choice at 3 days/week — it lets each session actually focus, instead of diluting every muscle group across every session. Real ask: Full Body was showing up far too often relative to how well it actually fits an intermediate/advanced lifter at this frequency — don't default to it out of habit just because 3 days was chosen.",
     4: "Multiple valid options: Upper/Lower (2 upper + 2 lower), a 4-day Full Body rotation, or an Upper/Lower/Push/Pull hybrid. Pick whichever best fits this person's experience and desired physique — do not default to Upper/Lower automatically.",
     5: "Multiple valid options: Push/Pull/Legs/Upper/Lower, a body-part split (e.g. chest, back, legs, shoulders, arms), or Upper/Lower/Push/Pull/Legs. More advanced lifters or those wanting to prioritize specific areas often do better with more day-specific splits than a generic Upper/Lower.",
     6: "Push/Pull/Legs performed twice (PPL x2) is standard, but a 6-day body-part split (e.g. chest, back, shoulders, legs, arms, weak-point/core) is equally valid, especially for intermediate/advanced lifters or a specific physique goal.",
