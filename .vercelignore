@@ -1,0 +1,6 @@
+# Vercel turns EVERY .js file in /api into its own live serverless function,
+# test files included — so these were being deployed as real public endpoints,
+# and they count against the plan's function limit (adding two tipped this
+# project over it and broke a deploy outright). They are only ever run locally
+# by vitest and have no business shipping.
+api/*.test.js
