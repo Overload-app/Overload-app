@@ -375,10 +375,27 @@ export async function claudeChat({ system, messages }) {
   // getting mislabeled as "offline" once it eventually did throw.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), CLAUDE_REQUEST_TIMEOUT_MS);
+  // /api/claude only answers a signed-in caller now — its address is visible
+  // in this bundle, so without that anyone could spend this project's
+  // Anthropic credit. Every AI feature here already runs behind an account
+  // (onboarding itself only renders once one exists), so this is never empty
+  // in practice; reading it from the session rather than any app state also
+  // works on a cold start before that state has settled.
+  let accessToken = null;
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    accessToken = sessionData?.session?.access_token || null;
+  } catch (e) {
+    // Leave it null — the request below fails with a clear 401 rather than
+    // silently doing something stranger.
+  }
   try {
     res = await fetch("/api/claude", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
       // A full permanent-program-change response echoes back every day and
       // every exercise (each with 4 tips + 3 alternatives), not just
       // whatever actually changed — a real multi-day program can genuinely
@@ -5660,10 +5677,18 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
     setPortalLoading(true);
     setPortalError("");
     try {
+      // The server derives which account this is from the session token
+      // itself and ignores any id in the body — sending one would be
+      // meaningless now, and trusting one was the bug.
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token || null;
       const res = await fetch("/api/create-portal-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: account.id }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({}),
       });
       const data = await res.json();
       if (data.url) {
