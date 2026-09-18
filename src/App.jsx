@@ -1970,7 +1970,7 @@ async function loadProfile(userId, attempt = 0) {
   return data;
 }
 
-const TRIAL_DAYS = 30;
+const TRIAL_DAYS = 7;
 export function isTrialActive(startedAt) {
   if (!startedAt) return false;
   const elapsed = Date.now() - new Date(startedAt).getTime();
@@ -2466,11 +2466,11 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
         </Btn>
         {!trialUsed && (
           <Btn variant="ghost" onClick={handleStartTrial} disabled={trialLoading} style={{ width: "100%", padding: 14, marginTop: 8, color: "#fff", borderColor: "rgba(255,255,255,0.2)" }}>
-            {trialLoading ? "Starting…" : "Start 30-day free trial instead"}
+            {trialLoading ? "Starting…" : "Start 7-day free trial instead"}
           </Btn>
         )}
         <div style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 10 }}>
-          {trialUsed ? "🔒 Payment secured by Stripe" : "🔒 No card needed for the trial — it just ends after 30 days"}
+          {trialUsed ? "🔒 Payment secured by Stripe" : "🔒 No card needed for the trial — it just ends after 7 days"}
         </div>
         <div style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", marginTop: 6 }}>
           By subscribing, you agree to our{" "}
@@ -6122,7 +6122,7 @@ export default function App() {
     setTrialStartedAt(profileRow?.trial_started_at || null);
   }
 
-  // Cardless 30-day trial: just a timestamp on the user's own profile row,
+  // Cardless 7-day trial: just a timestamp on the user's own profile row,
   // no Stripe/payment info involved at all.
   async function startFreeTrial() {
     if (!account) return;
@@ -6731,7 +6731,15 @@ export default function App() {
 
   function finishWorkout(sets) {
     const day = state.program.days[session.dayIdx];
-    const durationSec = accumulateActiveSeconds(state.inProgressWorkout?.activeSeconds, session.resumedAt, Date.now());
+    // Real report: a user's workout history read about 20 minutes long.
+    // This used state.inProgressWorkout.activeSeconds as its baseline — but
+    // autoSaveWorkoutProgress writes that on EVERY checkmark, and what it
+    // writes already includes the current stretch up to that checkmark.
+    // Adding (now - resumedAt) on top counted the whole session twice: a
+    // 25-minute workout recorded as 49. It's the exact double-count the
+    // startWorkout comment describes fixing for autosave — the fix just never
+    // reached this line. The frozen baseline is the only correct "prior".
+    const durationSec = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
     persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null, inProgressWorkout: null }));
     setSession(null);
@@ -7061,7 +7069,12 @@ export default function App() {
               onClick={() => {
                 const idx = state.inProgressWorkout.dayIdx;
                 setConflictStartIdx(null);
-                setSession({ dayIdx: idx, resume: true, resumedAt: Date.now() });
+                // Carries over the time already spent before the pause, the
+                // same way startWorkout's own resume does — without it, the
+                // first checkmark's autosave overwrote the saved total with
+                // just this stretch, and Finish recorded only the time since
+                // resuming.
+                setSession({ dayIdx: idx, resume: true, resumedAt: Date.now(), baselineActiveSeconds: state.inProgressWorkout.activeSeconds || 0 });
               }}
               style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}
             >

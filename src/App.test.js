@@ -2275,20 +2275,20 @@ describe("isTrialActive / trialDaysLeft", () => {
     expect(trialDaysLeft(null)).toBe(0);
   });
 
-  test("a trial started just now is active with ~30 days left", () => {
+  test("a trial started just now is active with ~7 days left", () => {
     const now = new Date().toISOString();
     expect(isTrialActive(now)).toBe(true);
-    expect(trialDaysLeft(now)).toBe(30);
+    expect(trialDaysLeft(now)).toBe(7);
   });
 
-  test("a trial started 29 days ago is still active with 1 day left", () => {
-    const startedAt = new Date(Date.now() - 29 * DAY).toISOString();
+  test("a trial started 6 days ago is still active with 1 day left", () => {
+    const startedAt = new Date(Date.now() - 6 * DAY).toISOString();
     expect(isTrialActive(startedAt)).toBe(true);
     expect(trialDaysLeft(startedAt)).toBe(1);
   });
 
-  test("a trial started exactly 30 days ago has ended", () => {
-    const startedAt = new Date(Date.now() - 30 * DAY).toISOString();
+  test("a trial started exactly 7 days ago has ended", () => {
+    const startedAt = new Date(Date.now() - 7 * DAY).toISOString();
     expect(isTrialActive(startedAt)).toBe(false);
   });
 
@@ -2558,6 +2558,32 @@ describe("formatDuration", () => {
   test("returns null for zero/missing duration rather than a misleading '0 min'", () => {
     expect(formatDuration(0)).toBeNull();
     expect(formatDuration(undefined)).toBeNull();
+  });
+});
+
+// Real report: a user's workout history read about 20 minutes long.
+// autoSaveWorkoutProgress stores the running total on every checkmark, and
+// finishWorkout used that stored total as its baseline and then added the
+// whole session on top — counting it twice. A 25-minute workout recorded as
+// 49. The only correct "prior" is the baseline frozen when the session began.
+describe("recorded workout duration (double-count regression)", () => {
+  const MIN = 60 * 1000;
+  const start = 1_000_000;
+
+  test("the old calculation counted a 25-minute session twice", () => {
+    const storedAtLastCheckmark = accumulateActiveSeconds(0, start, start + 24 * MIN);
+    const old = accumulateActiveSeconds(storedAtLastCheckmark, start, start + 25 * MIN);
+    expect(Math.round(old / 60)).toBe(49);
+  });
+
+  test("using the frozen baseline records the real 25 minutes", () => {
+    expect(Math.round(accumulateActiveSeconds(0, start, start + 25 * MIN) / 60)).toBe(25);
+  });
+
+  test("time from before a pause still counts after resuming — nothing lost, nothing doubled", () => {
+    const beforePause = 15 * 60; // 15 min done, then saved & exited
+    const afterResume = accumulateActiveSeconds(beforePause, start, start + 10 * MIN);
+    expect(Math.round(afterResume / 60)).toBe(25);
   });
 });
 
