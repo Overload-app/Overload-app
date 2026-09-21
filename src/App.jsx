@@ -2711,7 +2711,18 @@ export function Onboarding({ onComplete }) {
         program = { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays };
       }
     } catch (e) {
-      // Fall back silently to the rule-based program below.
+      // Still falls back to the rule-based program below — a new account
+      // must never be left with nothing. But this used to be SILENT, and
+      // the AI-generated program is the whole pitch: if generation breaks,
+      // every new signup quietly receives the generic template instead and
+      // neither they nor we would ever know. Logged so a launch-day
+      // regression is visible immediately rather than discovered from
+      // churn weeks later. Best-effort, and never allowed to interfere
+      // with finishing onboarding.
+      logError("Onboarding AI program generation failed; used rule-based fallback", {
+        stack: e?.stack || e?.message || String(e),
+        context: { type: "onboarding-ai-fallback", status: e?.status },
+      });
     }
     // Guarantees every exercise has form tips baked in — whether they came
     // from the AI (normal case) or the offline rule-based fallback above —
