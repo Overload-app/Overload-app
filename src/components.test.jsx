@@ -347,6 +347,83 @@ describe("<Progress />", () => {
     render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
     expect(screen.getByText("2 workouts logged this period.")).toBeInTheDocument();
   });
+
+  function reviewState(entries) {
+    return { ...buildState([]), reviews: { weekly: entries, monthly: [] } };
+  }
+
+  test("an already-seen review starts collapsed, and the header toggles it open and shut", async () => {
+    const user = userEvent.setup();
+    const state = reviewState([
+      { generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 3 }, overview: "Solid week overall.", advice: ["Add a set."], seen: true },
+    ]);
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    // Collapsed: the label/date row is there, the write-up isn't.
+    expect(screen.getByText("WEEKLY REVIEW")).toBeInTheDocument();
+    expect(screen.queryByText("Solid week overall.")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
+    expect(screen.getByText("Solid week overall.")).toBeInTheDocument();
+    expect(screen.getByText("Add a set.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Collapse weekly review/ }));
+    expect(screen.queryByText("Solid week overall.")).not.toBeInTheDocument();
+  });
+
+  test("deleting a review needs a confirm, and reports the entry's real index (not its reversed display position)", async () => {
+    const user = userEvent.setup();
+    const onDeleteReview = vi.fn();
+    // Newest renders first, so the top card is index 2 of 3.
+    const state = reviewState([
+      { generatedAt: "2026-07-27T00:00:00.000Z", summary: {}, overview: "Oldest.", advice: [], seen: true },
+      { generatedAt: "2026-08-03T00:00:00.000Z", summary: {}, overview: "Middle.", advice: [], seen: true },
+      { generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Newest.", advice: [], seen: true },
+    ]);
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} onDeleteReview={onDeleteReview} />);
+
+    await user.click(screen.getByRole("button", { name: "Delete weekly review from 2026-08-10" }));
+    // One tap only arms it — nothing deleted yet.
+    expect(onDeleteReview).not.toHaveBeenCalled();
+    expect(screen.getByText("KEEP")).toBeInTheDocument();
+
+    await user.click(screen.getByText("DELETE"));
+    expect(onDeleteReview).toHaveBeenCalledWith("weekly", 2);
+  });
+
+  test("backing out of a delete leaves the review alone", async () => {
+    const user = userEvent.setup();
+    const onDeleteReview = vi.fn();
+    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Keep me.", advice: [], seen: true }]);
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} onDeleteReview={onDeleteReview} />);
+    await user.click(screen.getByRole("button", { name: /^Delete weekly review/ }));
+    await user.click(screen.getByText("KEEP"));
+    expect(onDeleteReview).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^Delete weekly review/ })).toBeInTheDocument();
+  });
+
+  test("a brand-new (unseen) review starts open so it actually gets read", () => {
+    const state = reviewState([
+      { generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Read me now.", advice: [], seen: false },
+    ]);
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    expect(screen.getByText("Read me now.")).toBeInTheDocument();
+  });
+
+  test("collapse state survives a parent re-render (the card is not redefined per render)", async () => {
+    const user = userEvent.setup();
+    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Sticky open.", advice: [], seen: true }]);
+    const { rerender } = render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
+    expect(screen.getByText("Sticky open.")).toBeInTheDocument();
+    rerender(<Progress state={{ ...state }} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    expect(screen.getByText("Sticky open.")).toBeInTheDocument();
+  });
+
+  test("no delete control is offered when the screen wasn't given a delete handler", () => {
+    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "x", advice: [], seen: true }]);
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /^Delete weekly review/ })).not.toBeInTheDocument();
+  });
 });
 
 describe("<WorkoutHistoryEditor />", () => {

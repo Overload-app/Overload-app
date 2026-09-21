@@ -81,6 +81,7 @@ import {
   buildCoachStaticSystem,
   buildCoachDynamicSystem,
   reviewPeriodStart,
+  reviewPeriodStartAnchorISO,
   nextReviewDueAt,
   isReviewDue,
   summarizeReviewPeriod,
@@ -682,6 +683,31 @@ describe("periodic review scheduling and summarization", () => {
     expect(reviewPeriodStart({ weekly: [] }, created, "weekly")).toBe(new Date(created).getTime());
     const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
     expect(reviewPeriodStart({ weekly: [{ generatedAt: lastGen }] }, created, "weekly")).toBe(new Date(lastGen).getTime());
+  });
+
+  test("deleting reviews does not pull the next one's due date earlier — the anchor outlives the list", () => {
+    const created = new Date("2026-01-01T00:00:00Z").toISOString();
+    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
+    // Every review deleted, but the anchor stands: still not due until a
+    // full period after the last generation, so no surprise (paid) AI run.
+    const emptied = { weekly: [], lastGeneratedAt: { weekly: lastGen } };
+    expect(reviewPeriodStart(emptied, created, "weekly")).toBe(new Date(lastGen).getTime());
+    expect(isReviewDue(emptied, created, "weekly", new Date("2026-06-05T00:00:00Z"))).toBe(false);
+    expect(isReviewDue(emptied, created, "weekly", new Date("2026-06-09T00:00:00Z"))).toBe(true);
+  });
+
+  test("reviewPeriodStart takes whichever is later, the anchor or the newest entry", () => {
+    const created = new Date("2026-01-01T00:00:00Z").toISOString();
+    const stale = new Date("2026-05-01T00:00:00Z").toISOString();
+    const newer = new Date("2026-06-01T00:00:00Z").toISOString();
+    expect(reviewPeriodStart({ weekly: [{ generatedAt: newer }], lastGeneratedAt: { weekly: stale } }, created, "weekly")).toBe(new Date(newer).getTime());
+    expect(reviewPeriodStart({ weekly: [{ generatedAt: stale }], lastGeneratedAt: { weekly: newer } }, created, "weekly")).toBe(new Date(newer).getTime());
+  });
+
+  test("reviewPeriodStartAnchorISO captures the date an anchor-less account is implicitly running on", () => {
+    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
+    expect(reviewPeriodStartAnchorISO({ weekly: [{ generatedAt: "2026-05-01" }, { generatedAt: lastGen }] }, "weekly")).toBe(lastGen);
+    expect(reviewPeriodStartAnchorISO({ weekly: [] }, "weekly")).toBe(null);
   });
 
   test("summarizeReviewPeriod only counts workouts/weigh-ins actually inside the period", () => {

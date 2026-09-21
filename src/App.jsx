@@ -5236,7 +5236,24 @@ const REVIEW_PERIOD_MS = { weekly: 7 * 86400000, monthly: 30 * 86400000 };
 export function reviewPeriodStart(reviews, accountCreatedAt, cadence) {
   const list = reviews?.[cadence] || [];
   const last = list.length > 0 ? list[list.length - 1] : null;
-  return last ? new Date(last.generatedAt).getTime() : new Date(accountCreatedAt).getTime();
+  // Deleting a review must NOT make the next one come due early (that would
+  // fire an unwanted AI generation), so the schedule is anchored to a
+  // timestamp kept outside the list. Older accounts have no anchor yet, so
+  // fall back to the newest entry, and take whichever is later either way.
+  const times = [];
+  const anchor = reviews?.lastGeneratedAt?.[cadence];
+  if (anchor) times.push(new Date(anchor).getTime());
+  if (last?.generatedAt) times.push(new Date(last.generatedAt).getTime());
+  if (times.length === 0) return new Date(accountCreatedAt).getTime();
+  return Math.max(...times);
+}
+
+// The anchor an older account (saved before lastGeneratedAt existed) is
+// implicitly running on: the newest review's date. Captured before a delete
+// so removing that review doesn't move the next due date earlier.
+export function reviewPeriodStartAnchorISO(reviews, cadence) {
+  const list = reviews?.[cadence] || [];
+  return list.length > 0 ? list[list.length - 1].generatedAt : null;
 }
 
 export function nextReviewDueAt(reviews, accountCreatedAt, cadence) {
@@ -5349,7 +5366,92 @@ function ExerciseProgress({ logs }) {
 // Marks any unseen entries as seen once they're actually rendered here
 // (this section itself IS "viewing" them, whether reached via the Home
 // banner or just browsing Progress directly).
-function ReviewsSection({ reviews, onMarkSeen }) {
+// Reviews pile up over time, so each one is a collapsible row: label + date
+// always visible, the write-up only when opened. A review that hasn't been
+// read yet starts open; ones already seen start closed. Deleting is a
+// two-tap confirm — the write-up is gone for good once it's removed.
+function ReviewCard({ label, entry, onDelete }) {
+  // The `seen` flag flips to true moments after mount (ReviewsSection marks
+  // it), and this initializer only runs once, so a brand-new review stays
+  // open for the visit in which it first appeared.
+  const [open, setOpen] = useState(!entry.seen);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  return (
+    <Card style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={`${open ? "Collapse" : "Expand"} ${label.toLowerCase()} from ${entry.generatedAt.slice(0, 10)}`}
+          style={{
+            flex: 1, display: "flex", alignItems: "center", gap: 8, minWidth: 0,
+            background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left",
+          }}
+        >
+          <ChevronRight
+            size={14}
+            color={T.steelDark}
+            style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
+          />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5 }}>{label}</span>
+          <span style={{ fontSize: 11, color: T.steelDark, marginLeft: "auto" }}>{entry.generatedAt.slice(0, 10)}</span>
+        </button>
+        {onDelete && (
+          confirmDelete ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              <button
+                onClick={onDelete}
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                  color: T.protein, background: "none", border: "none", padding: "3px 2px", cursor: "pointer",
+                }}
+              >
+                DELETE
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                  color: T.steelDark, background: "none", border: "none", padding: "3px 2px", cursor: "pointer",
+                }}
+              >
+                KEEP
+              </button>
+            </span>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              aria-label={`Delete ${label.toLowerCase()} from ${entry.generatedAt.slice(0, 10)}`}
+              style={{ flexShrink: 0, background: "none", border: "none", padding: 2, cursor: "pointer", lineHeight: 0 }}
+            >
+              <X size={14} color={T.steelDark} />
+            </button>
+          )
+        )}
+      </div>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          {entry.overview ? (
+            <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{entry.overview}</p>
+          ) : (
+            <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
+              {entry.summary?.workoutCount ?? 0} workout{entry.summary?.workoutCount === 1 ? "" : "s"} logged this period.
+            </p>
+          )}
+          {entry.advice && entry.advice.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {entry.advice.map((tip, i) => (
+                <li key={i} style={{ fontSize: 12.5, color: T.steelDark, marginBottom: 3 }}>{tip}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ReviewsSection({ reviews, onMarkSeen, onDelete }) {
   const weekly = reviews?.weekly || [];
   const monthly = reviews?.monthly || [];
   useEffect(() => {
@@ -5360,45 +5462,36 @@ function ReviewsSection({ reviews, onMarkSeen }) {
 
   if (weekly.length === 0 && monthly.length === 0) return null;
 
-  function ReviewCard({ label, entry }) {
-    return (
-      <Card style={{ marginBottom: 8 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5 }}>{label}</span>
-          <span style={{ fontSize: 11, color: T.steelDark }}>{entry.generatedAt.slice(0, 10)}</span>
-        </div>
-        {entry.overview ? (
-          <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{entry.overview}</p>
-        ) : (
-          <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
-            {entry.summary?.workoutCount ?? 0} workout{entry.summary?.workoutCount === 1 ? "" : "s"} logged this period.
-          </p>
-        )}
-        {entry.advice && entry.advice.length > 0 && (
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {entry.advice.map((tip, i) => (
-              <li key={i} style={{ fontSize: 12.5, color: T.steelDark, marginBottom: 3 }}>{tip}</li>
-            ))}
-          </ul>
-        )}
-      </Card>
-    );
-  }
-
   return (
     <>
       <TickRule label="Reviews" />
-      {weekly.slice().reverse().slice(0, 3).map((r, i) => (
-        <ReviewCard key={`w-${weekly.length - 1 - i}`} label="WEEKLY REVIEW" entry={r} />
-      ))}
-      {monthly.slice().reverse().slice(0, 3).map((r, i) => (
-        <ReviewCard key={`m-${monthly.length - 1 - i}`} label="MONTHLY REVIEW" entry={r} />
-      ))}
+      {weekly.slice().reverse().slice(0, 3).map((r, i) => {
+        const idx = weekly.length - 1 - i;
+        return (
+          <ReviewCard
+            key={`w-${r.generatedAt}`}
+            label="WEEKLY REVIEW"
+            entry={r}
+            onDelete={onDelete ? () => onDelete("weekly", idx) : null}
+          />
+        );
+      })}
+      {monthly.slice().reverse().slice(0, 3).map((r, i) => {
+        const idx = monthly.length - 1 - i;
+        return (
+          <ReviewCard
+            key={`m-${r.generatedAt}`}
+            label="MONTHLY REVIEW"
+            entry={r}
+            onDelete={onDelete ? () => onDelete("monthly", idx) : null}
+          />
+        );
+      })}
     </>
   );
 }
 
-export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMarkReviewSeen }) {
+export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMarkReviewSeen, onDeleteReview }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
@@ -5442,7 +5535,7 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMark
         </button>
       )}
 
-      <ReviewsSection reviews={state.reviews} onMarkSeen={onMarkReviewSeen} />
+      <ReviewsSection reviews={state.reviews} onMarkSeen={onMarkReviewSeen} onDelete={onDeleteReview} />
 
       <TickRule label="This month" />
       <MonthlySummary logs={logs} />
@@ -5923,7 +6016,14 @@ export default function App() {
           // entirely; nothing here should block on AI availability.
         }
         const entry = { generatedAt: new Date().toISOString(), periodStartMs, periodEndMs: Date.now(), summary, overview, advice, seen: false };
-        persist((prev) => ({ ...prev, reviews: { ...prev.reviews, [cadence]: [...(prev.reviews?.[cadence] || []), entry] } }));
+        persist((prev) => ({
+          ...prev,
+          reviews: {
+            ...prev.reviews,
+            [cadence]: [...(prev.reviews?.[cadence] || []), entry],
+            lastGeneratedAt: { ...prev.reviews?.lastGeneratedAt, [cadence]: entry.generatedAt },
+          },
+        }));
       } finally {
         reviewGeneratingRef.current[cadence] = false;
       }
@@ -6824,6 +6924,24 @@ export default function App() {
     }));
   }
 
+  // Reviews accumulate forever otherwise. Removing one leaves the schedule
+  // alone: reviews.lastGeneratedAt is the anchor for "when is the next one
+  // due", so clearing out the newest review doesn't trigger a fresh (paid)
+  // AI generation on the spot.
+  function deleteReview(cadence, index) {
+    persist((prev) => ({
+      ...prev,
+      reviews: {
+        ...prev.reviews,
+        lastGeneratedAt: {
+          ...prev.reviews?.lastGeneratedAt,
+          [cadence]: prev.reviews?.lastGeneratedAt?.[cadence] || reviewPeriodStartAnchorISO(prev.reviews, cadence),
+        },
+        [cadence]: (prev.reviews?.[cadence] || []).filter((r, i) => i !== index),
+      },
+    }));
+  }
+
   function resetAll() {
     persist(null);
   }
@@ -7003,6 +7121,7 @@ export default function App() {
               state={state} addWeight={addWeight} removeWeight={removeWeight}
               onOpenHistory={() => { setHistoryEditorInitialIdx(null); setHistoryEditorOpen(true); }}
               onMarkReviewSeen={markReviewSeen}
+              onDeleteReview={deleteReview}
             />
           )}
           {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} />}
