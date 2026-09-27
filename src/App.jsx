@@ -257,8 +257,45 @@ const SONNET5_OUTPUT_DOLLARS_PER_TOKEN = 10 / 1_000_000;
 export const TRIAL_DAILY_COST_CAP_CENTS = 15; // $0.15/day
 export const TRIAL_MONTHLY_COST_CAP_CENTS = 75; // $0.75/month — the hard ceiling
 
-export function estimateCostCents(inputTokens, outputTokens) {
-  const dollars = (inputTokens || 0) * SONNET5_INPUT_DOLLARS_PER_TOKEN + (outputTokens || 0) * SONNET5_OUTPUT_DOLLARS_PER_TOKEN;
+// Prompt-cache multipliers, from Anthropic's published pricing: a cache READ
+// costs 0.1x the base input rate, and a cache WRITE costs 1.25x on the
+// 5-minute TTL or 2x on the 1-hour one.
+const CACHE_READ_MULTIPLIER = 0.1;
+const CACHE_WRITE_5M_MULTIPLIER = 1.25;
+const CACHE_WRITE_1H_MULTIPLIER = 2;
+
+// Real bug, found while trying to reconcile a $0.25 conversation against a
+// model that predicted $0.08. usage.input_tokens counts ONLY the uncached
+// input — cached tokens are reported separately and were being ignored
+// completely here, so every cache write (the single most expensive line in a
+// Coach message, at 1.25-2x the base rate) went entirely uncounted. That made
+// the numbers unreconcilable AND quietly broke the trial cap below: a trial
+// account could run well past $0.75/month because most of what it spent was
+// never added up. Takes the whole usage object now rather than two numbers,
+// so a field being added upstream can't silently go missing again.
+export function estimateCostCents(usageOrInputTokens, outputTokens) {
+  const usage = typeof usageOrInputTokens === "object" && usageOrInputTokens !== null
+    ? usageOrInputTokens
+    : { input_tokens: usageOrInputTokens, output_tokens: outputTokens };
+  const uncachedInput = usage.input_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  // The breakdown-by-TTL field is preferred when present; without it, fall
+  // back to the TTL this app actually asks for so a write is never counted at
+  // the cheaper rate by accident.
+  const write1h = usage.cache_creation?.ephemeral_1h_input_tokens;
+  const write5m = usage.cache_creation?.ephemeral_5m_input_tokens;
+  const totalWrite = usage.cache_creation_input_tokens || 0;
+  const known1h = write1h || 0;
+  const known5m = write5m || 0;
+  const unattributed = Math.max(0, totalWrite - known1h - known5m);
+  const cacheWriteCost =
+    (known1h + unattributed) * CACHE_WRITE_1H_MULTIPLIER * SONNET5_INPUT_DOLLARS_PER_TOKEN +
+    known5m * CACHE_WRITE_5M_MULTIPLIER * SONNET5_INPUT_DOLLARS_PER_TOKEN;
+  const dollars =
+    uncachedInput * SONNET5_INPUT_DOLLARS_PER_TOKEN +
+    cacheRead * CACHE_READ_MULTIPLIER * SONNET5_INPUT_DOLLARS_PER_TOKEN +
+    cacheWriteCost +
+    (usage.output_tokens || 0) * SONNET5_OUTPUT_DOLLARS_PER_TOKEN;
   return dollars * 100;
 }
 
@@ -443,8 +480,22 @@ export async function claudeChat({ system, messages }) {
     throw httpErr;
   }
   const data = await res.json();
-  if (data.usage && onAiUsageRecorded) {
-    onAiUsageRecorded(estimateCostCents(data.usage.input_tokens, data.usage.output_tokens));
+  if (data.usage) {
+    const u = data.usage;
+    const costCents = estimateCostCents(u);
+    // Logged as real numbers, not a model. Every attempt so far to work out
+    // why a conversation cost what it did has been arithmetic on estimates,
+    // and the estimates have been wrong; this prints what was actually
+    // billed, split the way the bill is split. "write" being non-zero on
+    // every message means the cache is missing and being rebuilt each time,
+    // which is the single most expensive failure mode here.
+    console.log(
+      `[ai-cost] ${costCents.toFixed(4)}c | uncached in ${u.input_tokens || 0}` +
+      ` | cache read ${u.cache_read_input_tokens || 0}` +
+      ` | cache write ${u.cache_creation_input_tokens || 0}` +
+      ` | out ${u.output_tokens || 0}`
+    );
+    if (onAiUsageRecorded) onAiUsageRecorded(costCents);
   }
   // With tool_choice forcing the "respond" tool, the model's actual answer
   // comes back as a tool_use block whose `input` the API has ALREADY parsed
@@ -6710,7 +6761,15 @@ export default function App() {
       // not just one person's own back-to-back turns. Real ask this was
       // for: "optimize costs... run a lot of tests... save credits."
       const system = [
-        { type: "text", text: buildCoachStaticSystem(), cache_control: { type: "ephemeral" } },
+        // 1-hour TTL, not the 5-minute default. A Coach conversation is a
+        // person thinking between messages — the real transcript behind this
+        // has gaps of minutes — so on the default TTL the entry expired
+        // repeatedly and each message paid the 1.25x WRITE premium on the
+        // whole static block instead of a 0.1x read. The 1-hour write costs
+        // 2x once and then reads at 0.1x for an hour. It also makes this
+        // block genuinely shareable: it's byte-identical for every account,
+        // so one warm entry serves everyone who messages within the hour.
+        { type: "text", text: buildCoachStaticSystem(), cache_control: { type: "ephemeral", ttl: "1h" } },
         { type: "text", text: buildCoachDynamicSystem(stateRef.current) },
       ];
       // The API requires the conversation to start with a "user" turn — drop the

@@ -3458,6 +3458,42 @@ describe("AI usage budget math", () => {
     expect(estimateCostCents(0, 0)).toBe(0);
   });
 
+  // Real bug: usage.input_tokens counts ONLY uncached input, so every cached
+  // token — including cache WRITES at 1.25-2x the base rate, the most
+  // expensive line in a Coach message — was going completely uncounted. That
+  // made billed cost impossible to reconcile and quietly broke the trial cap,
+  // since most of what a trial account spent was never added up.
+  test("a cache READ is charged at a tenth of the input rate, not ignored", () => {
+    expect(estimateCostCents({ cache_read_input_tokens: 1_000_000 })).toBeCloseTo(20); // 0.1 x $2
+  });
+
+  test("a cache WRITE is charged at the 1-hour 2x rate this app actually requests", () => {
+    expect(estimateCostCents({ cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(400); // 2 x $2
+  });
+
+  test("when the API breaks writes down by TTL, each is charged at its own rate", () => {
+    const usage = {
+      cache_creation_input_tokens: 2_000_000,
+      cache_creation: { ephemeral_1h_input_tokens: 1_000_000, ephemeral_5m_input_tokens: 1_000_000 },
+    };
+    expect(estimateCostCents(usage)).toBeCloseTo(400 + 250); // 2x + 1.25x
+  });
+
+  test("an unattributed write is charged at the higher rate, never quietly discounted", () => {
+    const usage = { cache_creation_input_tokens: 1_000_000, cache_creation: { ephemeral_5m_input_tokens: 0 } };
+    expect(estimateCostCents(usage)).toBeCloseTo(400);
+  });
+
+  test("a whole real usage object adds up to every line of the bill", () => {
+    const usage = { input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000, output_tokens: 1_000_000 };
+    expect(estimateCostCents(usage)).toBeCloseTo(200 + 20 + 400 + 1000);
+  });
+
+  test("the old two-number form still works, so nothing that calls it breaks", () => {
+    expect(estimateCostCents(1_000_000, 1_000_000)).toBeCloseTo(200 + 1000);
+    expect(estimateCostCents({})).toBe(0);
+  });
+
   test("currentUsageCents resets the daily figure on a new day but keeps the monthly figure within the same month", () => {
     const yesterday = dateToISO(new Date(Date.now() - 86400000));
     const thisMonth = todayISO().slice(0, 7);
