@@ -912,7 +912,17 @@ function fileToBase64(file) {
 // enough to safely sit in localStorage's limited quota while queued for
 // offline analysis (a raw phone photo can be several MB; this keeps it to
 // roughly 50-200KB).
-function compressImageToBase64(file, maxDim = 1024, quality = 0.72) {
+//
+// 768px, down from 1024px. Meal photos are the biggest recurring AI cost in
+// the app — someone logging 3 a day costs more per month than their Coach
+// usage — and an image is billed by its pixel area: 1024px is ~1,400 input
+// tokens, 768px is ~590, for roughly 35% off that line. Identifying "chicken
+// and rice, about this much" does not need the extra resolution; portion
+// estimates from a photo are approximate at any size. Deliberately NOT cut
+// further to 512px, which would be cheaper again — people do photograph
+// nutrition labels and packaging, and that's where small print stops being
+// legible.
+function compressImageToBase64(file, maxDim = 768, quality = 0.72) {
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(file);
     const img = new Image();
