@@ -919,10 +919,30 @@ describe("coachDayContext — what the Coach can see about which day is in front
       logs: { workouts: [] },
       inProgressWorkout: { dayIdx: 0, sets: [{ logged: [{ weight: "135", reps: "8", done: true }] }] },
     });
-    expect(text).toContain("Push (Shoulders/Chest Volume)");
-    expect(text).toContain("the one I have open");
-    // And warns about the live session's real logged work.
+    expect(text).toContain('dayIndex 0 ("Push (Shoulders/Chest Volume)")');
     expect(text).toContain("1 set already logged");
+  });
+
+  test("with nothing open it says so explicitly, rather than leaving the Coach to infer it", () => {
+    expect(coachDayContextText({ program, logs: { workouts: [] } })).toContain("Open right now: nothing");
+  });
+
+  // This half of the prompt is per-account, so it can never be cache-shared —
+  // every rule about how to USE these facts belongs in the cached static block
+  // instead. Real ask: stop paying full price for it on every message.
+  test("the per-account day lines carry facts only, with the rules left to the cached block", () => {
+    const text = coachDayContextText({
+      program,
+      logs: { workouts: [] },
+      inProgressWorkout: { dayIdx: 0, sets: [] },
+    });
+    expect(text.length).toBeLessThan(600);
+    expect(text).not.toMatch(/NEVER guess|never tell them you can't|todayOverride/);
+    // ...and those rules are genuinely still being sent, just in the cached half.
+    const staticBlock = buildCoachStaticSystem();
+    expect(staticBlock).toContain("Their days, by dayIndex");
+    expect(staticBlock).toContain("the one I have open");
+    expect(staticBlock).toContain("NEVER guess");
   });
 
   test("the day context reaches the real dynamic prompt the Coach is sent", () => {
@@ -934,7 +954,7 @@ describe("coachDayContext — what the Coach can see about which day is in front
       inProgressWorkout: { dayIdx: 2, sets: [] },
     });
     expect(dynamic).toContain('"dayIndex":2');
-    expect(dynamic).toContain("The day they have OPEN right now");
+    expect(dynamic).toContain('Open right now: dayIndex 2');
   });
 });
 

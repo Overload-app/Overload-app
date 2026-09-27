@@ -524,6 +524,61 @@ describe("<WorkoutHistoryEditor />", () => {
   });
 });
 
+// Real ask: "get rid of the up next thing beside the workout. just make it so
+// that it shows what workout you did last time." NEXT was a prediction from a
+// rotation count; LAST DONE is a fact about what actually happened.
+describe("<Train /> Sessions list marks the day you last did, not the one it predicts is next", () => {
+  const program = {
+    splitName: "Push / Pull / Legs",
+    days: [
+      { name: "Push", exercises: [{ name: "Bench Press" }] },
+      { name: "Pull", exercises: [{ name: "Barbell Row" }] },
+      { name: "Legs", exercises: [{ name: "Squat" }] },
+    ],
+  };
+
+  test("the day from the most recent logged workout is the one marked", () => {
+    const state = {
+      program,
+      logs: { workouts: [
+        { date: "2026-09-20", dayName: "Push", exercises: [] },
+        { date: "2026-09-24", dayName: "Pull", exercises: [] },
+      ] },
+    };
+    render(<Train state={state} startWorkout={vi.fn()} setActiveTab={vi.fn()} onOpenHistoryEntry={vi.fn()} />);
+    const badge = screen.getByText(/LAST DONE/);
+    expect(badge).toHaveTextContent("Sep 24");
+    // One badge only — the older Push workout isn't also marked.
+    expect(screen.getAllByText(/LAST DONE/)).toHaveLength(1);
+  });
+
+  test("the NEXT prediction is gone entirely", () => {
+    const state = { program, logs: { workouts: [{ date: "2026-09-24", dayName: "Pull", exercises: [] }] } };
+    render(<Train state={state} startWorkout={vi.fn()} setActiveTab={vi.fn()} onOpenHistoryEntry={vi.fn()} />);
+    expect(screen.queryByText("NEXT")).not.toBeInTheDocument();
+  });
+
+  test("nothing is marked before the first workout is ever logged", () => {
+    render(<Train state={{ program, logs: { workouts: [] } }} startWorkout={vi.fn()} setActiveTab={vi.fn()} onOpenHistoryEntry={vi.fn()} />);
+    expect(screen.queryByText(/LAST DONE/)).not.toBeInTheDocument();
+  });
+
+  test("a logged day no longer in the program marks nothing, rather than mislabelling another day", () => {
+    const state = { program, logs: { workouts: [{ date: "2026-09-24", dayName: "Full Body A", exercises: [] }] } };
+    render(<Train state={state} startWorkout={vi.fn()} setActiveTab={vi.fn()} onOpenHistoryEntry={vi.fn()} />);
+    expect(screen.queryByText(/LAST DONE/)).not.toBeInTheDocument();
+  });
+
+  test("tapping a session card still starts that day's workout", async () => {
+    const user = userEvent.setup();
+    const startWorkout = vi.fn();
+    const state = { program, logs: { workouts: [{ date: "2026-09-24", dayName: "Pull", exercises: [] }] } };
+    render(<Train state={state} startWorkout={startWorkout} setActiveTab={vi.fn()} onOpenHistoryEntry={vi.fn()} />);
+    await user.click(screen.getByText("Legs"));
+    expect(startWorkout).toHaveBeenCalledWith(2);
+  });
+});
+
 describe("<Train /> History list — real ask: edit/delete reachable here too, not just Progress", () => {
   function buildState() {
     return {

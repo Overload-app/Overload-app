@@ -4318,7 +4318,13 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
 
 export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry }) {
   const { program, logs } = state;
-  const nextIdx = logs.workouts.length % program.days.length;
+  // The most recent logged workout, matched back to a program day by name.
+  // Name (not index) because that's all a log entry stores, and because a
+  // renamed or reordered day should simply stop matching rather than
+  // mislabel some other day as the one they last did.
+  const lastWorkout = logs.workouts.length > 0 ? logs.workouts[logs.workouts.length - 1] : null;
+  const lastDoneDayName = lastWorkout ? lastWorkout.dayName : null;
+  const lastDoneLabel = lastWorkout ? parseISODate(lastWorkout.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
   return (
     <div style={{ padding: "calc(20px + env(safe-area-inset-top, 0px)) 16px 90px" }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>YOUR PROGRAM</span>
@@ -4343,25 +4349,33 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
       <TickRule label="Sessions" />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {program.days.map((day, i) => {
-          const isNext = i === nextIdx;
+          // Real ask: "get rid of the up next thing beside the workout, just
+          // make it so that it shows what workout you did last time." The
+          // NEXT pill and its highlight predicted which day was due from a
+          // rotation count, which is a guess about the future; what someone
+          // actually wants to see standing here is which one they last did,
+          // which is a fact. The Home tab still carries the start-your-next-
+          // workout card, so nothing is lost by dropping the prediction here.
+          const isLastDone = lastDoneDayName !== null && day.name === lastDoneDayName;
           return (
             <Card
               key={i}
               onClick={() => startWorkout(i)}
               style={{
                 display: "flex", justifyContent: "space-between", alignItems: "center",
-                border: isNext ? `2px solid ${T.charge}` : `1px solid ${T.steel}`,
-                // A tinted background + ambient shadow on top of the existing
-                // accent border and NEXT pill — the plain border alone didn't
-                // stand out enough against the other session cards.
-                background: isNext ? "#F5F3FF" : T.card,
-                boxShadow: isNext ? "0 8px 24px rgba(91,70,246,0.18)" : "0 1px 2px rgba(18,22,28,0.06)",
+                border: `1px solid ${T.steel}`,
+                background: T.card,
+                boxShadow: "0 1px 2px rgba(18,22,28,0.06)",
               }}
             >
               <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, margin: 0, color: T.ink }}>{day.name}</h3>
-                  {isNext && <span style={{ background: T.charge, color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>NEXT</span>}
+                  {isLastDone && (
+                    <span style={{ background: T.paper, border: `1px solid ${T.steel}`, color: T.steelDark, fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6, letterSpacing: 0.3 }}>
+                      LAST DONE {lastDoneLabel}
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{day.exercises.map((e) => e.name).join(" · ")}</div>
               </div>
@@ -4478,7 +4492,6 @@ Rules:
 - Never include exercises that would aggravate stated injuries.
 - You have NO other way to undo anything. "restoreIndex" and "restoreOriginal" are the only two, and both work off snapshots the app saved — you cannot reconstruct a previous version from memory, and you cannot "put it back" by describing it. Real report of this going wrong: asked to "forget what you just did," Coach replied "nothing changed, your day is back to exactly what it was before" with every field null — so nothing was undone, and the user was told the opposite. If they ask you to undo, revert, forget, or go back to how it was, you MUST set "restoreIndex" (matching a version-history entry) or "restoreOriginal", in that same response. If nothing in the history matches what they're describing, say plainly that you can't undo that one and ask what they want it to look like instead. Never claim, imply, or let a reply read as though something was reverted when neither field is set.
 - Never call a "todayOverride" permanent, saved, or lasting. It applies to ONE upcoming session and the app labels it that way on screen, so saying "saved permanently" directly contradicts what they're looking at — a real report ("why does it say swapped by coach for today only"). If they ask for a change to be permanent, the answer is a "programDayEdit" (or "program"), not a reassurance about an override. And if they tell you a label in the app contradicts what you said, believe the app: it reflects what actually got saved, and you should say which of the two you actually did rather than guessing that their screen is stale.
-- When they refer to a day, identify it from the indexed day list in your context below and use that day's real dayIndex. A partial, shortened, or slightly-wrong day name is normal and is NOT a reason to rebuild that day from scratch — a real report of exactly that: a user said "push (chest + shoulders)" for a day actually named "Push (Shoulders/Chest Volume)", and the whole day got replaced. Match it, keep the day's existing name and its existing exercises, and change only what they asked for.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (per your context below), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program", "programDayEdit", or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
@@ -4497,7 +4510,9 @@ Rules:
 - CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
 - When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" in your context below verbatim — do not recalculate or estimate fresh numbers from scratch. That JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
-- This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
+- This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.
+
+${COACH_DAY_RULES}`;
 }
 
 // Real report: asked to change "the one I currently have open," Coach
@@ -4521,23 +4536,31 @@ export function coachDayContext(state) {
   return { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout };
 }
 
-// The prose the Coach actually reads. Kept separate from coachDayContext so
-// the facts can be tested without matching sentences.
+// The account-specific FACTS only — deliberately terse, because this half of
+// the system prompt is per-account and so can never be cache-shared. Every
+// rule about how to USE these facts lives in COACH_DAY_RULES below, which
+// rides in the byte-identical cached block at a tenth of the input cost.
+// Real ask: "just make it search that when it actually needs it" — a lookup
+// tool would cost more (a second round-trip re-sends the whole conversation),
+// so the saving comes from moving the prose, not from fetching it on demand.
 export function coachDayContextText(state) {
   const { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout } = coachDayContext(state);
   if (days.length === 0) return "";
-  const lines = [
-    `Their program's days, with the EXACT "dayIndex" to use for each one: ${JSON.stringify(days)}. When they name a day, match it to one of these by index. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day in that list, that IS the day: use its dayIndex and its real name. Only if they genuinely could mean two or more of these days should you ask which — and when you ask, list the real day names so they can just pick one. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.`,
-  ];
-  if (openDayIndex !== null) {
-    lines.push(`The day they have OPEN right now: dayIndex ${openDayIndex}, "${days[openDayIndex].name}" — they have a workout in progress on it${loggedSetsInOpenWorkout > 0 ? `, with ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged` : ""}. If they say "the one I have open," "this workout," "the one I'm doing," or anything else that means the session in front of them, this is it — you can see it, so never tell them you can't and never ask them which day it is.`);
-    if (loggedSetsInOpenWorkout > 0) {
-      lines.push(`CAREFUL: that open workout has real logged sets in it. Sets they already did are kept either way, but rewriting that whole day mid-workout is disruptive and almost never what they want. For a change to the session they're in the middle of, prefer "todayOverride", touch as few exercises as possible, and if they've asked for something that would replace the entire day, say what it will do to their current session and ask before doing it.`);
-    }
-  }
-  lines.push(`The next scheduled day (what "today's workout" / "my next session" means): dayIndex ${nextDayIndex}, "${days[nextDayIndex].name}". "todayOverride" only ever applies to THIS day — it cannot be used to change any other day, so if they want a one-time change to a different day, say so instead of pretending.`);
+  const lines = [`Their days, by dayIndex: ${JSON.stringify(days)}`];
+  lines.push(openDayIndex === null
+    ? "Open right now: nothing — no workout in progress."
+    : `Open right now: dayIndex ${openDayIndex} ("${days[openDayIndex].name}"), workout in progress, ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged.`);
+  lines.push(`Next scheduled: dayIndex ${nextDayIndex} ("${days[nextDayIndex].name}").`);
   return lines.join("\n");
 }
+
+// How to read the three lines above. Same for every account on the app, so it
+// sits in the cached static block rather than being re-sent per user.
+const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their days, by dayIndex", "Open right now", "Next scheduled"):
+- "Their days, by dayIndex" is the authoritative list. When they name a day, match it to one of these and use that exact dayIndex. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day on that list, that IS the day: use its dayIndex and keep its real name. Only if they genuinely could mean two or more should you ask which, and then list the real day names so they can just pick. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.
+- "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
+- If that open workout has sets already logged, be careful: sets they've done are kept either way, but rewriting the whole day mid-session is disruptive and almost never wanted. Prefer "todayOverride", touch as few exercises as possible, and if what they asked for would replace the entire day, say what that does to their current session and ask first.
+- "Next scheduled" is what "today's workout" / "my next session" means. "todayOverride" only ever applies to THAT day — it cannot change any other day, so if they want a one-time change to a different day, say so rather than pretending.`;
 
 export function buildCoachDynamicSystem(state) {
   const p = state.profile;
