@@ -1342,16 +1342,41 @@ export function stripNameQualifiers(name) {
 // lookup first (falling back to the pool only if offline). Papering over it
 // here would make every exercise look "already handled" and the AI-sourced
 // upgrade would never get a chance to run.
-export function withTips(exercises) {
+// Every exercise already in a program, flattened — the pool of real,
+// already-written tips to reuse from.
+export function allProgramExercises(program) {
+  return (program?.days || []).flatMap((d) => d.exercises || []);
+}
+
+// Fills in any exercise that arrived without tips. Reuses the tips this
+// person's program ALREADY has for that exercise before falling back to the
+// local pattern table, so carrying an exercise through an edit keeps the real
+// AI-written tips rather than downgrading to generic ones.
+// Real ask: a ten-message Coach conversation cost $0.37. Output is billed at
+// 5x input, and a day edit re-wrote 4 tips for all 6 exercises even when only
+// one was changing — roughly 900 wasted output tokens per edit. The Coach is
+// now told to send "tips": [] for anything already in the program, which is
+// only safe because of the reuse here.
+export function withTips(exercises, priorExercises) {
+  const priorTips = new Map(
+    (priorExercises || [])
+      .filter((ex) => Array.isArray(ex.tips) && ex.tips.length > 0)
+      .map((ex) => [stripNameQualifiers(ex.name), ex.tips])
+  );
   return (exercises || []).map((ex) => {
     const name = stripNameQualifiers(ex.name);
     const cleaned = name === ex.name ? ex : { ...ex, name };
-    return Array.isArray(cleaned.tips) && cleaned.tips.length > 0 ? cleaned : { ...cleaned, tips: tipsForExercise(name) };
+    if (Array.isArray(cleaned.tips) && cleaned.tips.length > 0) return cleaned;
+    return { ...cleaned, tips: priorTips.get(name) || tipsForExercise(name) };
   });
 }
-export function normalizeProgramTips(program) {
+export function normalizeProgramTips(program, priorProgram) {
   if (!program) return program;
-  return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises) })) };
+  // Defaults to the program's own exercises as the reuse pool, so a day that
+  // came back untouched with its tips intact can supply them to the same
+  // exercise on a day the model rewrote without them.
+  const pool = allProgramExercises(priorProgram || program);
+  return { ...program, days: (program.days || []).map((d) => ({ ...d, exercises: withTips(d.exercises, pool) })) };
 }
 
 // The actual merge behind Coach's "programDayEdit" (see buildCoachSystem) —
@@ -4493,7 +4518,8 @@ Rules:
 - You have NO other way to undo anything. "restoreIndex" and "restoreOriginal" are the only two, and both work off snapshots the app saved — you cannot reconstruct a previous version from memory, and you cannot "put it back" by describing it. Real report of this going wrong: asked to "forget what you just did," Coach replied "nothing changed, your day is back to exactly what it was before" with every field null — so nothing was undone, and the user was told the opposite. If they ask you to undo, revert, forget, or go back to how it was, you MUST set "restoreIndex" (matching a version-history entry) or "restoreOriginal", in that same response. If nothing in the history matches what they're describing, say plainly that you can't undo that one and ask what they want it to look like instead. Never claim, imply, or let a reply read as though something was reverted when neither field is set.
 - Never call a "todayOverride" permanent, saved, or lasting. It applies to ONE upcoming session and the app labels it that way on screen, so saying "saved permanently" directly contradicts what they're looking at — a real report ("why does it say swapped by coach for today only"). If they ask for a change to be permanent, the answer is a "programDayEdit" (or "program"), not a reassurance about an override. And if they tell you a label in the app contradicts what you said, believe the app: it reflects what actually got saved, and you should say which of the two you actually did rather than guessing that their screen is stale.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (per your context below), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
-- Whenever you include an exercise (in "program", "programDayEdit", or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
+- Whenever you include an exercise that is NOT already in "Current program JSON", give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave them generic.
+- For an exercise that IS already in "Current program JSON" and that you're carrying through unchanged, send "tips": [] instead. Its real tips are already saved on the app's side and get kept automatically — rewriting them costs money for an identical result, and output is billed at five times the rate of input. A one-exercise swap on a six-exercise day should therefore write tips for exactly one exercise, not six. This is the only case where an empty "tips" array is correct; for anything new, all 4 are required.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - "alternatives" are held to the SAME vocabulary rule as the exercise names themselves, and this matters more for them than for anything else you write: they're the list someone taps mid-workout to swap to, and an alternative with no instructional video is close to useless at that moment. Take all 3 from the vocabulary list in your context below, named EXACTLY as written. If you genuinely can't find 3 suitable ones on that list, give fewer real ones rather than padding the list with off-vocabulary names.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
@@ -4512,7 +4538,9 @@ Rules:
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
 - This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.
 
-${COACH_DAY_RULES}`;
+${COACH_DAY_RULES}
+
+${COACH_LIMIT_RULES}`;
 }
 
 // Real report: asked to change "the one I currently have open," Coach
@@ -4554,6 +4582,19 @@ export function coachDayContextText(state) {
   return lines.join("\n");
 }
 
+// Every one of these bullets is the same for every account on the app — only
+// the four numbers inside them differ, and those now arrive as a single short
+// line in the per-account block instead. Real ask: a ten-message Coach
+// conversation cost $0.37. The per-account half of the system prompt is
+// charged at full price on every single message and can never be cache-shared;
+// this block is ~1500 tokens of it that only ever needed to be sent once.
+const COACH_LIMIT_RULES = `YOUR NUMERIC LIMITS. The four values named in caps below (EXERCISE_CEILING, SESSION_LENGTH, TIGHTEST_SETS, TIGHTEST_REST) are given as real numbers in the "Numeric limits" line of your context. Read them from there and use those numbers — never the literal names — when you write or explain anything:
+- CEILING (not absolute — see the override rule right below, and the reality check right after it) on any day you write into "program", "programDayEdit", or "todayOverride": no more than EXERCISE_CEILING exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
+- OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with EXERCISE_CEILING or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual SESSION_LENGTH min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This ALSO applies when they ask to remove one specific named exercise without stating a total count at all (e.g. "remove Assault Bike Sprints," "take out the leg extension") — if the day is already at (or one above) the 4-minimum, removing it without replacing it is still exactly what they explicitly asked for, so set "overrideCeiling": true here too rather than backfilling the slot with something they never asked for. Only leave "overrideCeiling" false for your OWN additions/removals that you're making unprompted as part of a broader change — those still respect the normal ceiling/minimum.
+- REALITY CHECK, and this matters more than the number above: EXERCISE_CEILING is a TIME-BUDGET estimate, not a description of what their program actually contains right now. Several days in "Current program JSON" above may already have MORE exercises than EXERCISE_CEILING. Real report this exists for: a day genuinely holding 6 exercises, with this number reading 4, led to repeatedly insisting the day was "already at your exercise limit" and offering to cut an exercise to make room that was never actually needed — then contradicting itself about whether the day had 4 or 5. Before you claim a day is full, or offer to cut something to make room, COUNT the exercises that day actually has in "Current program JSON" and say that real number. If a day already exceeds EXERCISE_CEILING, that is normal and not something to quietly correct: do not strip it back down to EXERCISE_CEILING unless they specifically asked you to shorten that day. When they explicitly ask you to ADD one exercise to a day that is at or over the budget, add it, set "overrideCeiling": true, and note the time tradeoff in one short clause — the same way you would for an explicit removal.
+- If EXERCISE_CEILING is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since EXERCISE_CEILING reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is TIGHTEST_SETS sets x TIGHTEST_REST rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale EXERCISE_CEILING as a hard fact. Only if trimming all the way to TIGHTEST_SETS x TIGHTEST_REST genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
+- If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".`;
+
 // How to read the three lines above. Same for every account on the app, so it
 // sits in the cached static block rather than being re-sent per user.
 const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their days, by dayIndex", "Open right now", "Next scheduled"):
@@ -4561,6 +4602,24 @@ const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their
 - "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
 - If that open workout has sets already logged, be careful: sets they've done are kept either way, but rewriting the whole day mid-session is disruptive and almost never wanted. Prefer "todayOverride", touch as few exercises as possible, and if what they asked for would replace the entire day, say what that does to their current session and ask first.
 - "Next scheduled" is what "today's workout" / "my next session" means. "todayOverride" only ever applies to THAT day — it cannot change any other day, so if they want a one-time change to a different day, say so rather than pretending.`;
+
+// The program as the Coach needs to READ it. Every exercise's 4 form tips are
+// stripped: measured, they were 64% of the program JSON and ~1300 tokens of the
+// per-account (never-cache-shared) half of the system prompt, re-sent at full
+// price on every single message — and the Coach has no use for them. It edits
+// programs by name/sets/reps/rest, and it writes fresh tips for any exercise it
+// adds. "alternatives" stay: they're small (~290 tokens) and they're what stops
+// it re-suggesting a swap the day already offers.
+export function programForPrompt(program) {
+  if (!program) return program;
+  return {
+    ...program,
+    days: (program.days || []).map((d) => ({
+      ...d,
+      exercises: (d.exercises || []).map(({ tips, ...rest }) => rest),
+    })),
+  };
+}
 
 export function buildCoachDynamicSystem(state) {
   const p = state.profile;
@@ -4591,7 +4650,7 @@ export function buildCoachDynamicSystem(state) {
   }));
   return `Today's date: ${todayISO()}.
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
-Current program JSON: ${JSON.stringify(state.program)}
+Current program JSON (each exercise's form "tips" are omitted here — you don't need them to edit a program, and they cost real money to re-send every message; write fresh tips only for exercises you ADD): ${JSON.stringify(programForPrompt(state.program))}
 ${coachDayContextText(state)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
@@ -4601,12 +4660,7 @@ IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_
 
 Exercise vocabulary for their equipment (${p.equipment}) — named EXACTLY as written, every one confirmed to have a real instructional video: ${exerciseVocabularyFor(p.equipment).join(", ")}.
 
-Your numeric limits for this message — see the matching rules in your instructions above:
-- CEILING (not absolute — see the override rule right below, and the reality check right after it) on any day you write into "program", "programDayEdit", or "todayOverride": no more than ${liveCap} exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
-- OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with ${liveCap} or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual ${p.sessionLength} min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This ALSO applies when they ask to remove one specific named exercise without stating a total count at all (e.g. "remove Assault Bike Sprints," "take out the leg extension") — if the day is already at (or one above) the 4-minimum, removing it without replacing it is still exactly what they explicitly asked for, so set "overrideCeiling": true here too rather than backfilling the slot with something they never asked for. Only leave "overrideCeiling" false for your OWN additions/removals that you're making unprompted as part of a broader change — those still respect the normal ceiling/minimum.
-- REALITY CHECK, and this matters more than the number above: ${liveCap} is a TIME-BUDGET estimate, not a description of what their program actually contains right now. Several days in "Current program JSON" above may already have MORE exercises than ${liveCap}. Real report this exists for: a day genuinely holding 6 exercises, with this number reading 4, led to repeatedly insisting the day was "already at your exercise limit" and offering to cut an exercise to make room that was never actually needed — then contradicting itself about whether the day had 4 or 5. Before you claim a day is full, or offer to cut something to make room, COUNT the exercises that day actually has in "Current program JSON" and say that real number. If a day already exceeds ${liveCap}, that is normal and not something to quietly correct: do not strip it back down to ${liveCap} unless they specifically asked you to shorten that day. When they explicitly ask you to ADD one exercise to a day that is at or over the budget, add it, set "overrideCeiling": true, and note the time tradeoff in one short clause — the same way you would for an explicit removal.
-- If ${liveCap} is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since ${liveCap} reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is ${tightestSetsRest.sets} sets x ${tightestSetsRest.rest}s rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale ${liveCap} as a hard fact. Only if trimming all the way to ${tightestSetsRest.sets}x${tightestSetsRest.rest}s genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
-- If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".`;
+Numeric limits for this message: EXERCISE_CEILING = ${liveCap}. SESSION_LENGTH = ${p.sessionLength} min. TIGHTEST_SETS = ${tightestSetsRest.sets}. TIGHTEST_REST = ${tightestSetsRest.rest}s.`;
 }
 
 // Combined single-string form, in the same order the API actually sees
@@ -6712,11 +6766,14 @@ export default function App() {
         // regeneration and a todayOverride below, where the model is
         // designing freely rather than carrying out one specific request;
         // Coach's own prompt carries the time-budget guidance for day edits.
+        // Tips the Coach deliberately omitted for carried-over exercises are
+        // filled back in from the program they're already in — see withTips.
+        const tipPool = allProgramExercises(prev.program);
         const normalizedDayEdit = hasDayEdit
-          ? withTips(parsed.programDayEdit.day.exercises || [])
+          ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
           : null;
         const normalizedOverride = hasOverride
-          ? normalizeExerciseCount(withTips(parsed.todayOverride), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
+          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
           : null;
 
         // A real, non-restore change to program and/or targets: snapshot the
@@ -6739,7 +6796,7 @@ export default function App() {
           // happened, not what the model assumed would happen.
           let dayEditFailed = false;
           if (hasNewProgram) {
-            newProgram = normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays });
+            newProgram = normalizeProgramTips({ splitName: deriveSplitName(normalizedProgramDays) || prev.program.splitName, days: normalizedProgramDays }, prev.program);
           } else if (hasDayEdit) {
             const { dayIndex, day } = parsed.programDayEdit;
             const attempted = applyProgramDayEdit(prev.program, dayIndex, day.name, normalizedDayEdit);

@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  allProgramExercises,
+  programForPrompt,
   excludeKnownNoVideo,
   coachChangeNote,
   coachDayContextText,
@@ -776,8 +778,31 @@ describe("buildCoachSystem tells the Coach how to recover a stale, un-trimmed pr
     };
     const system = buildCoachSystem(state);
     const { sets, rest } = planSetsRest(state.profile);
-    expect(system).toContain(`${sets} sets x ${rest}s rest`);
+    // The guidance itself now lives in the cached static half, referring to the
+    // numbers by name; the real numbers arrive in the per-account half. Both
+    // still reach the model, in the same single prompt.
+    expect(system).toContain(`TIGHTEST_SETS = ${sets}. TIGHTEST_REST = ${rest}s.`);
+    expect(system).toContain("TIGHTEST_SETS sets x TIGHTEST_REST rest");
     expect(system).toContain("trim EVERY exercise on the day toward those numbers");
+  });
+
+  // Real ask: a ten-message Coach conversation cost $0.37. The per-account half
+  // is charged at full price on every message and can never be cache-shared, so
+  // prose that's identical for everyone belongs in the cached half.
+  test("the ceiling/limit prose is in the cached half, with only the numbers per-account", () => {
+    const state = {
+      profile: { ...baseProfile, sessionLength: 60 },
+      program: { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, rest: 90 }] }] },
+      programHistory: [],
+    };
+    const staticBlock = buildCoachStaticSystem();
+    const dynamic = buildCoachDynamicSystem(state);
+    expect(staticBlock).toContain("EXERCISE_CEILING");
+    expect(staticBlock).toContain("The dominant real-world cost isn't just working+resting sets");
+    // The per-account half states the numbers and carries none of that prose.
+    expect(dynamic).toMatch(/EXERCISE_CEILING = \d+\./);
+    expect(dynamic).not.toContain("The dominant real-world cost");
+    expect(dynamic).not.toContain("REALITY CHECK");
   });
 });
 
@@ -1046,6 +1071,102 @@ describe("the record always follows the saved log, never a superseded value", ()
 
   test("deleting the workout that held a bogus record removes it entirely", () => {
     expect(exercisePR({ workouts: [] }, "Bench Press")).toBe(null);
+  });
+});
+
+// Real ask: a ten-message Coach conversation cost $0.37. Measured, form tips
+// were 64% of the program JSON and ~1300 tokens of the per-account half of the
+// system prompt — re-sent at full price on every message, for something the
+// Coach never reads.
+describe("what the Coach is sent about the current program", () => {
+  const withTipsProgram = {
+    splitName: "PPL",
+    days: [{ name: "Push", exercises: [
+      { name: "Bench Press", sets: 3, reps: "8-12", rest: 90, tips: ["Brace your core hard", "Elbows tucked", "Full range", "Don't bounce it"], alternatives: ["Machine Chest Press"] },
+    ] }],
+  };
+
+  test("form tips are stripped, and everything the Coach actually edits by is kept", () => {
+    const slim = programForPrompt(withTipsProgram);
+    const ex = slim.days[0].exercises[0];
+    expect(ex.tips).toBeUndefined();
+    expect(ex).toMatchObject({ name: "Bench Press", sets: 3, reps: "8-12", rest: 90, alternatives: ["Machine Chest Press"] });
+    expect(slim.splitName).toBe("PPL");
+    expect(slim.days[0].name).toBe("Push");
+  });
+
+  test("the real program is not mutated — only the copy sent to the model is slimmed", () => {
+    programForPrompt(withTipsProgram);
+    expect(withTipsProgram.days[0].exercises[0].tips).toHaveLength(4);
+  });
+
+  test("no tip text reaches the per-account prompt at all", () => {
+    const dynamic = buildCoachDynamicSystem({
+      profile: { ...baseProfile },
+      targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 },
+      logs: { workouts: [] },
+      program: withTipsProgram,
+      programHistory: [],
+    });
+    expect(dynamic).toContain("Bench Press"); // the name it edits by, still there
+    expect(dynamic).not.toContain("Brace your core hard");
+    expect(dynamic).not.toContain("Don't bounce it");
+  });
+
+  test("an empty or missing program doesn't throw", () => {
+    expect(programForPrompt(null)).toBe(null);
+    expect(programForPrompt({ splitName: "x" })).toEqual({ splitName: "x", days: [] });
+  });
+});
+
+// Output is billed at 5x input, and a day edit used to re-write 4 tips for every
+// exercise on the day even when one was changing. The Coach now sends
+// "tips": [] for anything it's carrying through, which is only safe because the
+// app puts the real tips back.
+describe("withTips reuses tips the program already has", () => {
+  const prior = [
+    { name: "Bench Press", tips: ["Real tip A", "Real tip B", "Real tip C", "Real tip D"] },
+    { name: "Barbell Row", tips: ["Row tip A", "Row tip B", "Row tip C", "Row tip D"] },
+  ];
+
+  test("an exercise carried through with empty tips gets its real saved tips back", () => {
+    const [out] = withTips([{ name: "Bench Press", sets: 4, reps: "6-8", rest: 120, tips: [] }], prior);
+    expect(out.tips).toEqual(["Real tip A", "Real tip B", "Real tip C", "Real tip D"]);
+    // The rest of the edit still applies — only tips are restored.
+    expect(out).toMatchObject({ sets: 4, reps: "6-8", rest: 120 });
+  });
+
+  test("tips the Coach did write are never overwritten by the saved ones", () => {
+    const [out] = withTips([{ name: "Bench Press", tips: ["Fresh tip"] }], prior);
+    expect(out.tips).toEqual(["Fresh tip"]);
+  });
+
+  test("a genuinely new exercise with no tips falls back to the local table, not to nothing", () => {
+    const [out] = withTips([{ name: "Leg Press" }], prior);
+    expect(out.tips.length).toBeGreaterThan(0);
+    expect(out.tips).not.toContain("Real tip A");
+  });
+
+  test("reuse survives a qualifier being stripped off the name", () => {
+    const [out] = withTips([{ name: "Bench Press (Wide Grip)", tips: [] }], prior);
+    expect(out.name).toBe("Bench Press");
+    expect(out.tips).toEqual(["Real tip A", "Real tip B", "Real tip C", "Real tip D"]);
+  });
+
+  test("with no prior pool at all it behaves exactly as it always did", () => {
+    const [out] = withTips([{ name: "Bench Press", tips: [] }]);
+    expect(out.tips.length).toBeGreaterThan(0);
+  });
+
+  test("allProgramExercises flattens every day, and tolerates a missing program", () => {
+    expect(allProgramExercises({ days: [{ exercises: [{ name: "A" }] }, { exercises: [{ name: "B" }] }] }).map((e) => e.name)).toEqual(["A", "B"]);
+    expect(allProgramExercises(null)).toEqual([]);
+  });
+
+  test("a full-program rebuild reuses tips from the program it replaces", () => {
+    const rebuilt = { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, tips: [] }] }] };
+    const out = normalizeProgramTips(rebuilt, { days: prior.map((e) => ({ exercises: [e] })) });
+    expect(out.days[0].exercises[0].tips).toEqual(["Real tip A", "Real tip B", "Real tip C", "Real tip D"]);
   });
 });
 
