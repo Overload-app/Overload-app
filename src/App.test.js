@@ -1286,6 +1286,27 @@ describe("foodPreferenceText", () => {
     expect(out.length).toBeLessThan(400);
   });
 
+  // Real ask: "for example i say i like pizza, ai could find something healthy
+  // that tastes like pizza." The point is to work WITH what someone likes, not
+  // route around it — a generic chicken-and-rice answer is the failure mode.
+  test("the Coach is told to adapt food they like rather than tell them to avoid it", () => {
+    const staticBlock = buildCoachStaticSystem();
+    expect(staticBlock).toContain("CAN IT JUST FIT?");
+    expect(staticBlock).toContain("high-protein flatbread");
+    expect(staticBlock).toContain("never moralize about it");
+    // And explicitly barred from the generic answer this exists to replace.
+    expect(staticBlock).toContain('"Grilled chicken, rice and vegetables" is the generic answer this rule exists to stop');
+  });
+
+  test("periodic reviews give diet advice too, so they get the food preferences as well", () => {
+    const withFood = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 3, diet: ["vegetarian"], foodPrefs: "love pizza and pasta" }, "weekly", { workoutCount: 3, avgDurationSec: 2700, weightChange: 1.2, startWeight: 165, endWeight: 166.2 });
+    expect(withFood).toContain("love pizza and pasta");
+    expect(withFood).toContain("adapt it");
+    // Someone who skipped the questions adds nothing to that prompt.
+    const without = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 3 }, "weekly", { workoutCount: 3, avgDurationSec: null, weightChange: null });
+    expect(without).not.toContain("food preferences");
+  });
+
   test("it reaches the Coach's prompt, with the rules for using it in the cached half", () => {
     const withFood = buildCoachDynamicSystem({
       profile: { ...baseProfile, diet: ["vegetarian"], foodPrefs: "love paneer and lentils" },
