@@ -3,11 +3,17 @@ import { cacheKey, parseAlternatives } from "./exercise-alternatives.js";
 
 describe("cacheKey", () => {
   test("normalizes case and pairs the name with equipment", () => {
-    expect(cacheKey("Bench Press", "full")).toBe("bench press|full");
+    expect(cacheKey("Bench Press", "full")).toBe("v2|bench press|full");
   });
 
   test("trims surrounding whitespace on the name", () => {
-    expect(cacheKey("  Squat  ", "dumbbell")).toBe("squat|dumbbell");
+    expect(cacheKey("  Squat  ", "dumbbell")).toBe("v2|squat|dumbbell");
+  });
+
+  // The prompt gained a "video-confirmed exercises only" constraint, so
+  // answers cached before it must not keep being served.
+  test("the key is versioned, so rows cached under the old unconstrained prompt aren't reused", () => {
+    expect(cacheKey("Bench Press", "full").startsWith("v2|")).toBe(true);
   });
 
   test("the same exercise under different equipment gets different keys", () => {

@@ -9,8 +9,14 @@
 // the table and why injuries are deliberately excluded from caching.
 import { createClient } from "@supabase/supabase-js";
 
+// Bumped to v2 when the prompt gained the "only suggest exercises confirmed
+// to have an instructional video" constraint. Rows cached under the old key
+// were answered without it, so a large share of them name exercises the app
+// can't show a demo for — exactly the reported problem ("it is still giving
+// alternatives that don't have instruction videos"). A new key retires them
+// instead of serving them forever.
 export function cacheKey(name, equipment) {
-  return `${name.trim().toLowerCase()}|${equipment}`;
+  return `v2|${name.trim().toLowerCase()}|${equipment}`;
 }
 
 function equipmentDescription(equipment) {
@@ -49,6 +55,12 @@ export default async function handler(req, res) {
   const name = (req.query.name || "").toString().trim();
   const equipment = (req.query.equipment || "full").toString().trim();
   const injuries = (req.query.injuries || "").toString().trim();
+  // The app's own vocabulary of exercises confirmed to have a real
+  // instructional video, sent by the client so there's exactly one copy of
+  // that list (it lives in POOLS in the app). Derived purely from
+  // equipment, so it doesn't need to be part of the cache key — same
+  // equipment always means the same list.
+  const prefer = (req.query.prefer || "").toString().split(",").map((n) => n.trim()).filter(Boolean);
   if (!name) {
     return res.status(400).json({ error: "Missing ?name= query parameter." });
   }
@@ -68,7 +80,10 @@ export default async function handler(req, res) {
     }
   }
 
-  const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest exactly 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part"). Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
+  const vocabularyRule = prefer.length > 0
+    ? ` These get shown as tap-to-swap options in the middle of someone's workout, next to an instructional video — so an alternative with no video is close to useless. Choose them from this list, named EXACTLY as written, since every one of these is confirmed to have a real video: ${prefer.join(", ")}. If fewer than 3 of those are a genuinely similar movement, return only the ones that are — a shorter, honest list is better than padding it with something off the list. Only name an exercise outside the list if the list has NO similar movement at all, and even then keep the name plain and standard (no parentheses, no qualifiers).`
+    : "";
+  const system = `You are a knowledgeable strength coach. Given a specific exercise, suggest up to 3 genuinely similar alternative exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation exercise as an alternative to a compound lift, or vice versa, and don't suggest something just because it's "the same body part").${vocabularyRule} Respond ONLY with JSON, no markdown fences: {"alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}`;
   const userMsg = `Exercise: ${name}. Available equipment: ${equipmentDescription(equipment)}. Injuries/areas to avoid: ${injuries || "none"}.`;
 
   try {

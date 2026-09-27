@@ -57,8 +57,13 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  excludeKnownNoVideo,
+  coachChangeNote,
+  coachDayContextText,
+  coachDayContext,
   exerciseLastSession,
   mergeResumedSets,
+  hasCompletedSets,
   seedLoggedSets,
   accumulateActiveSeconds,
   formatDuration,
@@ -843,6 +848,184 @@ describe("Coach system prompt caching split", () => {
 
   test("the combined legacy buildCoachSystem is exactly the static block followed by the dynamic block", () => {
     expect(buildCoachSystem(stateA)).toBe(buildCoachStaticSystem() + "\n\n" + buildCoachDynamicSystem(stateA));
+  });
+});
+
+// Real report, and the root of a whole cascade of bad Coach behaviour: asked
+// to change "the one I currently have open," Coach said "I can't see which
+// day you actually have open in the app right now," made the user name it,
+// got a shortened name ("push (chest + shoulders)" for a day really called
+// "Push (Shoulders/Chest Volume)"), and rewrote the wrong day.
+describe("coachDayContext — what the Coach can see about which day is in front of them", () => {
+  const program = {
+    splitName: "Push / Pull / Legs",
+    days: [
+      { name: "Push (Shoulders/Chest Volume)", exercises: [{ name: "Bench Press" }, { name: "Overhead Press" }] },
+      { name: "Pull (Back/Biceps)", exercises: [{ name: "Barbell Row" }] },
+      { name: "Legs", exercises: [{ name: "Squat" }] },
+    ],
+  };
+
+  test("every day is listed with the exact dayIndex the Coach has to use", () => {
+    const ctx = coachDayContext({ program, logs: { workouts: [] } });
+    expect(ctx.days).toEqual([
+      { dayIndex: 0, name: "Push (Shoulders/Chest Volume)", exerciseCount: 2 },
+      { dayIndex: 1, name: "Pull (Back/Biceps)", exerciseCount: 1 },
+      { dayIndex: 2, name: "Legs", exerciseCount: 1 },
+    ]);
+  });
+
+  test("the day with a saved/in-progress workout is reported as the one they have open", () => {
+    const ctx = coachDayContext({
+      program,
+      logs: { workouts: [] },
+      inProgressWorkout: { dayIdx: 0, sets: [{ logged: [{ weight: "135", reps: "8", done: true }, { weight: "135", reps: "8", done: true }] }] },
+    });
+    expect(ctx.openDayIndex).toBe(0);
+    expect(ctx.loggedSetsInOpenWorkout).toBe(2);
+  });
+
+  test("with no workout in progress there is no open day to claim", () => {
+    expect(coachDayContext({ program, logs: { workouts: [] } }).openDayIndex).toBe(null);
+  });
+
+  test("pre-filled but unchecked sets don't count as logged work", () => {
+    const ctx = coachDayContext({
+      program,
+      logs: { workouts: [] },
+      inProgressWorkout: { dayIdx: 1, sets: [{ logged: [{ weight: "135", reps: "8", done: false }] }] },
+    });
+    expect(ctx.loggedSetsInOpenWorkout).toBe(0);
+  });
+
+  test("the next scheduled day rotates with the number of workouts logged", () => {
+    expect(coachDayContext({ program, logs: { workouts: [{}] } }).nextDayIndex).toBe(1);
+    expect(coachDayContext({ program, logs: { workouts: [{}, {}, {}] } }).nextDayIndex).toBe(0);
+  });
+
+  test("an out-of-range saved dayIdx isn't reported as an open day", () => {
+    const ctx = coachDayContext({ program, logs: { workouts: [] }, inProgressWorkout: { dayIdx: 9, sets: [] } });
+    expect(ctx.openDayIndex).toBe(null);
+  });
+
+  test("an account with no program at all produces no day context rather than throwing", () => {
+    expect(coachDayContext({ logs: { workouts: [] } }).days).toEqual([]);
+    expect(coachDayContextText({ logs: { workouts: [] } })).toBe("");
+  });
+
+  test("the prompt text names the open day, so the Coach can never say it can't see it", () => {
+    const text = coachDayContextText({
+      program,
+      logs: { workouts: [] },
+      inProgressWorkout: { dayIdx: 0, sets: [{ logged: [{ weight: "135", reps: "8", done: true }] }] },
+    });
+    expect(text).toContain("Push (Shoulders/Chest Volume)");
+    expect(text).toContain("the one I have open");
+    // And warns about the live session's real logged work.
+    expect(text).toContain("1 set already logged");
+  });
+
+  test("the day context reaches the real dynamic prompt the Coach is sent", () => {
+    const dynamic = buildCoachDynamicSystem({
+      profile: { goal: "muscle", experience: "intermediate", equipment: "full", daysPerWeek: 3, sessionLength: 60, injuries: [], currentPhysique: "lean", desiredPhysique: "muscular", weightLb: 180 },
+      targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 },
+      logs: { workouts: [] },
+      program,
+      inProgressWorkout: { dayIdx: 2, sets: [] },
+    });
+    expect(dynamic).toContain('"dayIndex":2');
+    expect(dynamic).toContain("The day they have OPEN right now");
+  });
+});
+
+// The reply is the model's claim about what it did; coachChangeNote is the
+// app's own record. Both real transcript failures were the two disagreeing:
+// a one-time override described as "saved permanently," and a whole day
+// silently replaced after a loose day name matched the wrong one.
+describe("coachChangeNote — the app stating what actually changed", () => {
+  const program = { days: [{ name: "Push (Shoulders/Chest Volume)", exercises: [{ name: "Bench Press" }, { name: "Overhead Press" }, { name: "Lateral Raise" }] }] };
+  const noFlags = { hasOverride: false, hasDayEdit: false };
+
+  test("a today-only change is labelled as today-only, so a reply can't pass it off as permanent", () => {
+    const note = coachChangeNote({ ...noFlags, hasOverride: true }, { todayOverride: [{ name: "Machine Chest Press" }] }, program);
+    expect(note).toContain("next session");
+    expect(note).toContain("isn't saved");
+  });
+
+  test("a permanent day edit names the day it actually landed on", () => {
+    const note = coachChangeNote(
+      { ...noFlags, hasDayEdit: true },
+      { programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: [{ name: "Machine Chest Press" }, { name: "Overhead Press" }, { name: "Lateral Raise" }] } } },
+      program
+    );
+    expect(note).toContain('day 1, "Push (Shoulders/Chest Volume)"');
+    expect(note).not.toContain("replaced all");
+  });
+
+  test("an edit that wipes every exercise on the day says so, and offers the undo", () => {
+    const note = coachChangeNote(
+      { ...noFlags, hasDayEdit: true },
+      { programDayEdit: { dayIndex: 0, day: { name: "Machines Day", exercises: [{ name: "Machine Chest Press" }, { name: "Machine Shoulder Press" }] } } },
+      program
+    );
+    expect(note).toContain("replaced all 3 exercises");
+    expect(note).toContain("undo that");
+  });
+
+  test("nothing is appended for an ordinary answer or a plain nutrition change", () => {
+    expect(coachChangeNote(noFlags, { reply: "Lie on a flat bench..." }, program)).toBe("");
+    expect(coachChangeNote({ ...noFlags, hasValidTargets: true }, { targets: { calories: 2800 } }, program)).toBe("");
+  });
+
+  test("an out-of-range dayIndex produces no claim at all rather than inventing a day name", () => {
+    expect(coachChangeNote({ ...noFlags, hasDayEdit: true }, { programDayEdit: { dayIndex: 7, day: { exercises: [] } } }, program)).toBe("");
+  });
+});
+
+// Real report: "it is still giving alternatives that don't have instruction
+// videos."
+describe("excludeKnownNoVideo", () => {
+  test("drops an alternative the app has already confirmed has no video", () => {
+    const gifCache = { "machine fly": null, "cable fly": "https://example.com/a.gif" };
+    expect(excludeKnownNoVideo(["Machine Fly", "Cable Fly"], gifCache)).toEqual(["Cable Fly"]);
+  });
+
+  test("a name never looked up is kept — absent is 'unknown', not 'no video'", () => {
+    expect(excludeKnownNoVideo(["Incline Bench Press"], { "machine fly": null })).toEqual(["Incline Bench Press"]);
+  });
+
+  test("matches regardless of case and surrounding whitespace", () => {
+    expect(excludeKnownNoVideo(["  MACHINE FLY "], { "machine fly": null })).toEqual(["  MACHINE FLY "]);
+  });
+
+  test("rather than show an empty picker, falls back to the unfiltered list", () => {
+    const gifCache = { "machine fly": null, "cable fly": null };
+    expect(excludeKnownNoVideo(["Machine Fly", "Cable Fly"], gifCache)).toEqual(["Machine Fly", "Cable Fly"]);
+  });
+
+  test("no cache yet changes nothing", () => {
+    expect(excludeKnownNoVideo(["Machine Fly"], null)).toEqual(["Machine Fly"]);
+  });
+});
+
+// Real ask: "if I save my workout at the end and it's logged as 10 reps, then
+// the next time I go to do that workout it wouldn't think the record was 100."
+describe("the record always follows the saved log, never a superseded value", () => {
+  test("a corrected set is the record — the typo it replaced is nowhere in it", () => {
+    const logs = { workouts: [{ date: "2026-09-20", dayName: "Push", exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "10", done: true }] }] }] };
+    expect(exercisePR(logs, "Bench Press")).toMatchObject({ weight: 135, reps: 10 });
+  });
+
+  test("editing a finished workout afterwards moves the record with it", () => {
+    const withTypo = { workouts: [{ date: "2026-09-20", dayName: "Push", exercises: [{ name: "Bench Press", logged: [{ weight: "315", reps: "10", done: true }] }] }] };
+    expect(exercisePR(withTypo, "Bench Press").weight).toBe(315);
+    // Exactly what WorkoutHistoryEditor's save writes back.
+    const corrected = { workouts: [{ ...withTypo.workouts[0], exercises: [{ name: "Bench Press", logged: [{ weight: "135", reps: "10", done: true }] }] }] };
+    expect(exercisePR(corrected, "Bench Press").weight).toBe(135);
+  });
+
+  test("deleting the workout that held a bogus record removes it entirely", () => {
+    expect(exercisePR({ workouts: [] }, "Bench Press")).toBe(null);
   });
 });
 
@@ -2467,15 +2650,58 @@ describe("mergeResumedSets", () => {
     { name: "Leg Press", reps: "8-10", rest: 100, tips: ["b"], logged: [{ weight: "", reps: "", done: false }] },
   ];
 
+  // Nothing completed on the exercise that got swapped out, so it goes
+  // cleanly — the normal swap case, and the whole point of the swap.
+  const untouchedSavedSets = [
+    { name: "Trap Bar Deadlift", reps: "6-8", rest: 120, tips: ["a"], logged: [{ weight: "225", reps: "6", done: false }] },
+    { name: "Leg Press", reps: "8-10", rest: 100, tips: ["b"], logged: [{ weight: "", reps: "", done: false }] },
+  ];
+
   test("an exercise swapped in since saving (e.g. via Coach todayOverride) replaces the old one, not the reverse", () => {
     const freshExercises = [
       { name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120 }, // swapped in place of Trap Bar Deadlift
       { name: "Leg Press", sets: 1, reps: "8-10", rest: 100 },
     ];
-    const merged = mergeResumedSets(freshExercises, savedSets);
+    const merged = mergeResumedSets(freshExercises, untouchedSavedSets);
     const names = merged.map((e) => e.name);
     expect(names).toEqual(["Barbell Hip Thrust", "Leg Press"]);
     expect(names).not.toContain("Trap Bar Deadlift");
+  });
+
+  // Real report: "you just changed my whole workout and lost all my progress
+  // that I had already done."
+  test("an exercise dropped from the day AFTER sets were completed keeps those sets instead of losing them", () => {
+    const freshExercises = [
+      { name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120 },
+      { name: "Leg Press", sets: 1, reps: "8-10", rest: 100 },
+    ];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    // The swap still took: the new exercise is there, in its own position.
+    expect(merged.map((e) => e.name)).toEqual(["Barbell Hip Thrust", "Leg Press", "Trap Bar Deadlift"]);
+    const kept = merged.find((e) => e.name === "Trap Bar Deadlift");
+    expect(kept.logged).toEqual([{ weight: "225", reps: "6", done: true }]);
+    // Flagged so the workout screen can explain why it's still on screen.
+    expect(kept.keptForLoggedWork).toBe(true);
+  });
+
+  test("a whole day replaced mid-workout keeps every exercise that had completed sets", () => {
+    const freshExercises = [
+      { name: "Machine Chest Press", sets: 1, reps: "8-12", rest: 90 },
+      { name: "Machine Shoulder Press", sets: 1, reps: "8-12", rest: 90 },
+    ];
+    const merged = mergeResumedSets(freshExercises, savedSets);
+    expect(merged.map((e) => e.name)).toEqual(["Machine Chest Press", "Machine Shoulder Press", "Trap Bar Deadlift"]);
+    // Leg Press had nothing completed, so it isn't dragged along.
+    expect(merged.map((e) => e.name)).not.toContain("Leg Press");
+  });
+
+  test("hasCompletedSets counts only checked-off sets, not history-prefilled numbers", () => {
+    expect(hasCompletedSets({ logged: [{ weight: "225", reps: "6", done: true }] })).toBe(true);
+    // seedLoggedSets pre-fills weight/reps from last session with done:false —
+    // an exercise nobody has touched must not read as work already done.
+    expect(hasCompletedSets({ logged: [{ weight: "225", reps: "6", done: false }] })).toBe(false);
+    expect(hasCompletedSets({ logged: [] })).toBe(false);
+    expect(hasCompletedSets(undefined)).toBe(false);
   });
 
   test("the swapped-in exercise starts with blank logged sets, not leftover data from the exercise it replaced", () => {

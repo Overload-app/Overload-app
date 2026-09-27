@@ -816,6 +816,37 @@ export function coachReplyText(parsed, madeChange) {
     || (madeChange ? "Done!" : "Hmm, I didn't quite catch that — mind rephrasing what you'd like changed?");
 }
 
+// An app-generated statement of what the response ACTUALLY did, appended to
+// whatever the Coach wrote. Every failure in the real transcript this exists
+// for was a mismatch between the reply text and reality: a one-time override
+// described as "saved permanently," and a whole day quietly replaced after a
+// loosely-named day was matched to the wrong one. The reply is the model's
+// claim; this line is the app's record, and it's the one that can't be wrong.
+// Returns "" when there's nothing worth stating, so an ordinary answer or a
+// plain nutrition change doesn't get a clunky tag on the end.
+export function coachChangeNote(flags, parsed, program) {
+  if (flags.hasOverride) {
+    return "Just for your next session — this one isn't saved to your program.";
+  }
+  if (flags.hasDayEdit) {
+    const idx = coerceInt(parsed.programDayEdit.dayIndex);
+    const existing = program?.days?.[idx];
+    if (!existing) return "";
+    const before = (existing.exercises || []).map((e) => e.name);
+    const after = (parsed.programDayEdit.day.exercises || []).map((e) => e.name);
+    const kept = before.filter((n) => after.some((m) => isSameCoreExercise(n, m))).length;
+    const where = `Saved to day ${idx + 1}, "${existing.name}"`;
+    // Zero overlap means every exercise on that day is gone. That's
+    // occasionally what someone wanted, but it's also exactly what a
+    // mis-targeted edit looks like, so it gets said out loud either way.
+    if (before.length > 0 && kept === 0) {
+      return `${where} — heads up, this replaced all ${before.length} exercise${before.length === 1 ? "" : "s"} on it. Say "undo that" if it wasn't the day you meant.`;
+    }
+    return `${where}.`;
+  }
+  return "";
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -948,7 +979,17 @@ export async function fetchExerciseGif(name) {
 // ask: "optimize it to save things like alternative workouts across the
 // network... save credits on the ai."
 export async function fetchSimilarExercises(name, equipment, injuries) {
-  const params = new URLSearchParams({ name, equipment: equipment || "full", injuries: (injuries || []).join(",") });
+  const params = new URLSearchParams({
+    name,
+    equipment: equipment || "full",
+    injuries: (injuries || []).join(","),
+    // Real report: "it is still giving alternatives that don't have
+    // instruction videos." This endpoint was the one alternatives source
+    // with no vocabulary constraint at all — the program/Coach prompts have
+    // had one for a while. Sent from here so POOLS stays the single copy of
+    // the video-confirmed list.
+    prefer: exerciseVocabularyFor(equipment || "full").join(","),
+  });
   let res;
   try {
     res = await fetch(`/api/exercise-alternatives?${params.toString()}`);
@@ -1111,6 +1152,23 @@ export function isSameCoreExercise(a, b) {
 export function excludeAlreadyInDay(alternatives, daySets, swapIdx) {
   const usedNames = daySets.filter((_, i) => i !== swapIdx).map((e) => e.name || "");
   return alternatives.filter((name) => !usedNames.some((used) => isSameCoreExercise(name, used)));
+}
+
+// Real report: "it is still giving alternatives that don't have instruction
+// videos." Prompt constraints help but can't be perfect, and the app already
+// holds hard evidence for names it has actually looked up — gifCache stores
+// null for "checked, and there is genuinely no video." Offering one of those
+// as a mid-workout swap is offering a known dead end, so they're dropped.
+// Absent from the cache means "never checked," NOT "no video," so those stay.
+// Falls back to the unfiltered list rather than showing an empty picker if
+// filtering would leave nothing at all.
+export function excludeKnownNoVideo(alternatives, gifCache) {
+  if (!gifCache) return alternatives;
+  const withVideo = alternatives.filter((name) => {
+    const key = normalizeGifKey(name);
+    return !(key in gifCache) || gifCache[key] !== null;
+  });
+  return withVideo.length > 0 ? withVideo : alternatives;
 }
 
 export function pick(arr, n, offset = 0) {
@@ -1759,7 +1817,8 @@ Rules:
 ${profile.notes ? `- Actually honor the client's own additional notes above ("${profile.notes}") — a stated split preference, a disliked/avoided exercise, equipment their specific gym doesn't have, or anything else in there. If something in it conflicts with another rule (e.g. asks for equipment outside what's available), prioritize what's actually usable and briefly note the conflict isn't a way to silently ignore it.` : ""}
 - Every exercise needs ${recSets} sets, a rep range string, ${recRest}s rest, exactly as given in the TIME BUDGET above — don't independently pick a different sets/rest per exercise, that's what already made the exercise count fit.
 - Every exercise's "tips" must be exactly 4 short (under 18 words each), practical form cues covering setup, execution, and one common mistake to avoid — the person will rely on these mid-workout with no internet connection, so they must be self-contained and specific to that exact exercise, not generic filler.
-- Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."`;
+- Every exercise's "alternatives" must be exactly 3 genuinely similar substitute exercises — same primary muscle emphasis AND a comparable movement pattern (don't suggest an isolation machine exercise as an alternative to a compound barbell lift, or vice versa), doable with the same equipment, and appropriate for their experience level. These are real swap options a person could drop in mid-workout, not just "same body part" — e.g. for "Leg Curl," suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation just because both are "legs."
+- Take those 3 "alternatives" from the SAME exercise list above, named exactly as written. Real report: "it is still giving alternatives that don't have instruction videos." An alternative is what someone taps mid-workout to swap to, right next to the demo video, so one with no video is the least useful thing you can put there. If fewer than 3 exercises on that list are genuinely similar, give only the ones that are rather than padding the list with names from outside it.`;
 }
 
 /* ============================================================
@@ -3047,13 +3106,43 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
 // since saving) get blank logged sets; exercises that are still there by
 // name keep whatever was already logged for them — so real progress
 // survives a save/resume cycle AND a Coach-driven change actually takes.
+// "Real work done" = a set actually checked off. Deliberately NOT "has
+// numbers in it": seedLoggedSets pre-fills weight/reps from last session on
+// every fresh exercise, so counting typed-looking values would treat an
+// exercise nobody has touched as work already done. The checkmark is the
+// only signal that actually distinguishes the two.
+export function hasCompletedSets(savedExercise) {
+  return (savedExercise?.logged || []).some((l) => l.done);
+}
+
 export function mergeResumedSets(freshExercises, savedSets, logs) {
   if (!savedSets) return null;
   const savedByName = new Map(savedSets.map((s) => [s.name, s]));
-  return freshExercises.map((ex) => savedByName.get(ex.name) || {
+  const merged = freshExercises.map((ex) => savedByName.get(ex.name) || {
     name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
     logged: seedLoggedSets(ex, logs),
   });
+  // Real report, and the worst kind: "you just changed my whole workout and
+  // lost all my progress that I had already done." Going to the Coach
+  // mid-workout saves the session, and if the Coach then rewrote that day
+  // (worst case, a mis-targeted edit that replaced every exercise), nothing
+  // saved matched a fresh name any more — so every completed set was
+  // silently dropped on resume.
+  //
+  // Both halves of this are real requirements pulling opposite ways: a swap
+  // has to actually take effect (the earlier "Legs still has Trap Bar
+  // Deadlift no matter how many times Coach resent the override" report),
+  // and sets someone genuinely already did must not evaporate. Splitting on
+  // the checkmark settles it: an exercise dropped before any set was
+  // completed disappears cleanly, which is the normal swap case and the
+  // whole point. One with completed sets is kept — appended at the end,
+  // flagged so the screen can say why it's still there — so the work still
+  // gets recorded when they finish instead of being thrown away.
+  const freshNames = new Set(freshExercises.map((ex) => ex.name));
+  const orphanedWork = savedSets
+    .filter((s) => !freshNames.has(s.name) && hasCompletedSets(s))
+    .map((s) => ({ ...s, keptForLoggedWork: true }));
+  return [...merged, ...orphanedWork];
 }
 
 // Pre-fills a fresh exercise's weight/reps from the last time it was
@@ -3099,6 +3188,32 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   const restSecondsLeft = rest ? Math.max(0, Math.round((rest.endAt - Date.now()) / 1000)) : null;
   const restRef = useRef(rest);
   useEffect(() => { restRef.current = rest; }, [rest]);
+  // Real ask: "I put 100 reps instead of ten, and then I change it" — and
+  // the correction could still be lost. Autosave only ever fired on a
+  // checkmark (plus visibilitychange/pagehide), so after checking a set off
+  // with a typo, fixing the number wrote nothing: an iOS swipe-to-close,
+  // which is known not to reliably fire pagehide, resumed from the saved
+  // typo instead of the correction, and that wrong number is what got
+  // logged and became the record. Edits now save too, debounced so a
+  // digit-by-digit "135" isn't three separate full-state writes.
+  const autoSaveTimer = useRef(null);
+  const pendingSave = useRef(null);
+  const scheduleAutoSave = (nextSets) => {
+    if (!onAutoSave) return;
+    pendingSave.current = nextSets;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      autoSaveTimer.current = null;
+      onAutoSave(pendingSave.current, restRef.current);
+    }, 1000);
+  };
+  // Any immediate save supersedes a pending debounced one — otherwise the
+  // older queued copy could land afterwards and overwrite newer data.
+  const saveNow = (nextSets, nextRest) => {
+    if (autoSaveTimer.current) { clearTimeout(autoSaveTimer.current); autoSaveTimer.current = null; }
+    onAutoSave?.(nextSets, nextRest);
+  };
+  useEffect(() => () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); }, []);
   // Live "how long have I been at this" display in the header — same
   // absolute-timestamp technique as the rest timer above (immune to
   // background throttling), reusing the exact accumulateActiveSeconds()
@@ -3140,7 +3255,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   useEffect(() => {
     if (!onAutoSave) return;
     function handleMaybeHidden() {
-      if (document.visibilityState === "hidden") onAutoSave(setsRef.current, restRef.current);
+      if (document.visibilityState === "hidden") saveNow(setsRef.current, restRef.current);
     }
     document.addEventListener("visibilitychange", handleMaybeHidden);
     window.addEventListener("pagehide", handleMaybeHidden);
@@ -3200,8 +3315,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     if (swapPickerIdx === null) return;
     setPickerOffline(false);
     const current = sets[swapPickerIdx];
+    // Both filters, every time, whichever source the list came from —
+    // baked-in, offline pool, or the live AI lookup.
+    const usable = (list) => excludeKnownNoVideo(excludeAlreadyInDay(list, sets, swapPickerIdx), gifCache);
     if (Array.isArray(current.alternatives) && current.alternatives.length > 0) {
-      setPickerAlts(excludeAlreadyInDay(current.alternatives, sets, swapPickerIdx));
+      setPickerAlts(usable(current.alternatives));
       setPickerUpgrading(false);
       return;
     }
@@ -3211,7 +3329,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     // usable list — pickerUpgrading covers the background live lookup for
     // a possibly better, more context-aware set, silently upgrading the
     // list in place if one arrives, without ever blocking on it.
-    const quick = excludeAlreadyInDay(alternativesFor(current.name, equipment, injuries), sets, swapPickerIdx);
+    const quick = usable(alternativesFor(current.name, equipment, injuries));
     setPickerAlts(quick);
     setPickerUpgrading(true);
     let cancelled = false;
@@ -3219,7 +3337,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       .then((alts) => {
         if (cancelled) return;
         if (alts.length > 0) {
-          setPickerAlts(excludeAlreadyInDay(alts, sets, swapPickerIdx));
+          setPickerAlts(usable(alts));
           onCacheAlternatives(swapPickerIdx, alts);
         }
         // An empty (but successful) AI answer just means it agreed there's
@@ -3433,6 +3551,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     setSets((s) => {
       const copy = s.map((e) => ({ ...e, logged: e.logged.map((l) => ({ ...l })) }));
       copy[exIdx].logged[setIdx][field] = val;
+      // Same "trigger the side effect from inside the updater, where the
+      // value is always current" rule the rest of this component follows.
+      scheduleAutoSave(copy);
       return copy;
     });
   }
@@ -3491,7 +3612,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       // event alone isn't a real guarantee. This way, at worst, only
       // whatever happened AFTER the last checkmark is ever at risk, not
       // the whole session.
-      onAutoSave?.(copy, newRest);
+      saveNow(copy, newRest);
       return copy;
     });
   }
@@ -3563,6 +3684,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         </div>
         {sets.map((ex, exIdx) => (
           <Card key={exIdx} style={{ marginBottom: 12 }}>
+            {/* Without this the exercise just silently reappears at the
+                bottom after a Coach change took it off the day, which reads
+                as the change not having worked. See mergeResumedSets. */}
+            {ex.keptForLoggedWork && (
+              <div style={{ fontSize: 11, color: T.steelDark, fontWeight: 600, marginBottom: 6, lineHeight: 1.4 }}>
+                No longer on this day — kept here because you'd already logged sets, so they still count.
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <h3
                 onClick={() => openExerciseInfo(exIdx, ex.name)}
@@ -3654,12 +3783,12 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
           seconds={restSecondsLeft} total={rest.total}
           onAdd={() => setRest((r) => {
             const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
-            onAutoSave?.(setsRef.current, next);
+            saveNow(setsRef.current, next);
             return next;
           })}
           onSkip={() => {
             setRest(null);
-            onAutoSave?.(setsRef.current, null);
+            saveNow(setsRef.current, null);
           }}
         />
       )}
@@ -4347,9 +4476,13 @@ Rules:
 - If an exercise you're including already appears somewhere in "Current program JSON" (or in the version history) given in your context below, use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Otherwise, ONLY choose from the exercise vocabulary list given in your context below, named EXACTLY as written — every one of those is confirmed to have a real instructional video. Only go outside it for a movement pattern that list genuinely has no equivalent for, or because the user explicitly asked for something specific by name — not to add variety for its own sake.
 - If the user names a SPECIFIC exercise not on that vocabulary list (e.g. asking to swap in something particular), and something on the list is a genuinely similar movement, say so and offer it as the option that'll actually have a demo video — but still give them what they explicitly asked for if they confirm they want it, being upfront in "reply" that their specific pick likely won't have an instructional video available (only the exercise name itself, not the tips — those you write either way).
 - Never include exercises that would aggravate stated injuries.
+- You have NO other way to undo anything. "restoreIndex" and "restoreOriginal" are the only two, and both work off snapshots the app saved — you cannot reconstruct a previous version from memory, and you cannot "put it back" by describing it. Real report of this going wrong: asked to "forget what you just did," Coach replied "nothing changed, your day is back to exactly what it was before" with every field null — so nothing was undone, and the user was told the opposite. If they ask you to undo, revert, forget, or go back to how it was, you MUST set "restoreIndex" (matching a version-history entry) or "restoreOriginal", in that same response. If nothing in the history matches what they're describing, say plainly that you can't undo that one and ask what they want it to look like instead. Never claim, imply, or let a reply read as though something was reverted when neither field is set.
+- Never call a "todayOverride" permanent, saved, or lasting. It applies to ONE upcoming session and the app labels it that way on screen, so saying "saved permanently" directly contradicts what they're looking at — a real report ("why does it say swapped by coach for today only"). If they ask for a change to be permanent, the answer is a "programDayEdit" (or "program"), not a reassurance about an override. And if they tell you a label in the app contradicts what you said, believe the app: it reflects what actually got saved, and you should say which of the two you actually did rather than guessing that their screen is stale.
+- When they refer to a day, identify it from the indexed day list in your context below and use that day's real dayIndex. A partial, shortened, or slightly-wrong day name is normal and is NOT a reason to rebuild that day from scratch — a real report of exactly that: a user said "push (chest + shoulders)" for a day actually named "Push (Shoulders/Chest Volume)", and the whole day got replaced. Match it, keep the day's existing name and its existing exercises, and change only what they asked for.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (per your context below), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise (in "program", "programDayEdit", or "todayOverride"), give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave "tips" empty or generic.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
+- "alternatives" are held to the SAME vocabulary rule as the exercise names themselves, and this matters more for them than for anything else you write: they're the list someone taps mid-workout to swap to, and an alternative with no instructional video is close to useless at that moment. Take all 3 from the vocabulary list in your context below, named EXACTLY as written. If you genuinely can't find 3 suitable ones on that list, give fewer real ones rather than padding the list with off-vocabulary names.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
 - "reply" must NEVER be left blank or missing, for any message, including a genuinely ambiguous one — a blank reply falls back to a generic "I didn't catch that" with no useful detail, which reads as broken. If a request is ambiguous (e.g. "make my split 5" could mean 5 exercises per day or 5 training days per week), say specifically what's unclear and ask the exact clarifying question that would resolve it — never a generic "mind rephrasing?".
 - "reply" is almost always ONE short sentence — this matters, not just a style preference. Real tester feedback: responses were reading as too elaborate. A simple confirmed change ("Added Cable Crunch to Push day.") is one short sentence, never three, never a list, never a recap of the whole day. A plain factual question gets a direct, short answer, not a mini-essay — they can already see the actual exercises/tips/numbers change in the app itself, so "reply" doesn't need to restate them. TWO sentences is the real ceiling, and only when something genuinely can't be said in one (a tradeoff they should know about, a request that's only partly possible). Never use a third sentence just to add detail nobody asked for.
@@ -4365,6 +4498,45 @@ Rules:
 - When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" in your context below verbatim — do not recalculate or estimate fresh numbers from scratch. That JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
 - If the request touches BOTH training and nutrition/diet in one message, keep "reply" especially tight — 2-3 short sentences covering the training change, plus at most 1-2 sentences on diet in general terms. Since "targets" now carries the actual numbers, you don't need to restate them in detail in "reply" — just confirm you've updated them.
 - This applies EVERY time, including for purely informational questions with no program change at all (e.g. "what's the best time of day to train?") and even deep into a long conversation — always wrap your answer in the JSON object below. Never answer in plain conversational text outside the JSON, no matter how simple or chatty the question feels.`;
+}
+
+// Real report: asked to change "the one I currently have open," Coach
+// answered "I can't see which day you actually have open in the app right
+// now" and made the user guess the name — then acted on the guess and
+// rewrote the wrong day. It genuinely couldn't see it: the system prompt
+// handed over the program JSON and nothing about what was on screen. These
+// are the two things the app actually knows, stated plainly:
+//   - the day with a saved/in-progress workout (going to the Coach from the
+//     workout screen saves and exits, so this IS "the one I have open"), and
+//   - the next scheduled day, which is what "today's workout" means here.
+export function coachDayContext(state) {
+  const days = (state.program?.days || []).map((d, i) => ({ dayIndex: i, name: d.name, exerciseCount: (d.exercises || []).length }));
+  if (days.length === 0) return { days, openDayIndex: null, nextDayIndex: null, loggedSetsInOpenWorkout: 0 };
+  const nextDayIndex = (state.logs?.workouts?.length || 0) % days.length;
+  const inProgress = state.inProgressWorkout;
+  const openDayIndex = inProgress && days[inProgress.dayIdx] ? inProgress.dayIdx : null;
+  const loggedSetsInOpenWorkout = openDayIndex === null
+    ? 0
+    : (inProgress.sets || []).reduce((n, ex) => n + (ex.logged || []).filter((l) => l.done).length, 0);
+  return { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout };
+}
+
+// The prose the Coach actually reads. Kept separate from coachDayContext so
+// the facts can be tested without matching sentences.
+export function coachDayContextText(state) {
+  const { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout } = coachDayContext(state);
+  if (days.length === 0) return "";
+  const lines = [
+    `Their program's days, with the EXACT "dayIndex" to use for each one: ${JSON.stringify(days)}. When they name a day, match it to one of these by index. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day in that list, that IS the day: use its dayIndex and its real name. Only if they genuinely could mean two or more of these days should you ask which — and when you ask, list the real day names so they can just pick one. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.`,
+  ];
+  if (openDayIndex !== null) {
+    lines.push(`The day they have OPEN right now: dayIndex ${openDayIndex}, "${days[openDayIndex].name}" — they have a workout in progress on it${loggedSetsInOpenWorkout > 0 ? `, with ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged` : ""}. If they say "the one I have open," "this workout," "the one I'm doing," or anything else that means the session in front of them, this is it — you can see it, so never tell them you can't and never ask them which day it is.`);
+    if (loggedSetsInOpenWorkout > 0) {
+      lines.push(`CAREFUL: that open workout has real logged sets in it. Sets they already did are kept either way, but rewriting that whole day mid-workout is disruptive and almost never what they want. For a change to the session they're in the middle of, prefer "todayOverride", touch as few exercises as possible, and if they've asked for something that would replace the entire day, say what it will do to their current session and ask before doing it.`);
+    }
+  }
+  lines.push(`The next scheduled day (what "today's workout" / "my next session" means): dayIndex ${nextDayIndex}, "${days[nextDayIndex].name}". "todayOverride" only ever applies to THIS day — it cannot be used to change any other day, so if they want a one-time change to a different day, say so instead of pretending.`);
+  return lines.join("\n");
 }
 
 export function buildCoachDynamicSystem(state) {
@@ -4397,6 +4569,7 @@ export function buildCoachDynamicSystem(state) {
   return `Today's date: ${todayISO()}.
 User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
 Current program JSON: ${JSON.stringify(state.program)}
+${coachDayContextText(state)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
 
@@ -6412,9 +6585,11 @@ export default function App() {
           context: { type: "coach-invalid-structural-field" },
         });
       }
+      const flags = { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid };
+      const changeNote = intendedButInvalid ? "" : coachChangeNote(flags, parsed, stateRef.current.program);
       const replyText = intendedButInvalid
         ? "Sorry — that change didn't actually go through on my end. Mind asking again?"
-        : coachReplyText(parsed, madeChange);
+        : [coachReplyText(parsed, madeChange), changeNote].filter(Boolean).join(" ");
       const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
       // Diagnostics: flag cases that look like a bug so they're visible in the

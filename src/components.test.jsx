@@ -1086,6 +1086,80 @@ describe("<WorkoutSession /> timers survive being backgrounded", () => {
     }
   });
 
+  // Real ask: "I put 100 reps instead of ten, and then I change it" — and the
+  // correction could still be lost. Autosave used to fire only on a checkmark
+  // (plus visibilitychange/pagehide, which iOS is known not to fire reliably
+  // on a swipe-to-close), so a value fixed after checking a set off wrote
+  // nothing: resume brought back the typo, and the typo got logged.
+  test("editing a set value autosaves it, debounced, so a correction can't be lost", () => {
+    vi.useFakeTimers();
+    try {
+      const onAutoSave = vi.fn();
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByLabelText("Add 5 pounds to set 1"));
+      // Debounced — a digit-by-digit entry mustn't be one full state write per
+      // keystroke, so nothing has been saved yet.
+      expect(onAutoSave).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1000);
+      expect(onAutoSave).toHaveBeenCalledTimes(1);
+      expect(onAutoSave.mock.calls[0][0][0].logged[0].weight).toBe("5");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("several quick edits collapse into one save, carrying the latest value", () => {
+    vi.useFakeTimers();
+    try {
+      const onAutoSave = vi.fn();
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByLabelText("Add 5 pounds to set 1"));
+      vi.advanceTimersByTime(300);
+      fireEvent.click(screen.getByLabelText("Add 5 pounds to set 1"));
+      vi.advanceTimersByTime(1000);
+      expect(onAutoSave).toHaveBeenCalledTimes(1);
+      expect(onAutoSave.mock.calls[0][0][0].logged[0].weight).toBe("10");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A queued edit-save landing after the checkmark's immediate save would
+  // overwrite newer data with older data.
+  test("checking a set off cancels any pending edit save instead of letting it land afterwards", () => {
+    vi.useFakeTimers();
+    try {
+      const onAutoSave = vi.fn();
+      render(
+        <WorkoutSession
+          day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+          onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+          equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByLabelText("Add 5 pounds to set 1"));
+      fireEvent.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+      expect(onAutoSave).toHaveBeenCalledTimes(1);
+      expect(onAutoSave.mock.calls[0][0][0].logged[0].done).toBe(true);
+      vi.advanceTimersByTime(2000);
+      expect(onAutoSave).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("shows no elapsed-time header when resumedAt isn't provided", () => {
     render(
       <WorkoutSession
@@ -1168,6 +1242,25 @@ describe("<WorkoutSession /> resuming reflects a Coach change made while saved",
     // Coach-driven todayOverride/program change made while the workout sat
     // saved. initialSets is the stale save from before that change.
     const day = { name: "Leg Day", exercises: [{ name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120, tips: ["a", "b", "c", "d"] }] };
+    // Nothing checked off on it, so the swap replaces it outright.
+    const staleSavedSets = [
+      { name: "Trap Bar Deadlift", reps: "6-8", rest: 120, tips: ["a"], logged: [{ weight: "225", reps: "6", done: false }] },
+    ];
+    render(
+      <WorkoutSession
+        day={day} isOverride={true} lastLog={null} logs={{ workouts: [] }} initialSets={staleSavedSets}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Barbell Hip Thrust")).toBeInTheDocument();
+    expect(screen.queryByText("Trap Bar Deadlift")).not.toBeInTheDocument();
+  });
+
+  // Real report: "you just changed my whole workout and lost all my progress
+  // that I had already done."
+  test("a completed exercise the Coach removed stays on screen, labelled, so the sets still get logged", () => {
+    const day = { name: "Leg Day", exercises: [{ name: "Barbell Hip Thrust", sets: 1, reps: "6-8", rest: 120, tips: ["a", "b", "c", "d"] }] };
     const staleSavedSets = [
       { name: "Trap Bar Deadlift", reps: "6-8", rest: 120, tips: ["a"], logged: [{ weight: "225", reps: "6", done: true }] },
     ];
@@ -1179,7 +1272,8 @@ describe("<WorkoutSession /> resuming reflects a Coach change made while saved",
       />
     );
     expect(screen.getByText("Barbell Hip Thrust")).toBeInTheDocument();
-    expect(screen.queryByText("Trap Bar Deadlift")).not.toBeInTheDocument();
+    expect(screen.getByText("Trap Bar Deadlift")).toBeInTheDocument();
+    expect(screen.getByText(/No longer on this day/)).toBeInTheDocument();
   });
 });
 
