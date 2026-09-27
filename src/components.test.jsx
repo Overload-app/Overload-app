@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, dateToISO, todayISO } from "./App.jsx";
+import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -2312,6 +2312,148 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Weekly review"));
     await user.click(screen.getByText("Monthly review"));
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+});
+
+// Real ask: "make it so people can go back and edit their quiz results without
+// resetting all their progress. if they change their quiz results that makes
+// their diet or workout need to change, then they will confirm or deny/reject
+// those changes."
+describe("<QuizEditor />", () => {
+  const profile = {
+    sex: "male", age: 28, heightIn: 70, weightLb: 165, goal: "build",
+    currentPhysique: "average", desiredPhysique: "lean and athletic", specificGoals: "",
+    experience: "intermediate", equipment: "full", daysPerWeek: 3, sessionLength: 60,
+    activity: "light", injuries: ["none"], otherInjuries: "", diet: [], otherDiet: "",
+    foodPrefs: "", notes: "",
+  };
+  const targets = { calories: 2600, protein: 165, carbs: 300, fat: 72 };
+
+  function open(overrides = {}) {
+    const onSave = vi.fn();
+    const onCancel = vi.fn();
+    render(<QuizEditor profile={{ ...profile, ...overrides }} targets={targets} onSave={onSave} onCancel={onCancel} />);
+    return { onSave, onCancel };
+  }
+
+  test("every question is on one screen, pre-filled — not an 18-step wizard again", () => {
+    open();
+    expect(screen.getByText("What's your main goal?")).toBeInTheDocument();
+    expect(screen.getByText("What equipment do you have?")).toBeInTheDocument();
+    expect(screen.getByLabelText("What's your current weight?").value).toBe("165");
+    expect(screen.getByLabelText("Height ft").value).toBe("5");
+    expect(screen.getByLabelText("Height in").value).toBe("10");
+    // The review-cadence question isn't a profile answer — it has its own
+    // toggles in Settings and shouldn't be duplicated here.
+    expect(screen.queryByText("Want periodic AI check-ins on your progress?")).not.toBeInTheDocument();
+  });
+
+  test("with nothing edited there's nothing to review", () => {
+    open();
+    expect(screen.getByText("No changes yet")).toBeInTheDocument();
+  });
+
+  test("editing weight offers the new numbers, and saves them when accepted", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    const weight = screen.getByLabelText("What's your current weight?");
+    await user.clear(weight);
+    await user.type(weight, "185");
+    await user.click(screen.getByText("Review changes"));
+
+    expect(screen.getByText(/You changed your weight/)).toBeInTheDocument();
+    expect(screen.getByText("2600")).toBeInTheDocument(); // the old number, struck through
+    await user.click(screen.getByText("Save changes"));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const [savedProfile, choices] = onSave.mock.calls[0];
+    expect(savedProfile.weightLb).toBe(185);
+    expect(choices.applyTargets).toBe(true);
+    expect(choices.rebuildProgram).toBe(false);
+  });
+
+  test("rejecting the new numbers still saves the answer — that part isn't optional", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    const weight = screen.getByLabelText("What's your current weight?");
+    await user.clear(weight);
+    await user.type(weight, "185");
+    await user.click(screen.getByText("Review changes"));
+    await user.click(screen.getByText("Keep mine"));
+    await user.click(screen.getByText("Save changes"));
+
+    const [savedProfile, choices] = onSave.mock.calls[0];
+    expect(savedProfile.weightLb).toBe(185); // the fact is saved
+    expect(choices.applyTargets).toBe(false); // the derived numbers are not
+  });
+
+  test("changing equipment offers a program rebuild, and defaults to NOT rebuilding", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    await user.click(screen.getByText("Dumbbells Only"));
+    await user.click(screen.getByText("Review changes"));
+
+    expect(screen.getByText(/You changed your equipment/)).toBeInTheDocument();
+    // Replacing someone's program is the destructive option, so it is never
+    // the pre-selected one.
+    await user.click(screen.getByText("Save changes"));
+    expect(onSave.mock.calls[0][1].rebuildProgram).toBe(false);
+  });
+
+  test("accepting the rebuild passes that through", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    await user.click(screen.getByText("Dumbbells Only"));
+    await user.click(screen.getByText("Review changes"));
+    await user.click(screen.getByText("Rebuild it"));
+    await user.click(screen.getByText("Save changes"));
+    expect(onSave.mock.calls[0][1].rebuildProgram).toBe(true);
+  });
+
+  test("the review screen promises logged data is safe, because that's the actual worry", async () => {
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByText("Lose Fat"));
+    await user.click(screen.getByText("Review changes"));
+    expect(screen.getByText(/weigh-ins, meals and workout history all stay exactly as they are/)).toBeInTheDocument();
+  });
+
+  test("a change with no knock-on effect says so instead of inventing one", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    await user.type(screen.getByLabelText("Anything else your coach should know?"), "no cable machine at my gym");
+    await user.click(screen.getByText("Review changes"));
+    expect(screen.getByText(/Nothing else needs to change/)).toBeInTheDocument();
+    await user.click(screen.getByText("Save changes"));
+    expect(onSave.mock.calls[0][1]).toEqual({ applyTargets: false, rebuildProgram: false });
+  });
+
+  test("Back returns to the form with edits intact", async () => {
+    const user = userEvent.setup();
+    open();
+    const weight = screen.getByLabelText("What's your current weight?");
+    await user.clear(weight);
+    await user.type(weight, "185");
+    await user.click(screen.getByText("Review changes"));
+    await user.click(screen.getByText("Back"));
+    expect(screen.getByLabelText("What's your current weight?").value).toBe("185");
+  });
+
+  test("Cancel discards without saving anything", async () => {
+    const user = userEvent.setup();
+    const { onSave, onCancel } = open();
+    await user.click(screen.getByText("Dumbbells Only"));
+    await user.click(screen.getByText("Cancel"));
+    expect(onCancel).toHaveBeenCalled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  test("dietary restrictions are editable here too, including the Other box", async () => {
+    const user = userEvent.setup();
+    const { onSave } = open();
+    await user.click(screen.getByText("No dairy"));
+    await user.click(screen.getByText("Review changes"));
+    await user.click(screen.getByText("Save changes"));
+    expect(onSave.mock.calls[0][0].diet).toContain("dairy_free");
   });
 });
 

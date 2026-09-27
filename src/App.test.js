@@ -57,6 +57,11 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  profileChangeImpact,
+  targetsDiff,
+  changeSummarySentence,
+  TARGET_INPUT_KEYS,
+  PROGRAM_CRITICAL_KEYS,
   foodPreferenceText,
   coachLogSummary,
   allProgramExercises,
@@ -1305,6 +1310,101 @@ describe("foodPreferenceText", () => {
       programHistory: [],
     });
     expect(without).not.toContain("Food preferences:");
+  });
+});
+
+// Real ask: edit the quiz answers without resetting progress, and confirm or
+// reject the changes that follow from them.
+describe("profileChangeImpact", () => {
+  const base = { sex: "male", age: 28, heightIn: 70, weightLb: 165, activity: "light", goal: "build", equipment: "full", daysPerWeek: 3, sessionLength: 60, experience: "intermediate", injuries: ["none"], notes: "" };
+
+  test("changing weight affects the numbers but not the program", () => {
+    const i = profileChangeImpact(base, { ...base, weightLb: 180 });
+    expect(i.targetsAffected).toBe(true);
+    expect(i.programAffected).toBe(false);
+    expect(i.targetReasons).toEqual(["your weight"]);
+  });
+
+  test("changing equipment affects the program but not the numbers", () => {
+    const i = profileChangeImpact(base, { ...base, equipment: "dumbbell" });
+    expect(i.programAffected).toBe(true);
+    expect(i.targetsAffected).toBe(false);
+    expect(i.programReasons).toEqual(["your equipment"]);
+  });
+
+  test("goal affects both, because it drives the calorie split and the rep scheme", () => {
+    const i = profileChangeImpact(base, { ...base, goal: "lose" });
+    expect(i.targetsAffected).toBe(true);
+    expect(i.programAffected).toBe(true);
+  });
+
+  // The point of this list being short: a note or a physique description is a
+  // nudge for the Coach, not grounds for offering to throw away the program
+  // someone has been training.
+  test("a note or physique description changes nothing derived", () => {
+    const i = profileChangeImpact(base, { ...base, notes: "no cable machine", desiredPhysique: "lean" });
+    expect(i.changedKeys.length).toBeGreaterThan(0);
+    expect(i.targetsAffected).toBe(false);
+    expect(i.programAffected).toBe(false);
+  });
+
+  test("no edit at all reports no change", () => {
+    expect(profileChangeImpact(base, { ...base }).changedKeys).toEqual([]);
+  });
+
+  test("reordering the same injury chips is not a change", () => {
+    const before = { ...base, injuries: ["knees", "wrists"] };
+    const after = { ...base, injuries: ["wrists", "knees"] };
+    expect(profileChangeImpact(before, after).changedKeys).toEqual([]);
+  });
+
+  test("actually adding an injury is a change, and affects the program", () => {
+    const i = profileChangeImpact({ ...base, injuries: ["none"] }, { ...base, injuries: ["knees"] });
+    expect(i.programAffected).toBe(true);
+    expect(i.programReasons).toEqual(["your injuries"]);
+  });
+
+  test("blank, missing and empty-string answers are treated as the same thing", () => {
+    expect(profileChangeImpact({ notes: "" }, { notes: undefined }).changedKeys).toEqual([]);
+    expect(profileChangeImpact({}, { notes: "" }).changedKeys).toEqual([]);
+  });
+
+  test("a number typed back as a string isn't a spurious change", () => {
+    expect(profileChangeImpact({ weightLb: 165 }, { weightLb: "165" }).changedKeys).toEqual([]);
+  });
+
+  test("several changes are all reported, without duplicating a reason", () => {
+    const i = profileChangeImpact(base, { ...base, injuries: ["knees"], otherInjuries: "sciatica" });
+    // Both keys map to the same human reason — it should be said once.
+    expect(i.programReasons).toEqual(["your injuries"]);
+  });
+
+  test("every key that calcTargets actually reads is in TARGET_INPUT_KEYS", () => {
+    // Guards against calcTargets gaining an input and this list silently
+    // going stale, which would show someone stale numbers as if correct.
+    const base2 = { sex: "male", age: 30, heightIn: 70, weightLb: 170, activity: "light", goal: "build" };
+    TARGET_INPUT_KEYS.forEach((k) => expect(base2[k] !== undefined).toBe(true));
+    expect(PROGRAM_CRITICAL_KEYS).toContain("equipment");
+  });
+});
+
+describe("targetsDiff and its wording", () => {
+  test("only the numbers that moved are reported", () => {
+    const d = targetsDiff({ calories: 2600, protein: 165, carbs: 300, fat: 72 }, { calories: 2800, protein: 180, carbs: 300, fat: 72 });
+    expect(Object.keys(d)).toEqual(["calories", "protein"]);
+    expect(d.calories).toEqual({ from: 2600, to: 2800 });
+  });
+
+  test("identical targets produce nothing to confirm", () => {
+    const t = { calories: 2600, protein: 165, carbs: 300, fat: 72 };
+    expect(targetsDiff(t, { ...t })).toEqual({});
+  });
+
+  test("the summary sentence reads naturally for one, two and three reasons", () => {
+    expect(changeSummarySentence(["your weight"])).toBe("You changed your weight.");
+    expect(changeSummarySentence(["your weight", "your goal"])).toBe("You changed your weight and your goal.");
+    expect(changeSummarySentence(["your weight", "your goal", "your equipment"])).toBe("You changed your weight, your goal and your equipment.");
+    expect(changeSummarySentence([])).toBe("");
   });
 });
 

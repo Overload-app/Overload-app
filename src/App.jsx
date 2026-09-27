@@ -1960,6 +1960,87 @@ export function calcTargets(profile) {
 }
 
 /* ============================================================
+   EDITING THE QUIZ AFTER THE FACT
+
+   Real ask: let people go back and change their quiz answers without
+   resetting their progress, and when a change means their diet or workout
+   needs to change, let them confirm or reject that.
+
+   The split that makes this safe: an answer is a FACT about the person and
+   always saves. What's DERIVED from it — their calorie targets, their
+   training program — is only ever replaced if they say so. Logs, weigh-ins,
+   meals and workout history are never touched by any of this; the standing
+   rule is that an update must never cost someone their own data.
+============================================================ */
+
+// The exact inputs calcTargets() reads. If none of these changed, the numbers
+// cannot have changed, so there's nothing to ask about.
+export const TARGET_INPUT_KEYS = ["sex", "age", "heightIn", "weightLb", "activity", "goal"];
+
+// Answers that make an existing program wrong rather than merely suboptimal —
+// a program built for a full gym is unusable with dumbbells only, and one
+// built around 3 days doesn't fit someone now training 5. Deliberately NOT
+// every answer: changing "desiredPhysique" or notes is a nudge for the Coach,
+// not grounds for offering to throw away the program they've been training.
+export const PROGRAM_CRITICAL_KEYS = ["equipment", "daysPerWeek", "sessionLength", "experience", "goal", "injuries", "otherInjuries"];
+
+const CHANGE_LABELS = {
+  sex: "your sex", age: "your age", heightIn: "your height", weightLb: "your weight",
+  activity: "your day-to-day activity", goal: "your main goal", equipment: "your equipment",
+  daysPerWeek: "how many days you train", sessionLength: "how long your workouts are",
+  experience: "your training experience", injuries: "your injuries", otherInjuries: "your injuries",
+  currentPhysique: "your current build", desiredPhysique: "the physique you're working toward",
+  specificGoals: "your specific goals", notes: "your notes", diet: "your dietary restrictions",
+  otherDiet: "your dietary restrictions", foodPrefs: "your food preferences",
+};
+
+// Order-insensitive for the multi-select answers (injuries, diet) — reordering
+// the same set of chips is not a change.
+function sameAnswer(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const sa = [...(a || [])].map(String).sort();
+    const sb = [...(b || [])].map(String).sort();
+    return sa.length === sb.length && sa.every((v, i) => v === sb[i]);
+  }
+  if (a === undefined || a === null || a === "") return b === undefined || b === null || b === "";
+  return String(a) === String(b);
+}
+
+export function profileChangeImpact(before, after) {
+  const keys = [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])];
+  const changedKeys = keys.filter((k) => !sameAnswer(before?.[k], after?.[k]));
+  const reasonsFor = (list) => [...new Set(changedKeys.filter((k) => list.includes(k)).map((k) => CHANGE_LABELS[k] || k))];
+  const targetReasons = reasonsFor(TARGET_INPUT_KEYS);
+  const programReasons = reasonsFor(PROGRAM_CRITICAL_KEYS);
+  return {
+    changedKeys,
+    targetsAffected: targetReasons.length > 0,
+    programAffected: programReasons.length > 0,
+    targetReasons,
+    programReasons,
+  };
+}
+
+// Only the numbers that actually moved, so the confirm screen can show a real
+// before/after instead of restating four identical figures.
+export function targetsDiff(before, after) {
+  const out = {};
+  ["calories", "protein", "carbs", "fat"].forEach((k) => {
+    if (Number(before?.[k]) !== Number(after?.[k])) out[k] = { from: before?.[k] ?? null, to: after?.[k] ?? null };
+  });
+  return out;
+}
+
+// Plain English for the confirm screen. Kept out of the component so the
+// wording is testable and can't drift from what actually changed.
+export function changeSummarySentence(reasons) {
+  if (reasons.length === 0) return "";
+  if (reasons.length === 1) return `You changed ${reasons[0]}.`;
+  const last = reasons[reasons.length - 1];
+  return `You changed ${reasons.slice(0, -1).join(", ")} and ${last}.`;
+}
+
+/* ============================================================
    STORAGE (Supabase — real accounts + real database)
 
    Also mirrors state to localStorage on every write and read, so the app
@@ -6224,9 +6305,234 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
 }
 
 /* ============================================================
+   QUIZ EDITOR
+
+   Real ask: "make it so people can go back and edit their quiz results
+   without resetting all their progress. if they change their quiz results
+   that makes their diet or workout need to change, then they will confirm or
+   deny/reject those changes."
+
+   Deliberately ONE scrollable form rather than re-running the 18-step wizard:
+   someone editing is changing one answer, not filling the quiz again, and
+   making them tap Next fifteen times to fix their weight would be its own
+   reason not to bother. The review step afterwards is where the confirm/reject
+   happens — and a program rebuild is only generated AFTER they accept it, so
+   rejecting one never costs an AI call.
+============================================================ */
+// reviewCadence is excluded: it isn't a profile answer, it's the two review
+// toggles, which already have their own switches further down this same tab.
+const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "reviewCadence");
+
+export function QuizEditor({ profile, targets, onCancel, onSave }) {
+  const [answers, setAnswers] = useState(() => ({ ...profile }));
+  const [feet, setFeet] = useState(Math.floor((profile.heightIn || 68) / 12));
+  const [inches, setInches] = useState((profile.heightIn || 68) % 12);
+  const [reviewing, setReviewing] = useState(false);
+  const [applyTargets, setApplyTargets] = useState(true);
+  const [rebuildProgram, setRebuildProgram] = useState(false);
+
+  function setAns(key, val) { setAnswers((a) => ({ ...a, [key]: val })); }
+  function toggleMulti(key, val) {
+    setAnswers((a) => {
+      const arr = a[key] || [];
+      const noneVal = key === "diet" ? "none" : "none";
+      let next;
+      if (val === noneVal) next = [noneVal];
+      else if (arr.includes(val)) next = arr.filter((v) => v !== val);
+      else next = [...arr.filter((v) => v !== noneVal), val];
+      const result = { ...a, [key]: next };
+      if (key === "injuries" && val === "other" && !next.includes("other")) result.otherInjuries = "";
+      if (key === "diet" && val === "other" && !next.includes("other")) result.otherDiet = "";
+      return result;
+    });
+  }
+
+  // heightIn is stored as a single number but edited as feet + inches.
+  const edited = { ...answers, heightIn: (Number(feet) || 0) * 12 + (Number(inches) || 0) };
+  const impact = profileChangeImpact(profile, edited);
+  const proposedTargets = impact.targetsAffected ? calcTargets(edited) : targets;
+  const numberDiff = impact.targetsAffected ? targetsDiff(targets, proposedTargets) : {};
+  const hasNumberChange = Object.keys(numberDiff).length > 0;
+
+  if (reviewing) {
+    return (
+      <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+        <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0 }}>
+          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: 0 }}>Before we save</h2>
+          <p style={{ color: "#B9BEC6", fontSize: 13, margin: "4px 0 0" }}>Your answers are saved either way. These are the knock-on changes — your call.</p>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {/* Said up front and unconditionally, because it's the thing people
+              are actually afraid of when editing a profile. */}
+          <Card style={{ marginBottom: 10, display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <Check size={16} color={T.good} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ fontSize: 13, color: T.ink, lineHeight: 1.5 }}>
+              Nothing you've logged is affected — your weigh-ins, meals and workout history all stay exactly as they are.
+            </span>
+          </Card>
+
+          {hasNumberChange && (
+            <Card style={{ marginBottom: 10 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5, marginBottom: 6 }}>YOUR DAILY NUMBERS</div>
+              <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 10px", lineHeight: 1.5 }}>
+                {changeSummarySentence(impact.targetReasons)} That changes what you should be eating:
+              </p>
+              {Object.entries(numberDiff).map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "6px 0", borderTop: `1px solid ${T.steel}` }}>
+                  <span style={{ fontSize: 13, color: T.steelDark, textTransform: "capitalize" }}>{k}</span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, color: T.ink, fontWeight: 600 }}>
+                    <span style={{ color: T.steelDark, textDecoration: "line-through" }}>{v.from}</span>
+                    {"  →  "}{v.to}{k === "calories" ? "" : "g"}
+                  </span>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <Btn variant={applyTargets ? "accent" : "ghost"} onClick={() => setApplyTargets(true)} style={{ flex: 1 }}>Use new numbers</Btn>
+                <Btn variant={applyTargets ? "ghost" : "accent"} onClick={() => setApplyTargets(false)} style={{ flex: 1 }}>Keep mine</Btn>
+              </div>
+            </Card>
+          )}
+
+          {impact.programAffected && (
+            <Card style={{ marginBottom: 10 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5, marginBottom: 6 }}>YOUR PROGRAM</div>
+              <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 10px", lineHeight: 1.5 }}>
+                {changeSummarySentence(impact.programReasons)} Your current program was built before that, so it may not fit any more. Rebuilding replaces your exercises — your logged history of them stays.
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn variant={rebuildProgram ? "accent" : "ghost"} onClick={() => setRebuildProgram(true)} style={{ flex: 1 }}>Rebuild it</Btn>
+                <Btn variant={rebuildProgram ? "ghost" : "accent"} onClick={() => setRebuildProgram(false)} style={{ flex: 1 }}>Keep mine</Btn>
+              </div>
+            </Card>
+          )}
+
+          {!hasNumberChange && !impact.programAffected && (
+            <Card style={{ marginBottom: 10 }}>
+              <p style={{ fontSize: 13, color: T.steelDark, margin: 0, lineHeight: 1.5 }}>
+                Nothing else needs to change — your numbers and your program still fit these answers. Your coach will use the new details from your next message.
+              </p>
+            </Card>
+          )}
+        </div>
+        <div style={{ padding: 16, borderTop: `1px solid ${T.steel}`, display: "flex", gap: 8, flexShrink: 0 }}>
+          <Btn variant="ghost" onClick={() => setReviewing(false)}>Back</Btn>
+          <Btn
+            variant="accent"
+            style={{ flex: 1 }}
+            onClick={() => onSave(edited, { applyTargets: hasNumberChange && applyTargets, rebuildProgram: impact.programAffected && rebuildProgram })}
+          >
+            Save changes
+          </Btn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 18px", color: "#fff", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: 0 }}>Edit your answers</h2>
+          <p style={{ color: "#B9BEC6", fontSize: 13, margin: "4px 0 0" }}>Change anything. Nothing you've logged is affected.</p>
+        </div>
+        <button onClick={onCancel} aria-label="Close editor" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        {EDITABLE_QUIZ_STEPS.map((st) => (
+          <Card key={st.key} style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.ink, marginBottom: st.sub ? 2 : 8 }}>{st.q}</div>
+            {st.sub && <div style={{ fontSize: 12, color: T.steelDark, marginBottom: 8, lineHeight: 1.4 }}>{st.sub}</div>}
+            {st.type === "choice" && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {st.options.map(([val, label]) => {
+                  const active = String(answers[st.key]) === String(val);
+                  return (
+                    <button
+                      key={String(val)} onClick={() => setAns(st.key, val)}
+                      style={{ padding: "9px 13px", borderRadius: 18, cursor: "pointer", border: `2px solid ${active ? T.charge : T.steel}`, background: active ? "#EEEDFF" : T.card, fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 13, color: T.ink }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {st.type === "multi" && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {st.options.map(([val, label]) => {
+                  const active = (answers[st.key] || []).includes(val);
+                  return (
+                    <button
+                      key={val} onClick={() => toggleMulti(st.key, val)}
+                      style={{ padding: "9px 13px", borderRadius: 18, cursor: "pointer", border: `2px solid ${active ? T.charge : T.steel}`, background: active ? "#EEEDFF" : T.card, fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 13, color: T.ink }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+                {st.key === "injuries" && (answers.injuries || []).includes("other") && (
+                  <textarea
+                    placeholder="Describe in your own words — e.g. torn labrum in right shoulder, sciatica"
+                    value={answers.otherInjuries ?? ""} onChange={(e) => setAns("otherInjuries", e.target.value)}
+                    style={{ width: "100%", marginTop: 4, padding: "12px 14px", fontSize: 14, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", minHeight: 64, boxSizing: "border-box", resize: "vertical" }}
+                  />
+                )}
+                {st.key === "diet" && (answers.diet || []).includes("other") && (
+                  <textarea
+                    placeholder="What can't you eat? e.g. shellfish allergy, lactose intolerant, no pork"
+                    value={answers.otherDiet ?? ""} onChange={(e) => setAns("otherDiet", e.target.value)}
+                    style={{ width: "100%", marginTop: 4, padding: "12px 14px", fontSize: 14, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", minHeight: 64, boxSizing: "border-box", resize: "vertical" }}
+                  />
+                )}
+              </div>
+            )}
+            {st.type === "number" && (
+              <input
+                type="number" placeholder={st.placeholder} value={answers[st.key] ?? ""}
+                onChange={(e) => setAns(st.key, e.target.value === "" ? "" : Number(e.target.value))}
+                aria-label={st.q}
+                style={{ width: "100%", padding: "12px 14px", fontSize: 17, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, boxSizing: "border-box" }}
+              />
+            )}
+            {st.type === "text" && (
+              <textarea
+                placeholder={st.placeholder} value={answers[st.key] ?? ""}
+                onChange={(e) => setAns(st.key, e.target.value)} rows={3} aria-label={st.q}
+                style={{ width: "100%", padding: "12px 14px", fontSize: 14, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", resize: "vertical" }}
+              />
+            )}
+            {st.type === "height" && (
+              <div style={{ display: "flex", gap: 10 }}>
+                {[["ft", feet, setFeet, 3, 8], ["in", inches, setInches, 0, 11]].map(([lab, v, setV, min, max]) => (
+                  <div key={lab} style={{ flex: 1 }}>
+                    <label style={{ fontSize: 11, color: T.steelDark, fontWeight: 600 }}>{lab}</label>
+                    <input
+                      type="number" value={v} min={min} max={max} aria-label={`Height ${lab}`}
+                      onChange={(e) => setV(e.target.value === "" ? "" : Number(e.target.value))}
+                      onBlur={(e) => setV(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
+                      style={{ width: "100%", padding: "12px", fontSize: 17, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, boxSizing: "border-box", marginTop: 3 }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        ))}
+      </div>
+      <div style={{ padding: 16, borderTop: `1px solid ${T.steel}`, display: "flex", gap: 8, flexShrink: 0 }}>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+        <Btn variant="accent" onClick={() => setReviewing(true)} disabled={impact.changedKeys.length === 0} style={{ flex: 1 }}>
+          {impact.changedKeys.length === 0 ? "No changes yet" : "Review changes"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    PROFILE
 ============================================================ */
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -6320,6 +6626,11 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
       </Card>
 
       <TickRule label="Details" />
+      {onEditQuiz && (
+        <Btn variant="ghost" onClick={onEditQuiz} style={{ width: "100%", marginBottom: 10 }}>
+          Edit my answers
+        </Btn>
+      )}
       <Card>
         {rows.map(([label, val], i) => (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: i < rows.length - 1 ? `1px solid ${T.steel}` : "none", gap: 12 }}>
@@ -6415,6 +6726,8 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
+  const [quizEditorOpen, setQuizEditorOpen] = useState(false);
+  const [rebuildingProgram, setRebuildingProgram] = useState(false);
   const [historyEditorInitialIdx, setHistoryEditorInitialIdx] = useState(null); // real index to jump straight to, or null for the plain list
   const [coachLoading, setCoachLoading] = useState(false);
   // "synced" | "offline" (change saved locally, not yet on the server) | "saving"
@@ -7380,6 +7693,67 @@ export default function App() {
     }));
   }
 
+  // Real ask: edit the quiz answers without resetting progress, and confirm or
+  // reject the knock-on changes. The answers themselves always save — they're
+  // facts about the person. Targets and the program are only replaced when the
+  // review screen said so. logs, inProgressWorkout, reviews, coachChat and
+  // everything else are untouched by construction: this spreads prev and only
+  // names the three keys it's allowed to change.
+  async function saveQuizEdits(newProfile, { applyTargets, rebuildProgram }) {
+    setQuizEditorOpen(false);
+    const priorProgram = stateRef.current?.program;
+    const priorTargets = stateRef.current?.targets;
+    persist((prev) => ({
+      ...prev,
+      profile: newProfile,
+      ...(applyTargets ? { targets: { ...prev.targets, ...calcTargets(newProfile) } } : {}),
+    }));
+    if (!rebuildProgram) return;
+    // Generated only AFTER they accepted it, so rejecting a rebuild never
+    // costs an AI call. The rule-based generator is the instant fallback, the
+    // same one onboarding falls back to.
+    setRebuildingProgram(true);
+    let program = buildProgram(newProfile);
+    try {
+      const raw = await claudeChat({
+        system: buildProgramGenSystem(newProfile),
+        messages: [{ role: "user", content: "Design my personalized training program now." }],
+      });
+      const parsed = parseJSONLoose(raw);
+      if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
+        // Same deterministic backstops onboarding applies — the prompt states
+        // a ceiling and a minimum, but a prompt is never a guarantee. Split
+        // name derived from the day names the same way, rather than trusting
+        // the model's own label. priorProgram is passed so an exercise being
+        // carried over keeps its real tips instead of regenerating them.
+        const normalizedDays = parsed.days.map((d) => ({
+          ...d,
+          exercises: normalizeExerciseCount(d.exercises || [], newProfile.sessionLength, newProfile.experience, newProfile.equipment, newProfile.injuries),
+        }));
+        program = normalizeProgramTips(
+          { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays },
+          priorProgram
+        );
+      }
+    } catch (e) {
+      logError("Quiz-edit program rebuild fell back to the rule-based generator", {
+        stack: e?.stack || e?.message || String(e),
+        context: { type: "quiz-edit-rebuild-fallback", status: e?.status },
+      });
+    }
+    // Snapshotted into history like any other program change, so "undo that"
+    // in the Coach can reach it.
+    persist((prev) => ({
+      ...prev,
+      program,
+      programHistory: [
+        { program: priorProgram, targets: priorTargets, savedAt: new Date().toISOString() },
+        ...(prev.programHistory || []),
+      ].slice(0, PROGRAM_HISTORY_LIMIT),
+    }));
+    setRebuildingProgram(false);
+  }
+
   function setReviewEnabled(cadence, enabled) {
     persist((prev) => ({ ...prev, reviewsEnabled: { ...prev.reviewsEnabled, [cadence]: enabled } }));
   }
@@ -7591,7 +7965,7 @@ export default function App() {
               onDeleteReview={deleteReview}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">
@@ -7708,6 +8082,22 @@ export default function App() {
           gifCache={state.gifCache || {}}
           onCacheGif={cacheGif}
         />
+      )}
+
+      {quizEditorOpen && (
+        <QuizEditor
+          profile={state.profile}
+          targets={state.targets}
+          onCancel={() => setQuizEditorOpen(false)}
+          onSave={saveQuizEdits}
+        />
+      )}
+
+      {rebuildingProgram && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 80, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <Loader2 size={28} className="spin" />
+          <p style={{ color: "#B9BEC6", fontSize: 14, marginTop: 14 }}>Rebuilding your program…</p>
+        </div>
       )}
 
       {showSubscribeOverlay && (
