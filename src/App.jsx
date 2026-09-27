@@ -1861,6 +1861,20 @@ export function injuryDescription(profile) {
   return parts.length > 0 ? parts.join(", ") : "none";
 }
 
+// Real report: "the AI suggestions for what to eat aren't great." Returns ""
+// for anyone who skipped both food questions, so the prompt doesn't carry an
+// empty section — and so an account created before these questions existed
+// behaves exactly as it did before.
+export function foodPreferenceText(profile) {
+  const hard = (profile?.diet || []).filter((d) => d && d !== "none").map((d) => d.replace(/_/g, " "));
+  if (profile?.otherDiet && profile.otherDiet.trim()) hard.push(profile.otherDiet.trim());
+  const parts = [];
+  if (hard.length > 0) parts.push(`MUST NOT eat: ${hard.join(", ")} — treat this as a hard rule, never suggest a meal or food that breaks it.`);
+  if (profile?.foodPrefs && profile.foodPrefs.trim()) parts.push(`What they eat, in their own words: "${profile.foodPrefs.trim()}"`);
+  if (parts.length === 0) return "";
+  return parts.join(" ");
+}
+
 export function buildProgramGenSystem(profile) {
   const { sets: recSets, rest: recRest } = planSetsRest(profile);
   return `You are a world-class evidence-based strength & physique coach designing a brand-new, fully personalized training program from scratch for a new client. Apply mainstream exercise-science consensus: progressive overload, sensible per-muscle volume landmarks, rep ranges matched to the goal, and adequate recovery between sessions hitting the same muscles.
@@ -2763,6 +2777,29 @@ const QUIZ_STEPS = [
     type: "text",
     placeholder: "e.g. \"Prefer an upper/lower split\", \"no cable machine at my gym\", \"please no burpees or box jumps\"",
   },
+  // Real report: "the AI suggestions for what to eat aren't great." They
+  // weren't — nothing in the app knew a single thing about what this person
+  // eats, so the only honest answer the Coach could give was the generic
+  // chicken-rice-and-broccoli list. Deliberately just TWO steps, both
+  // skippable, on an onboarding flow that is already long: hard restrictions
+  // as taps (fast, and the one part that's a safety issue rather than a
+  // preference), then one free-text box for everything else. Costs nothing to
+  // ask, and adds ~40 tokens to a prompt only for the people who answer.
+  {
+    key: "diet",
+    q: "Any foods you can't or won't eat?",
+    sub: "Select all that apply — your coach will never suggest a meal around something on this list.",
+    type: "multi",
+    optional: true,
+    options: [["none", "No restrictions"], ["vegetarian", "Vegetarian"], ["vegan", "Vegan"], ["dairy_free", "No dairy"], ["gluten_free", "No gluten"], ["halal", "Halal"], ["kosher", "Kosher"], ["nut_allergy", "Nut allergy"], ["other", "Other"]],
+  },
+  {
+    key: "foodPrefs",
+    q: "What do you actually like to eat?",
+    sub: "Optional, and the single most useful thing you can tell your coach about food — advice built around meals you'd never eat is advice you'll ignore. Foods you love, foods you can't stand, and how you eat day to day all help.",
+    type: "text",
+    placeholder: "e.g. love chicken, rice, eggs, Greek yogurt · hate fish and mushrooms · eat out most lunches · on a tight budget",
+  },
   {
     key: "reviewCadence",
     q: "Want periodic AI check-ins on your progress?",
@@ -2811,6 +2848,9 @@ export function Onboarding({ onComplete }) {
       if (key === "injuries" && val === "other" && !next.includes("other")) {
         result.otherInjuries = "";
       }
+      if (key === "diet" && val === "other" && !next.includes("other")) {
+        result.otherDiet = "";
+      }
       return result;
     });
   }
@@ -2829,6 +2869,9 @@ export function Onboarding({ onComplete }) {
       specificGoals: answers.specificGoals || "",
       injuries: answers.injuries || ["none"],
       otherInjuries: answers.otherInjuries || "",
+      diet: answers.diet || [],
+      otherDiet: answers.otherDiet || "",
+      foodPrefs: answers.foodPrefs || "",
       weeklyReviewEnabled: (answers.reviewCadence || []).includes("weekly"),
       monthlyReviewEnabled: (answers.reviewCadence || []).includes("monthly"),
       name: "",
@@ -2984,6 +3027,15 @@ export function Onboarding({ onComplete }) {
                 </button>
               );
             })}
+            {cur.key === "diet" && (answers.diet || []).includes("other") && (
+              <textarea
+                autoFocus
+                placeholder="What can't you eat? e.g. shellfish allergy, lactose intolerant, no pork"
+                value={answers.otherDiet ?? ""}
+                onChange={(e) => setAns("otherDiet", e.target.value)}
+                style={{ width: "100%", marginTop: 4, padding: "14px 16px", fontSize: 15, borderRadius: 12, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", minHeight: 80, boxSizing: "border-box", resize: "vertical" }}
+              />
+            )}
             {cur.key === "injuries" && (answers.injuries || []).includes("other") && (
               <textarea
                 autoFocus
@@ -4603,6 +4655,8 @@ ${COACH_DAY_RULES}
 
 ${COACH_LOG_RULES}
 
+${COACH_FOOD_RULES}
+
 ${COACH_LIMIT_RULES}`;
 }
 
@@ -4734,6 +4788,13 @@ const COACH_LIMIT_RULES = `YOUR NUMERIC LIMITS. The four values named in caps be
 
 // How to read the three lines above. Same for every account on the app, so it
 // sits in the cached static block rather than being re-sent per user.
+const COACH_FOOD_RULES = `FOOD ADVICE. Real report: "the AI suggestions for what to eat aren't great." They weren't, because nothing in the app knew anything about what the person eats, so the only answer available was a generic chicken-rice-and-broccoli list. If a "Food preferences" line appears in your context, it's what they told the app themselves:
+- Anything under "MUST NOT eat" is a hard rule, not a preference. Never suggest it, never suggest a dish that contains it, and don't offer it as a "if you can tolerate it" aside. Several of those are allergies.
+- Build every food suggestion out of things they actually said they like, and never suggest something they said they can't stand. Advice built around meals they'd never eat is advice they'll ignore, which is the whole problem this is fixing.
+- Their own words may also tell you HOW they eat — eating out, a tight budget, someone else cooking, no time to prep. Respect it: don't hand a meal-prep plan to someone who eats out every lunch, or name expensive food to someone who said money is tight. Suggest what's realistic for them, not what's optimal in the abstract.
+- If there is NO "Food preferences" line, they skipped those questions. Don't pretend to know their tastes, and don't invent a restriction. Give a short answer and ask one specific question about what they like — then use what they tell you for the rest of that conversation.
+- Never rewrite their calorie or macro numbers just because you're discussing food. "targets" is for a real change to the numbers, not for answering "what should I eat."`;
+
 const COACH_LOG_RULES = `THEIR LOGGED DATA. Your context below carries a summary of what they have actually logged — every workout's date/day/duration, their most-trained lifts with best and latest sets, their bodyweight history with the current weight, and their recent daily calories and protein against target.
 - You can see all of it. NEVER say you have no visibility into their weight log, their workouts, or their food — a real report is you saying exactly that twice in one conversation. If they ask how they're progressing, whether they're gaining or losing too fast, whether their protein is actually where it should be, or what they lifted last time, answer from these numbers and cite the real ones.
 - What you genuinely CANNOT do is act later on your own. You only ever run when they send a message, so you cannot watch their log and alert them when something happens. If they ask you to tell them when they hit a target weight, say plainly that you can't watch for it, but that you WILL see their latest weight every time they message you, so they can just ask — and if the number in your context already meets what they described, say so immediately instead of waiting to be asked again. The app's own weekly/monthly reviews are the only thing that runs by itself.
@@ -4802,7 +4863,7 @@ IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_
 
 Exercise vocabulary for their equipment (${p.equipment}) — named EXACTLY as written, every one confirmed to have a real instructional video: ${exerciseVocabularyFor(p.equipment).join(", ")}.
 
-${coachLogSummary(state)}
+${foodPreferenceText(p) ? `Food preferences: ${foodPreferenceText(p)}\n` : ""}${coachLogSummary(state)}
 Numeric limits for this message: EXERCISE_CEILING = ${liveCap}. SESSION_LENGTH = ${p.sessionLength} min. TIGHTEST_SETS = ${tightestSetsRest.sets}. TIGHTEST_REST = ${tightestSetsRest.rest}s.`;
 }
 

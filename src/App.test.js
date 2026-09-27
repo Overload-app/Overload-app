@@ -57,6 +57,7 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  foodPreferenceText,
   coachLogSummary,
   allProgramExercises,
   programForPrompt,
@@ -1244,6 +1245,66 @@ describe("coachLogSummary — the Coach can see what they've logged", () => {
     const staticBlock = buildCoachStaticSystem();
     expect(staticBlock).toContain("NEVER say you have no visibility");
     expect(staticBlock).toContain("you cannot watch their log and alert them");
+  });
+});
+
+// Real report: "the AI suggestions for what to eat aren't great."
+describe("foodPreferenceText", () => {
+  test("hard restrictions are stated as a rule, not a preference", () => {
+    const out = foodPreferenceText({ diet: ["vegetarian", "nut_allergy"] });
+    expect(out).toContain("MUST NOT eat: vegetarian, nut allergy");
+    expect(out).toContain("hard rule");
+  });
+
+  test("their own words are passed through verbatim", () => {
+    const out = foodPreferenceText({ foodPrefs: "love chicken and rice, hate fish, eat out most lunches" });
+    expect(out).toContain('"love chicken and rice, hate fish, eat out most lunches"');
+  });
+
+  test("a free-text restriction joins the hard list", () => {
+    expect(foodPreferenceText({ diet: ["other"], otherDiet: "shellfish allergy" })).toContain("shellfish allergy");
+  });
+
+  test("'No restrictions' is not passed on as a restriction", () => {
+    expect(foodPreferenceText({ diet: ["none"] })).toBe("");
+  });
+
+  // Both questions are skippable, and accounts predate them entirely.
+  test("skipping both questions adds nothing to the prompt at all", () => {
+    expect(foodPreferenceText({})).toBe("");
+    expect(foodPreferenceText({ diet: [], foodPrefs: "   " })).toBe("");
+    expect(foodPreferenceText(undefined)).toBe("");
+  });
+
+  test("it stays small — this rides in the per-account half of the prompt", () => {
+    const out = foodPreferenceText({ diet: ["vegetarian", "dairy_free"], foodPrefs: "chicken, rice, eggs, yogurt; no fish" });
+    expect(out.length).toBeLessThan(400);
+  });
+
+  test("it reaches the Coach's prompt, with the rules for using it in the cached half", () => {
+    const withFood = buildCoachDynamicSystem({
+      profile: { ...baseProfile, diet: ["vegetarian"], foodPrefs: "love paneer and lentils" },
+      targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 },
+      logs: { workouts: [] },
+      program: { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, rest: 90 }] }] },
+      programHistory: [],
+    });
+    expect(withFood).toContain("Food preferences:");
+    expect(withFood).toContain("love paneer and lentils");
+    const staticBlock = buildCoachStaticSystem();
+    expect(staticBlock).toContain("Anything under \"MUST NOT eat\" is a hard rule");
+    expect(staticBlock).toContain("they skipped those questions");
+  });
+
+  test("an account that skipped them gets no Food preferences line", () => {
+    const without = buildCoachDynamicSystem({
+      profile: { ...baseProfile },
+      targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 },
+      logs: { workouts: [] },
+      program: { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, rest: 90 }] }] },
+      programHistory: [],
+    });
+    expect(without).not.toContain("Food preferences:");
   });
 });
 

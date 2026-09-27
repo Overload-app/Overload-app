@@ -2177,6 +2177,15 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
   }
 
+  // The two food questions sit between notes and review cadence — see
+  // QUIZ_STEPS. Both are skippable, so walking past them is two taps.
+  async function skipFoodSteps(user) {
+    expect(screen.getByText("Any foods you can't or won't eat?")).toBeInTheDocument();
+    await user.click(screen.getByText("Next"));
+    expect(screen.getByText("What do you actually like to eat?")).toBeInTheDocument();
+    await user.click(screen.getByText("Next"));
+  }
+
   test("no separate 'other injuries' question follows the injuries step", async () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} />);
@@ -2217,6 +2226,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
     expect(screen.getByText("Anything else your coach should know?")).toBeInTheDocument();
     await user.click(screen.getByText("Next"));
+    await skipFoodSteps(user);
     expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
   });
 
@@ -2226,8 +2236,52 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await goToInjuriesStep(user);
     await user.click(screen.getByText("None"));
     await user.click(screen.getByText("Next")); // -> notes
-    await user.click(screen.getByText("Next")); // -> review cadence
+    await user.click(screen.getByText("Next")); // -> food restrictions
+    await skipFoodSteps(user);
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+
+  // Real report: "the AI suggestions for what to eat aren't great" — nothing
+  // in the app knew anything about what the person eats.
+  test("both food questions are skippable, so they can't cost a signup", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next")); // -> notes
+    await user.click(screen.getByText("Next")); // -> food restrictions
+    // Nothing selected, nothing typed, and Next is still available on both.
+    await skipFoodSteps(user);
+    expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
+  });
+
+  test("the food-restrictions step uses its own 'No restrictions' wording, not 'None'", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next")); // -> notes
+    await user.click(screen.getByText("Next")); // -> food restrictions
+    // Sharing the label "None" with the injuries step would make either the
+    // app's own copy or a test ambiguous about which question is answered.
+    expect(screen.getByText("No restrictions")).toBeInTheDocument();
+    expect(screen.queryByText("None")).not.toBeInTheDocument();
+  });
+
+  test("'Other' on the food step reveals its own box, separate from the injuries one", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next")); // -> notes
+    await user.click(screen.getByText("Next")); // -> food restrictions
+    expect(screen.queryByPlaceholderText(/shellfish allergy/)).not.toBeInTheDocument();
+    await user.click(screen.getByText("Other"));
+    const box = screen.getByPlaceholderText(/shellfish allergy/);
+    await user.type(box, "lactose intolerant");
+    expect(box.value).toBe("lactose intolerant");
+    await user.click(screen.getByText("Other")); // uncheck clears it
+    expect(screen.queryByPlaceholderText(/shellfish allergy/)).not.toBeInTheDocument();
   });
 
   test("whatever's typed in the notes step ends up on the built profile", async () => {
@@ -2239,6 +2293,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
     await user.type(screen.getByPlaceholderText(/Prefer an upper\/lower split/), "No pull-up bar at my gym");
     await user.click(screen.getByText("Next"));
+    await skipFoodSteps(user);
     await user.click(screen.getByText("Build my plan"));
     // Program building falls back to the offline generator in this test
     // env (no real network) and lands on the summary screen next, same as
@@ -2252,7 +2307,8 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await goToInjuriesStep(user);
     await user.click(screen.getByText("None"));
     await user.click(screen.getByText("Next")); // -> notes
-    await user.click(screen.getByText("Next")); // -> review cadence
+    await user.click(screen.getByText("Next")); // -> food restrictions
+    await skipFoodSteps(user);
     await user.click(screen.getByText("Weekly review"));
     await user.click(screen.getByText("Monthly review"));
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
