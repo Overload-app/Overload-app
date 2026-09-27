@@ -57,6 +57,7 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  coachLogSummary,
   allProgramExercises,
   programForPrompt,
   excludeKnownNoVideo,
@@ -1167,6 +1168,82 @@ describe("withTips reuses tips the program already has", () => {
     const rebuilt = { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, tips: [] }] }] };
     const out = normalizeProgramTips(rebuilt, { days: prior.map((e) => ({ exercises: [e] })) });
     expect(out.days[0].exercises[0].tips).toEqual(["Real tip A", "Real tip B", "Real tip C", "Real tip D"]);
+  });
+});
+
+// Real report: the Coach said "I don't currently have visibility into your
+// ongoing weight log between messages" — twice in one conversation. It was
+// true; the prompt carried the profile, program and targets and nothing the
+// person had ever logged.
+describe("coachLogSummary — the Coach can see what they've logged", () => {
+  const logs = {
+    workouts: [
+      { date: "2026-09-14", dayName: "Push", durationSec: 2880, exercises: [{ name: "Bench Press", logged: [{ weight: "175", reps: "8", done: true }] }] },
+      { date: "2026-09-21", dayName: "Push", durationSec: 3000, exercises: [{ name: "Bench Press", logged: [{ weight: "185", reps: "8", done: true }] }] },
+    ],
+    bodyweight: [{ date: "2026-09-01", weight: 184.2 }, { date: "2026-09-26", weight: 180.4 }],
+    nutrition: [{ date: "2026-09-26", meals: [{ name: "a", cal: 900, protein: 60 }, { name: "b", cal: 850, protein: 55 }] }],
+  };
+  const state = { logs, targets: { calories: 2800, protein: 180 } };
+
+  test("the current weight is stated outright, which is what was actually being asked for", () => {
+    const out = coachLogSummary(state);
+    expect(out).toContain("CURRENT weight is 180.4lb, logged 2026-09-26");
+    expect(out).toContain("-3.8lb since 2026-09-01");
+  });
+
+  test("weights are rounded, not printed as floating-point noise", () => {
+    const out = coachLogSummary({ ...state, logs: { ...logs, bodyweight: [{ date: "2026-09-01", weight: 184.2 }, { date: "2026-09-26", weight: 184.2 - 3.9 }] } });
+    expect(out).toContain("180.3lb");
+    expect(out).not.toMatch(/\d\.\d{3,}/);
+  });
+
+  test("training history covers what they did, when, and how their lifts are moving", () => {
+    const out = coachLogSummary(state);
+    expect(out).toContain("2 workout(s) all-time");
+    expect(out).toContain("2026-09-21 Push 50min");
+    expect(out).toContain("Bench Press: best 185lb x8");
+  });
+
+  test("food is summarised against their actual targets", () => {
+    const out = coachLogSummary(state);
+    expect(out).toContain("2026-09-26 1750cal/115g protein");
+    expect(out).toContain("targets of 2800 cal and 180g protein");
+  });
+
+  test("an empty log says so plainly instead of implying zeroes", () => {
+    const out = coachLogSummary({ logs: {}, targets: {} });
+    expect(out).toContain("Training log: nothing logged yet.");
+    expect(out).toContain("Bodyweight log: nothing logged yet.");
+    expect(out).toContain("Food log: nothing logged yet.");
+  });
+
+  // The whole reason this is a summary and not the raw logs: it's in the
+  // per-account half of the prompt, re-sent at full price on every message.
+  test("it stays roughly the same size no matter how long the account has existed", () => {
+    const heavy = {
+      targets: { calories: 2800, protein: 180 },
+      logs: {
+        workouts: Array.from({ length: 400 }, (_, i) => ({ date: `2026-01-${String((i % 28) + 1).padStart(2, "0")}`, dayName: "Push", durationSec: 3000, exercises: [{ name: `Lift ${i % 30}`, logged: [{ weight: "100", reps: "8", done: true }] }] })),
+        bodyweight: Array.from({ length: 400 }, (_, i) => ({ date: `2026-01-${String((i % 28) + 1).padStart(2, "0")}`, weight: 180 })),
+        nutrition: Array.from({ length: 400 }, (_, i) => ({ date: `2026-01-${String((i % 28) + 1).padStart(2, "0")}`, meals: [{ name: "a", cal: 800, protein: 50 }] })),
+      },
+    };
+    expect(coachLogSummary(heavy).length).toBeLessThan(2000);
+  });
+
+  test("the summary reaches the real prompt, and the rules for using it are in the cached half", () => {
+    const dynamic = buildCoachDynamicSystem({
+      profile: { ...baseProfile },
+      targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 },
+      logs,
+      program: { splitName: "PPL", days: [{ name: "Push", exercises: [{ name: "Bench Press", sets: 3, rest: 90 }] }] },
+      programHistory: [],
+    });
+    expect(dynamic).toContain("CURRENT weight is 180.4lb");
+    const staticBlock = buildCoachStaticSystem();
+    expect(staticBlock).toContain("NEVER say you have no visibility");
+    expect(staticBlock).toContain("you cannot watch their log and alert them");
   });
 });
 

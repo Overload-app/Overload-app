@@ -4540,6 +4540,8 @@ Rules:
 
 ${COACH_DAY_RULES}
 
+${COACH_LOG_RULES}
+
 ${COACH_LIMIT_RULES}`;
 }
 
@@ -4562,6 +4564,80 @@ export function coachDayContext(state) {
     ? 0
     : (inProgress.sets || []).reduce((n, ex) => n + (ex.logged || []).filter((l) => l.done).length, 0);
   return { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout };
+}
+
+// Real report — the Coach saying, twice, "I don't currently have visibility
+// into your ongoing weight log between messages." It was true: the prompt
+// carried the profile, the program and the targets, and nothing they'd ever
+// logged. So it couldn't answer "am I gaining too fast", "is my protein
+// actually where it should be", or "have I hit 180 yet" — the questions a real
+// coach answers from the logbook.
+//
+// Deliberately a compact SUMMARY, not the raw logs. Raw logs grow without
+// limit and would be re-sent at full price on every message (the $0.37
+// conversation was exactly that kind of waste); these are capped at the most
+// recent slice of each and come to roughly 300 tokens regardless of how long
+// the account has existed.
+export function coachLogSummary(state) {
+  const logs = state.logs || {};
+  const workouts = logs.workouts || [];
+  const lines = [];
+
+  if (workouts.length === 0) {
+    lines.push("Training log: nothing logged yet.");
+  } else {
+    const recent = workouts.slice(-8).reverse().map((w) => `${w.date} ${w.dayName}${w.durationSec ? ` ${Math.round(w.durationSec / 60)}min` : ""}`);
+    lines.push(`Training log: ${workouts.length} workout(s) all-time. Most recent first — ${recent.join("; ")}.`);
+    // Their most-trained lifts, with the best set ever and the latest one, so
+    // "am I progressing on bench" is answerable without the full history.
+    const counts = new Map();
+    workouts.forEach((w) => (w.exercises || []).forEach((e) => counts.set(e.name, (counts.get(e.name) || 0) + 1)));
+    const keyLifts = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name]) => {
+        const pr = exercisePR(logs, name);
+        const last = exerciseLastSession(logs, name);
+        const lastTop = last?.sets?.length ? last.sets.reduce((m, x) => (x.weight > m.weight ? x : m), last.sets[0]) : null;
+        if (!pr && !lastTop) return null;
+        const parts = [];
+        if (pr) parts.push(`best ${pr.weight}lb x${pr.reps}`);
+        if (lastTop) parts.push(`last ${lastTop.weight}lb x${lastTop.reps} on ${last.date}`);
+        return `${name}: ${parts.join(", ")}`;
+      })
+      .filter(Boolean);
+    if (keyLifts.length > 0) lines.push(`Their most-trained lifts — ${keyLifts.join("; ")}.`);
+  }
+
+  const bw = (logs.bodyweight || []).slice().sort((a, b) => (a.date > b.date ? 1 : -1));
+  if (bw.length === 0) {
+    lines.push("Bodyweight log: nothing logged yet.");
+  } else {
+    // Rounded, not raw: a weight derived from arithmetic anywhere upstream
+    // prints as 180.29999999999998, which is both noise the model has to read
+    // past and about 10 wasted tokens per weigh-in listed.
+    const lb = (n) => Number(Number(n).toFixed(1));
+    const first = bw[0];
+    const latest = bw[bw.length - 1];
+    const delta = lb(latest.weight - first.weight);
+    const trend = bw.slice(-5).map((w) => `${w.date} ${lb(w.weight)}lb`).join("; ");
+    lines.push(`Bodyweight log: ${bw.length} weigh-in(s). CURRENT weight is ${lb(latest.weight)}lb, logged ${latest.date}${bw.length > 1 ? ` (${delta > 0 ? "+" : ""}${delta}lb since ${first.date}, when they were ${lb(first.weight)}lb)` : ""}. Most recent — ${trend}.`);
+  }
+
+  const nutrition = (logs.nutrition || []).filter((d) => (d.meals || []).length > 0).slice().sort((a, b) => (a.date > b.date ? 1 : -1)).slice(-7);
+  if (nutrition.length === 0) {
+    lines.push("Food log: nothing logged yet.");
+  } else {
+    const perDay = nutrition.map((d) => {
+      const t = d.meals.reduce((a, m) => ({ cal: a.cal + (m.cal || 0), protein: a.protein + (m.protein || 0) }), { cal: 0, protein: 0 });
+      return { date: d.date, ...t, meals: d.meals.length };
+    });
+    const avgCal = Math.round(perDay.reduce((a, d) => a + d.cal, 0) / perDay.length);
+    const avgProtein = Math.round(perDay.reduce((a, d) => a + d.protein, 0) / perDay.length);
+    lines.push(`Food log, ${perDay.length} most recent logged day(s) — ${perDay.map((d) => `${d.date} ${d.cal}cal/${d.protein}g protein`).join("; ")}. Averaging ${avgCal} cal and ${avgProtein}g protein across those days, against targets of ${state.targets?.calories ?? "?"} cal and ${state.targets?.protein ?? "?"}g protein. Note days with very few meals are probably under-logged rather than genuinely tiny.`);
+  }
+
+  return lines.join("\n");
 }
 
 // The account-specific FACTS only — deliberately terse, because this half of
@@ -4597,6 +4673,11 @@ const COACH_LIMIT_RULES = `YOUR NUMERIC LIMITS. The four values named in caps be
 
 // How to read the three lines above. Same for every account on the app, so it
 // sits in the cached static block rather than being re-sent per user.
+const COACH_LOG_RULES = `THEIR LOGGED DATA. Your context below carries a summary of what they have actually logged — every workout's date/day/duration, their most-trained lifts with best and latest sets, their bodyweight history with the current weight, and their recent daily calories and protein against target.
+- You can see all of it. NEVER say you have no visibility into their weight log, their workouts, or their food — a real report is you saying exactly that twice in one conversation. If they ask how they're progressing, whether they're gaining or losing too fast, whether their protein is actually where it should be, or what they lifted last time, answer from these numbers and cite the real ones.
+- What you genuinely CANNOT do is act later on your own. You only ever run when they send a message, so you cannot watch their log and alert them when something happens. If they ask you to tell them when they hit a target weight, say plainly that you can't watch for it, but that you WILL see their latest weight every time they message you, so they can just ask — and if the number in your context already meets what they described, say so immediately instead of waiting to be asked again. The app's own weekly/monthly reviews are the only thing that runs by itself.
+- Treat gaps as gaps, not as zeroes. An unlogged day means they didn't log, not that they ate nothing or skipped training — never scold someone for a number that's really a missing entry.`;
+
 const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their days, by dayIndex", "Open right now", "Next scheduled"):
 - "Their days, by dayIndex" is the authoritative list. When they name a day, match it to one of these and use that exact dayIndex. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day on that list, that IS the day: use its dayIndex and keep its real name. Only if they genuinely could mean two or more should you ask which, and then list the real day names so they can just pick. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.
 - "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
@@ -4660,6 +4741,7 @@ IMPORTANT about this history: it only holds their most recent ${PROGRAM_HISTORY_
 
 Exercise vocabulary for their equipment (${p.equipment}) — named EXACTLY as written, every one confirmed to have a real instructional video: ${exerciseVocabularyFor(p.equipment).join(", ")}.
 
+${coachLogSummary(state)}
 Numeric limits for this message: EXERCISE_CEILING = ${liveCap}. SESSION_LENGTH = ${p.sessionLength} min. TIGHTEST_SETS = ${tightestSetsRest.sets}. TIGHTEST_REST = ${tightestSetsRest.rest}s.`;
 }
 
