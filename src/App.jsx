@@ -911,9 +911,32 @@ export function coachReplyText(parsed, madeChange) {
 // claim; this line is the app's record, and it's the one that can't be wrong.
 // Returns "" when there's nothing worth stating, so an ordinary answer or a
 // plain nutrition change doesn't get a clunky tag on the end.
-export function coachChangeNote(flags, parsed, program) {
+// Which day a Coach one-time change is for. Omitted means the next scheduled
+// day, which is what the field meant before it existed, so a response that
+// doesn't set it behaves exactly as before. A value that IS set but doesn't
+// point at a real day is a failure, not something to guess around: guessing
+// is precisely how a Push change kept landing on Pull.
+export function resolveOverrideTarget(parsed, state) {
+  const dayCount = state?.program?.days?.length || 0;
+  if (dayCount === 0) return { dayIdx: null, valid: false };
+  const raw = parsed?.todayOverrideDayIndex;
+  if (raw === null || raw === undefined || raw === "") {
+    return { dayIdx: (state.logs?.workouts?.length || 0) % dayCount, valid: true };
+  }
+  const idx = coerceInt(raw);
+  if (idx === null || idx < 0 || idx >= dayCount) return { dayIdx: null, valid: false };
+  return { dayIdx: idx, valid: true };
+}
+
+export function coachChangeNote(flags, parsed, program, overrideDayIndex) {
   if (flags.hasOverride) {
-    return "Just for your next session — this one isn't saved to your program.";
+    // Names the day. "Just for your next session" was true of a change that
+    // had landed on Pull while the reply said Push, so it confirmed the wrong
+    // thing five times running. The app's record now says where it really went.
+    const day = Number.isInteger(overrideDayIndex) ? program?.days?.[overrideDayIndex] : null;
+    return day
+      ? `Just for your next ${day.name} workout — this one isn't saved to your program.`
+      : "Just for your next session — this one isn't saved to your program.";
   }
   if (flags.hasDayEdit) {
     const idx = coerceInt(parsed.programDayEdit.dayIndex);
@@ -1535,6 +1558,61 @@ export function overrideDayName(exercises) {
   const labels = [...new Set(groups.map((g) => MUSCLE_GROUP_LABELS[g] || g))];
   if (labels.length === 0) return "Today's Session";
   return `${labels.slice(0, 2).join("/")} Day`;
+}
+
+// Real report, and the root of a whole broken conversation: asked to make
+// Push (Shoulders/Chest Volume) "all dumbbells and 30 mins, for today only",
+// the Coach replied five times that it had done it. It never touched Push.
+// Every time, the workout landed on PULL — and Pull's title then changed to a
+// made-up "Chest/Shoulders Day" once started.
+//
+// The one-time override was just a list of exercises with NO day attached, and
+// it always applied to whichever day was next in the rotation. Pull was next.
+// So a one-time change to any other day was impossible, and the Coach kept
+// doing the only thing it could while describing what it had been asked for.
+//
+// It now carries its day (state.todayOverrideDayIdx). Overrides saved before
+// this existed have none stored, and keep the old rule — the next scheduled
+// day — so nothing already saved changes behaviour.
+export function overrideDayIdx(state) {
+  if (!Array.isArray(state?.todayOverride) || state.todayOverride.length === 0) return null;
+  const dayCount = state.program?.days?.length || 0;
+  if (dayCount === 0) return null;
+  const stored = state.todayOverrideDayIdx;
+  if (Number.isInteger(stored)) {
+    // A stored day that no longer exists (the split changed since) belongs
+    // nowhere. Falling back to "next scheduled" would drop it onto some other
+    // day — the exact bug this is fixing.
+    return stored >= 0 && stored < dayCount ? stored : null;
+  }
+  return (state.logs?.workouts?.length || 0) % dayCount;
+}
+
+// Whether finishing a workout on dayIdx uses up the one-time change. Only the
+// workout it was FOR does — finishing Pull mustn't throw away a change waiting
+// on Push. A legacy override (no day stored) keeps the old rule and always
+// clears, since its day is "whatever's next" and would otherwise drift onto a
+// different day the moment this workout is logged.
+export function overrideUsedUpBy(state, dayIdx) {
+  if (!Array.isArray(state?.todayOverride) || state.todayOverride.length === 0) return false;
+  if (!Number.isInteger(state.todayOverrideDayIdx)) return true;
+  return overrideAppliesTo(state, dayIdx) || overrideDayIdx(state) === null;
+}
+
+export function overrideAppliesTo(state, dayIdx) {
+  const idx = overrideDayIdx(state);
+  return idx !== null && idx === dayIdx;
+}
+
+// An override that knows its day just keeps that day's real name — renaming
+// Pull to "Chest/Shoulders Day" is exactly what made the bug look so baffling.
+// Only a legacy, dayless override still gets a name made up from its exercises.
+export function overrideDisplayName(state) {
+  const idx = overrideDayIdx(state);
+  if (idx === null) return null;
+  return Number.isInteger(state.todayOverrideDayIdx)
+    ? state.program.days[idx].name
+    : overrideDayName(state.todayOverride);
 }
 
 const DAY_TEMPLATES = {
@@ -4406,9 +4484,10 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   // no name of its own, so the preview card must derive one too — showing
   // the stale scheduled day's name/count here (before they even tap "Start
   // workout") was the same mismatch, just one screen earlier.
-  const hasTodayOverride = Array.isArray(state.todayOverride) && state.todayOverride.length > 0;
-  const nextDay = hasTodayOverride
-    ? { ...program.days[nextIdx], name: overrideDayName(state.todayOverride), exercises: state.todayOverride }
+  // Only when the one-time change actually belongs to the next day — one
+  // attached to some other day must not hijack this card.
+  const nextDay = overrideAppliesTo(state, nextIdx)
+    ? { ...program.days[nextIdx], name: overrideDisplayName(state), exercises: state.todayOverride }
     : program.days[nextIdx];
   const today = todayISO();
   const todayMeals = (logs.nutrition.find((d) => d.date === today) || { meals: [] }).meals;
@@ -4612,6 +4691,10 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
           // which is a fact. The Home tab still carries the start-your-next-
           // workout card, so nothing is lost by dropping the prediction here.
           const isLastDone = lastDoneDayName !== null && day.name === lastDoneDayName;
+          // Real report: "the changes were never made?" — asked five times,
+          // because nothing on screen showed which day a one-time change had
+          // actually gone onto. One glance here would have shown it on Pull.
+          const hasOneTimeChange = overrideAppliesTo(state, i);
           return (
             <Card
               key={i}
@@ -4631,8 +4714,13 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
                       LAST DONE {lastDoneLabel}
                     </span>
                   )}
+                  {hasOneTimeChange && (
+                    <span style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6, letterSpacing: 0.3 }}>
+                      ONE-TIME CHANGE
+                    </span>
+                  )}
                 </div>
-                <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{day.exercises.map((e) => e.name).join(" · ")}</div>
+                <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{(hasOneTimeChange ? state.todayOverride : day.exercises).map((e) => e.name).join(" · ")}</div>
               </div>
               {/* Decorative now — the whole card is the click target (was just
                   this small arrow before, an easy miss on mobile). */}
@@ -4717,7 +4805,9 @@ You have REAL control over both the training program AND the calorie/macro targe
 There are THREE different kinds of training requests — telling them apart matters, and it directly affects how long you take to respond (a real, measured problem: regenerating the full multi-day program when only one day actually changed made ordinary requests noticeably slower, and occasionally too slow to finish at all):
 1. PERMANENT change to ONE existing day only (e.g. "add abs to my workout," "swap squat for leg press," "give me more back volume on pull day," "my knees hurt in general, adjust leg day") — by far the most common case. Use "programDayEdit": {"dayIndex": <index into the CURRENT program's "days" array>, "day": {"name": "<string>", "exercises": [...]}} with ONLY that one day's full new exercise list. Leave "program" and "todayOverride" both null. Do NOT echo back the other days — they're untouched and the app keeps them exactly as they are, so re-sending them would only waste time regenerating identical content.
 2. PERMANENT change that's structural or spans MULTIPLE days at once (e.g. "change my split," "add a training day," "give me more back volume across the whole week," renaming/reorganizing days) — genuinely needs the full picture. Use "program" (the complete {"splitName", "days"} object, every day) and leave "programDayEdit" and "todayOverride" null.
-3. ONE-TIME swap for exactly ONE workout — their next session and nothing after it. The user says "today," "this session," "this workout," "just for now," or gives a reason that only affects one day (short on time today, a passing ache, a busy gym). Set "program" and "programDayEdit" both to null, and put ONLY the substituted exercises for that one session in "todayOverride". Never rename or permanently relabel a day for a one-time request.
+3. ONE-TIME swap for exactly ONE workout — their next session and nothing after it. The user says "today," "this session," "this workout," "just for now," or gives a reason that only affects one day (short on time today, a passing ache, a busy gym). Set "program" and "programDayEdit" both to null, put ONLY the substituted exercises for that one session in "todayOverride", and ALWAYS set "todayOverrideDayIndex" to the dayIndex of the day it's for — which can be ANY of their days, not just the next scheduled one. It's used the next time they start that day, then removed. Never rename or permanently relabel a day for a one-time request.
+
+Real report of why "todayOverrideDayIndex" is required: asked to make Push (Shoulders/Chest Volume) all-dumbbell for one session while Pull was next in the rotation, the change kept landing on Pull — and the reply said "Push" five times while the workout sat on Pull. Name the day by index, every time, and only say in "reply" the day you actually put in that field.
 
 "todayOverride" CANNOT cover more than one workout — it is used once and then thrown away. So any request that spans more than one session is NOT case 3, however temporary it sounds: "this week," "this month," "this winter," "for the next few weeks," "until my knee heals," "until I hit 180," "for my cut." Those are case 1 or case 2, a real change to the program. Real report: "I want to lock in this winter, make my program harder" was treated as a one-time swap, so it changed a single workout and told them so — the opposite of what they asked. If something is temporary but lasts longer than one session, change the program now; they can always ask you to undo it later, and the version history keeps the old one.
 
@@ -4738,7 +4828,7 @@ Worked example for reverting to the ORIGINAL — user says "go back to my origin
 In both worked examples above, even though most fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly explanation, written directly to the user — as brief as the situation genuinely allows, see the rule below>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false, "overrideCeiling": true or false}
+{"reply": "<a short, friendly explanation, written directly to the user — as brief as the situation genuinely allows, see the rule below>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "todayOverrideDayIndex": null or <number — the dayIndex this one-time change is for; required whenever "todayOverride" is set>, "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false, "overrideCeiling": true or false}
 
 Rules:
 - For a PERMANENT change (case 1 or 2 above), always build the new day(s) by editing the exact "Current program JSON" given in your context below — never reconstruct any of it from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the day(s) you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
@@ -4891,6 +4981,12 @@ export function coachDayContextText(state) {
     ? "Open right now: nothing — no workout in progress."
     : `Open right now: dayIndex ${openDayIndex} ("${days[openDayIndex].name}"), workout in progress, ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged.`);
   lines.push(`Next scheduled: dayIndex ${nextDayIndex} ("${days[nextDayIndex].name}").`);
+  // What the Coach was missing in the real transcript: a one-time change WAS
+  // applied (to Pull), and it answered "I didn't actually apply that yet."
+  const oIdx = overrideDayIdx(state);
+  lines.push(oIdx === null
+    ? "One-time change already set: none."
+    : `One-time change already set: on dayIndex ${oIdx} ("${days[oIdx].name}") — ${state.todayOverride.map((e) => e.name).join(", ")}.`);
   return lines.join("\n");
 }
 
@@ -4929,7 +5025,8 @@ const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their
 - "Their days, by dayIndex" is the authoritative list. When they name a day, match it to one of these and use that exact dayIndex. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day on that list, that IS the day: use its dayIndex and keep its real name. Only if they genuinely could mean two or more should you ask which, and then list the real day names so they can just pick. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.
 - "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
 - If that open workout has sets already logged, be careful: sets they've done are kept either way, but rewriting the whole day mid-session is disruptive and almost never wanted. Prefer "todayOverride", touch as few exercises as possible, and if what they asked for would replace the entire day, say what that does to their current session and ask first.
-- "Next scheduled" is what "today's workout" / "my next session" means. "todayOverride" only ever applies to THAT day — it cannot change any other day, so if they want a one-time change to a different day, say so rather than pretending.`;
+- "Next scheduled" is what "today's workout" / "my next session" means when they don't name a day. A one-time change can go on ANY day, though: name it with "todayOverrideDayIndex". If they name a day ("my push day", "push shoulder/volume"), use THAT day's index even when it isn't next.
+- "One-time change already set" tells you whether one exists and which day it's on. There is only ever one: setting a new "todayOverride" REPLACES it. Never tell them nothing has been applied when that line shows one, and never claim a change is on a day other than the one that line names. If what's set is on the wrong day, say which day it's actually on, then put it on the right one.`;
 
 // The program as the Coach needs to READ it. Every exercise's 4 form tips are
 // stripped: measured, they were 64% of the program JSON and ~1300 tokens of the
@@ -7267,9 +7364,19 @@ export default function App() {
         });
       }
       const flags = { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid };
-      const changeNote = intendedButInvalid ? "" : coachChangeNote(flags, parsed, stateRef.current.program);
-      const replyText = intendedButInvalid
-        ? "Sorry — that change didn't actually go through on my end. Mind asking again?"
+      const overrideTarget = hasOverride ? resolveOverrideTarget(parsed, stateRef.current) : null;
+      const overrideTargetInvalid = !!overrideTarget && !overrideTarget.valid;
+      if (overrideTargetInvalid) {
+        logError("Coach set a one-time change for a day that doesn't exist", {
+          stack: JSON.stringify(parsed).slice(0, 4000),
+          context: { type: "coach-override-bad-day", todayOverrideDayIndex: parsed.todayOverrideDayIndex },
+        });
+      }
+      const changeNote = intendedButInvalid || overrideTargetInvalid
+        ? ""
+        : coachChangeNote(flags, parsed, stateRef.current.program, overrideTarget?.dayIdx);
+      const replyText = intendedButInvalid || overrideTargetInvalid
+        ? "Sorry — that change didn't actually go through on my end. Mind asking again, and say which day?"
         : [coachReplyText(parsed, madeChange), changeNote].filter(Boolean).join(" ");
       const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
@@ -7379,6 +7486,11 @@ export default function App() {
         const normalizedOverride = hasOverride
           ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
           : null;
+        // Applied only when the day resolved; otherwise ...prev keeps whatever
+        // one-time change (and its day) was already there.
+        const overridePatch = hasOverride && !overrideTargetInvalid
+          ? { todayOverride: normalizedOverride, todayOverrideDayIdx: overrideTarget.dayIdx }
+          : {};
 
         // A real, non-restore change to program and/or targets: snapshot the
         // current version into history first so it can be reverted to later.
@@ -7418,13 +7530,13 @@ export default function App() {
           // day edit, and it failed) — don't record a history snapshot for
           // a change that never actually occurred.
           if (dayEditFailed && !hasValidTargets) {
-            return { ...prev, coachChat: finalWithReply, todayOverride: hasOverride ? normalizedOverride : prev.todayOverride };
+            return { ...prev, coachChat: finalWithReply, ...overridePatch };
           }
           return {
             ...prev,
             coachChat: finalWithReply,
             program: newProgram,
-            todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
+            ...overridePatch,
             // Deterministic backstop, same reasoning as the exercise-count
             // ceiling above — Coach computes its own calorie numbers
             // independently of calcTargets, so nothing enforced the same
@@ -7452,7 +7564,7 @@ export default function App() {
         return {
           ...prev,
           coachChat: withReply,
-          todayOverride: hasOverride ? normalizedOverride : prev.todayOverride,
+          ...overridePatch,
         };
       });
     } catch (e) {
@@ -7555,6 +7667,7 @@ export default function App() {
       logs: { workouts: [], nutrition: [], bodyweight: [{ date: todayISO(), weight: profile.weightLb }] },
       coachChat: DEFAULT_COACH_MESSAGES,
       todayOverride: null,
+      todayOverrideDayIdx: null,
       inProgressWorkout: null,
       coachUsage: null,
       programHistory: [],
@@ -7611,14 +7724,18 @@ export default function App() {
   // snapshotted into history so it's revertible like any other program change.
   function swapExercise(dayIdx, exIdx, newExerciseName, scope, skipVideoLookup) {
     persist((prev) => {
-      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
+      // Was "any override exists" — so with a one-time change sitting on one
+      // day, swapping an exercise on a DIFFERENT day edited that other day's
+      // list, and a "permanent" swap then wrote those wrong exercises into
+      // this day's program for good.
+      const hasOverride = overrideAppliesTo(prev, dayIdx);
       const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
       const newExercises = baseExercises.map((ex, i) =>
         i === exIdx ? { name: newExerciseName, sets: ex.sets, reps: ex.reps, rest: ex.rest, tips: tipsForExercise(newExerciseName), noVideoLookup: !!skipVideoLookup } : ex
       );
 
       if (scope === "today") {
-        return { ...prev, todayOverride: newExercises };
+        return { ...prev, todayOverride: newExercises, todayOverrideDayIdx: dayIdx };
       }
 
       const history = prev.programHistory || [];
@@ -7637,7 +7754,7 @@ export default function App() {
   // existing data.
   function cacheAlternatives(dayIdx, exIdx, alternatives) {
     persist((prev) => {
-      const hasOverride = Array.isArray(prev.todayOverride) && prev.todayOverride.length > 0;
+      const hasOverride = overrideAppliesTo(prev, dayIdx);
       const baseExercises = hasOverride ? prev.todayOverride : prev.program.days[dayIdx].exercises;
       const newExercises = baseExercises.map((ex, i) => (i === exIdx ? { ...ex, alternatives } : ex));
       if (hasOverride) return { ...prev, todayOverride: newExercises };
@@ -7711,7 +7828,17 @@ export default function App() {
     // reached this line. The frozen baseline is the only correct "prior".
     const durationSec = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
-    persist((prev) => ({ ...prev, logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] }, todayOverride: null, inProgressWorkout: null }));
+    // See overrideUsedUpBy: only the workout a one-time change was for uses it up.
+    const finishedDayIdx = session.dayIdx;
+    persist((prev) => {
+      const usedUp = overrideUsedUpBy(prev, finishedDayIdx);
+      return {
+        ...prev,
+        logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] },
+        inProgressWorkout: null,
+        ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null } : {}),
+      };
+    });
     setSession(null);
     setActiveTab("train");
   }
@@ -7951,16 +8078,11 @@ export default function App() {
     { key: "profile", label: "You", icon: User },
   ];
 
-  // todayOverride is a Coach one-time swap for "your next upcoming
-  // session" — same day-of-rotation math as Home/Train use to decide which
-  // card gets the NEXT pill. It was being applied to whichever dayIdx the
-  // active session actually pointed at, with no check that it was really
-  // that same day — so a stale override generated for legs kept getting
-  // overlaid onto push, back, or any other day the person actually picked,
-  // forcing them into a workout they never chose. Real report: "it took me
-  // to legs every time" no matter what was tapped.
-  const nextIdx = state.logs.workouts.length % state.program.days.length;
-  const sessionIsNextDay = session && session.dayIdx === nextIdx;
+  // Which day a one-time override belongs to is decided in exactly one place,
+  // overrideAppliesTo(). An earlier fix here stopped an override landing on
+  // whatever day was tapped ("it took me to legs every time") by pinning it
+  // to the next scheduled day — which then made a one-time change to any
+  // OTHER day impossible. Overrides now carry their own day.
 
   return (
     <div className="app-shell">
@@ -8086,8 +8208,8 @@ export default function App() {
           <span style={{ textAlign: "left" }}>
             <div style={{ fontSize: 9, fontWeight: 700, color: "#B9BEC6", letterSpacing: 1 }}>RESUME</div>
             <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>
-              {Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && state.inProgressWorkout.dayIdx === nextIdx
-                ? overrideDayName(state.todayOverride)
+              {overrideAppliesTo(state, state.inProgressWorkout.dayIdx)
+                ? overrideDisplayName(state)
                 : state.program.days[state.inProgressWorkout.dayIdx]?.name}
             </div>
           </span>
@@ -8138,11 +8260,11 @@ export default function App() {
       {session && state.program.days[session.dayIdx] && (
         <WorkoutSession
           day={
-            Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && sessionIsNextDay
-              ? { ...state.program.days[session.dayIdx], name: overrideDayName(state.todayOverride), exercises: state.todayOverride }
+            overrideAppliesTo(state, session.dayIdx)
+              ? { ...state.program.days[session.dayIdx], name: overrideDisplayName(state), exercises: state.todayOverride }
               : state.program.days[session.dayIdx]
           }
-          isOverride={Array.isArray(state.todayOverride) && state.todayOverride.length > 0 && sessionIsNextDay}
+          isOverride={overrideAppliesTo(state, session.dayIdx)}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
           logs={state.logs}
           resumedAt={session.resumedAt}

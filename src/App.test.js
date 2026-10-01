@@ -57,6 +57,11 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  overrideDayIdx,
+  overrideAppliesTo,
+  overrideDisplayName,
+  overrideUsedUpBy,
+  resolveOverrideTarget,
   profileChangeImpact,
   targetsDiff,
   changeSummarySentence,
@@ -1449,6 +1454,108 @@ describe("multi-session requests are never routed to the one-time override", () 
     const s = buildCoachStaticSystem();
     expect(s).toContain("want to lock in this winter, make my program harder");
     expect(s).toContain("so it's case 2");
+  });
+});
+
+// Real report, a whole conversation of it: asked to make Push (Shoulders/Chest
+// Volume) "all dumbbells and 30 mins, today only", the Coach said five times it
+// had. Every time the workout landed on PULL — the next day in the rotation —
+// and Pull's title changed to "Chest/Shoulders Day" once started. The one-time
+// override had no day attached and always went on whatever was next.
+describe("one-time changes belong to a specific day", () => {
+  // The real shape: five days, and four workouts logged so Pull (index 4) is next.
+  const program = { days: [
+    { name: "Push (Chest/Triceps/Shoulders)", exercises: [{ name: "Bench Press" }] },
+    { name: "Push (Shoulders/Chest Volume)", exercises: [{ name: "Overhead Press" }] },
+    { name: "Legs", exercises: [{ name: "Squat" }] },
+    { name: "Upper", exercises: [{ name: "Row" }] },
+    { name: "Pull (Back/Biceps + Conditioning)", exercises: [{ name: "Barbell Row" }] },
+  ] };
+  const logs = { workouts: [{}, {}, {}, {}] };
+  const dumbbellPush = [{ name: "Dumbbell Shoulder Press" }, { name: "Dumbbell Bench Press" }];
+
+  test("a change for Push stays on Push even though Pull is next", () => {
+    const state = { program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 1 };
+    expect(overrideDayIdx(state)).toBe(1);
+    expect(overrideAppliesTo(state, 1)).toBe(true);
+    // The bug: it applied to Pull.
+    expect(overrideAppliesTo(state, 4)).toBe(false);
+  });
+
+  test("it keeps the day's real name instead of inventing one", () => {
+    const state = { program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 1 };
+    expect(overrideDisplayName(state)).toBe("Push (Shoulders/Chest Volume)");
+  });
+
+  test("a legacy change saved with no day keeps the old rule — the next scheduled day", () => {
+    const state = { program, logs, todayOverride: dumbbellPush };
+    expect(overrideDayIdx(state)).toBe(4);
+    expect(overrideDisplayName(state)).not.toBe("Pull (Back/Biceps + Conditioning)"); // old derived-name behaviour preserved
+  });
+
+  test("a change whose day no longer exists goes nowhere, rather than drifting onto another day", () => {
+    const state = { program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 9 };
+    expect(overrideDayIdx(state)).toBe(null);
+    [0, 1, 2, 3, 4].forEach((i) => expect(overrideAppliesTo(state, i)).toBe(false));
+  });
+
+  test("no change set means no day", () => {
+    expect(overrideDayIdx({ program, logs, todayOverride: null })).toBe(null);
+    expect(overrideDayIdx({ program, logs, todayOverride: [] })).toBe(null);
+  });
+
+  test("finishing Pull does NOT use up a change waiting on Push", () => {
+    const state = { program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 1 };
+    expect(overrideUsedUpBy(state, 4)).toBe(false);
+    expect(overrideUsedUpBy(state, 1)).toBe(true);
+  });
+
+  test("a legacy change is used up by any finished workout, so it can't drift", () => {
+    expect(overrideUsedUpBy({ program, logs, todayOverride: dumbbellPush }, 2)).toBe(true);
+  });
+
+  test("an orphaned change is cleaned up by the next finished workout", () => {
+    expect(overrideUsedUpBy({ program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 9 }, 0)).toBe(true);
+  });
+
+  test("resolveOverrideTarget uses the day the Coach named", () => {
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: 1 }, { program, logs })).toEqual({ dayIdx: 1, valid: true });
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: "1" }, { program, logs })).toEqual({ dayIdx: 1, valid: true });
+  });
+
+  test("resolveOverrideTarget defaults to the next day when none is named, exactly as before", () => {
+    expect(resolveOverrideTarget({}, { program, logs })).toEqual({ dayIdx: 4, valid: true });
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: null }, { program, logs })).toEqual({ dayIdx: 4, valid: true });
+  });
+
+  test("a named day that doesn't exist is a failure, never a guess", () => {
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: 7 }, { program, logs }).valid).toBe(false);
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: -1 }, { program, logs }).valid).toBe(false);
+    expect(resolveOverrideTarget({ todayOverrideDayIndex: "push" }, { program, logs }).valid).toBe(false);
+  });
+
+  test("the confirmation names the day it really landed on", () => {
+    const note = coachChangeNote({ hasOverride: true }, { todayOverride: dumbbellPush }, program, 1);
+    expect(note).toContain("Push (Shoulders/Chest Volume)");
+    expect(note).not.toContain("Pull");
+  });
+
+  test("the Coach can see a change that's already set, and which day it's on", () => {
+    const text = coachDayContextText({ program, logs, todayOverride: dumbbellPush, todayOverrideDayIdx: 4 });
+    // In the transcript it answered "I didn't actually apply that yet" while
+    // one sat on Pull. Now it's told.
+    expect(text).toContain('One-time change already set: on dayIndex 4 ("Pull (Back/Biceps + Conditioning)")');
+    expect(text).toContain("Dumbbell Shoulder Press");
+    expect(coachDayContextText({ program, logs })).toContain("One-time change already set: none.");
+  });
+
+  test("the prompt requires the day on every one-time change", () => {
+    const st = buildCoachStaticSystem();
+    expect(st).toContain('"todayOverrideDayIndex"');
+    expect(st).toContain('ALWAYS set "todayOverrideDayIndex"');
+    expect(st).toContain("setting a new \"todayOverride\" REPLACES it");
+    // The old rule that made a change to any other day impossible is gone.
+    expect(st).not.toContain("it cannot change any other day");
   });
 });
 
