@@ -1430,6 +1430,28 @@ describe("targetsDiff and its wording", () => {
   });
 });
 
+// Real report: "lock in this winter, make my program harder" changed ONE
+// workout and said so. "this winter" read as temporary, and the one-time path
+// can only ever cover a single session.
+describe("multi-session requests are never routed to the one-time override", () => {
+  test("the prompt says a one-time swap covers exactly one workout", () => {
+    const s = buildCoachStaticSystem();
+    expect(s).toContain("ONE-TIME swap for exactly ONE workout");
+    expect(s).toContain('"todayOverride" CANNOT cover more than one workout');
+  });
+
+  test("it names the season- and week-long phrasings that used to be misread", () => {
+    const s = buildCoachStaticSystem();
+    ["this week", "this month", "this winter", "until I hit 180"].forEach((phrase) => expect(s).toContain(phrase));
+  });
+
+  test("the exact real request is a worked example, resolved as a whole-program change", () => {
+    const s = buildCoachStaticSystem();
+    expect(s).toContain("want to lock in this winter, make my program harder");
+    expect(s).toContain("so it's case 2");
+  });
+});
+
 describe("profile notes reach both AI prompts", () => {
   test("buildProgramGenSystem includes the client's notes verbatim when present", () => {
     const system = buildProgramGenSystem({ ...baseProfile, notes: "Prefer an upper/lower split, no cable machine at my gym" });
