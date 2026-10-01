@@ -80,6 +80,7 @@ import {
   detectCoachInsight,
   claudeChat,
   estimateCostCents,
+  applyAiUsage,
   currentUsageCents,
   budgetAllows,
   setAiBudgetContext,
@@ -3634,6 +3635,32 @@ describe("claudeChat", () => {
 });
 
 describe("AI usage budget math", () => {
+  // Real report: reset -> redo the quiz -> crash screen, every time, which
+  // locked the app's own owner out. Onboarding's AI call reported usage while
+  // state was still null, and null.aiUsage threw during render.
+  test("applyAiUsage with no state yet returns it unchanged instead of throwing", () => {
+    expect(() => applyAiUsage(null, 5)).not.toThrow();
+    expect(applyAiUsage(null, 5)).toBe(null);
+    expect(applyAiUsage(undefined, 5)).toBe(undefined);
+  });
+
+  test("applyAiUsage adds onto today's running total and keeps everything else", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const prev = { profile: { a: 1 }, logs: { workouts: [1, 2] }, aiUsage: { day: today, dailyCostCents: 3, month: today.slice(0, 7), monthlyCostCents: 10 } };
+    const next = applyAiUsage(prev, 2);
+    expect(next.aiUsage.dailyCostCents).toBe(5);
+    expect(next.aiUsage.monthlyCostCents).toBe(12);
+    // Nothing else is touched — in particular, never the logs.
+    expect(next.logs).toBe(prev.logs);
+    expect(next.profile).toBe(prev.profile);
+  });
+
+  test("applyAiUsage starts a fresh total for an account that has never spent anything", () => {
+    const next = applyAiUsage({ profile: {} }, 4);
+    expect(next.aiUsage.dailyCostCents).toBe(4);
+    expect(next.aiUsage.monthlyCostCents).toBe(4);
+  });
+
   test("estimateCostCents applies real Sonnet 5 pricing ($2/1M input, $10/1M output)", () => {
     expect(estimateCostCents(1_000_000, 0)).toBeCloseTo(200); // $2.00 = 200 cents
     expect(estimateCostCents(0, 1_000_000)).toBeCloseTo(1000); // $10.00 = 1000 cents

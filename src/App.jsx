@@ -311,6 +311,42 @@ export function currentUsageCents(aiUsage) {
   };
 }
 
+// Real report, and it locked the app's own owner out of their account: reset
+// everything -> redo the quiz -> "Something went wrong", every time, forever.
+//
+// resetAll() sets state to null, and onboarding's program generation is an AI
+// call like any other, so it reported its token usage back through
+// recordAiUsage -> persist(updater) -> updater(null) -> null.aiUsage, a
+// TypeError thrown inside a setState updater, i.e. during render, which the
+// ErrorBoundary turns into the crash screen. Nothing ever got saved, so a
+// reload returned to the quiz and the loop repeated.
+//
+// This was never specific to reset: state is also null for a BRAND-NEW
+// account, so every signup whose program generation actually succeeded hit
+// the same crash. (An earlier comment in this file records a report of
+// exactly that — "a user opened the app fresh and hit Something went wrong" —
+// which was treated as corrupted local state at the time.)
+//
+// Returning prev unchanged is the right answer rather than inventing a state
+// object to hang it on: there is genuinely nowhere to record usage before an
+// account has any state, and the one uncounted call is a single onboarding
+// generation.
+export function applyAiUsage(prev, costCents) {
+  if (!prev) return prev;
+  const today = todayISO();
+  const month = today.slice(0, 7);
+  const { dailyCostCents, monthlyCostCents } = currentUsageCents(prev.aiUsage);
+  return {
+    ...prev,
+    aiUsage: {
+      day: today,
+      dailyCostCents: dailyCostCents + costCents,
+      month,
+      monthlyCostCents: monthlyCostCents + costCents,
+    },
+  };
+}
+
 export function budgetAllows(aiUsage) {
   const { dailyCostCents, monthlyCostCents } = currentUsageCents(aiUsage);
   return dailyCostCents < TRIAL_DAILY_COST_CAP_CENTS && monthlyCostCents < TRIAL_MONTHLY_COST_CAP_CENTS;
@@ -7037,7 +7073,22 @@ export default function App() {
 
   function persist(updater) {
     setState((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
+      let next;
+      try {
+        next = typeof updater === "function" ? updater(prev) : updater;
+      } catch (e) {
+        // A throw in here happens during render, so React hands it to the
+        // ErrorBoundary and the whole app becomes the crash screen — which is
+        // how one null dereference locked someone out of their account
+        // permanently (see applyAiUsage). One failed update is recoverable;
+        // being unable to open the app is not. Keep the previous state, log
+        // the real stack, and let everything else carry on.
+        logError("persist() updater threw — state left unchanged", {
+          stack: e?.stack || String(e),
+          context: { type: "persist-updater-threw" },
+        });
+        return prev;
+      }
       // Real, unconfirmed report (twice now): a day's logged meals, and
       // separately a weigh-in, disappeared — both times noticed "after an
       // update." Standing rule since: an update must never reset a user's
@@ -7081,20 +7132,11 @@ export default function App() {
   // before the call. currentUsageCents' own day/month reset logic decides
   // whether to add onto today's number or start a fresh one.
   function recordAiUsage(costCents) {
-    persist((prev) => {
-      const today = todayISO();
-      const month = today.slice(0, 7);
-      const { dailyCostCents, monthlyCostCents } = currentUsageCents(prev.aiUsage);
-      return {
-        ...prev,
-        aiUsage: {
-          day: today,
-          dailyCostCents: dailyCostCents + costCents,
-          month,
-          monthlyCostCents: monthlyCostCents + costCents,
-        },
-      };
-    });
+    // Checked before persist() rather than only inside the updater, so a call
+    // made while there's no state (mid-onboarding, or straight after a reset)
+    // doesn't also trigger a pointless save of null over the top.
+    if (!stateRef.current) return;
+    persist((prev) => applyAiUsage(prev, costCents));
   }
 
   // Lives at the App level (not inside the Coach tab component) so an in-flight
