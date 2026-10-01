@@ -5095,6 +5095,20 @@ function FormattedText({ text }) {
   );
 }
 
+// Real ask: "make it so it responds and says something like working on that
+// now, that way it doesn't look like it takes forever." A grey "Coach is
+// thinking…" status line reads as a loading screen; a reply bubble that
+// appears the instant they hit send reads as a coach who's answering. Every
+// phrasing is true for a question AND a change request, since the app can't
+// know which one it is until the real reply comes back. Picked by how many
+// messages there are, so it holds still for the whole wait instead of
+// flickering, but doesn't repeat the same line every single turn.
+const COACH_ACKNOWLEDGEMENTS = ["On it — give me a sec.", "Got it, working on that now.", "Let me take a look.", "Working on that now."];
+export function coachAcknowledgement(messageCount) {
+  const n = Math.max(0, Number(messageCount) || 0);
+  return COACH_ACKNOWLEDGEMENTS[n % COACH_ACKNOWLEDGEMENTS.length];
+}
+
 export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -5183,9 +5197,23 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
             </div>
           ))
         )}
+        {/* Shown the instant they send, styled exactly like a real reply,
+            and NOT saved into the chat — it's replaced by the real answer,
+            so it never gets re-sent to the AI as context or costs anything. */}
         {loading && (
-          <div style={{ alignSelf: "flex-start", color: T.steelDark, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <Loader2 size={14} className="spin" /> Coach is thinking…
+          <div style={{ alignSelf: "flex-start", maxWidth: "85%" }} aria-live="polite">
+            <div style={{
+              background: T.card, color: T.ink, border: `1px solid ${T.steel}`,
+              padding: "10px 14px", borderRadius: 14, borderBottomLeftRadius: 4,
+              fontSize: 14, lineHeight: 1.4,
+            }}>
+              {coachAcknowledgement(list.length)}
+              <div style={{ display: "flex", gap: 4, marginTop: 8 }} aria-label="Coach is typing">
+                {[0, 1, 2].map((d) => (
+                  <span key={d} style={{ width: 6, height: 6, borderRadius: 3, background: T.steelDark, animation: `pulseDot 1.2s ease-in-out ${d * 0.18}s infinite` }} />
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>

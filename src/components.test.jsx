@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, dateToISO, todayISO } from "./App.jsx";
+import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, coachAcknowledgement, dateToISO, todayISO } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -2312,6 +2312,41 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Weekly review"));
     await user.click(screen.getByText("Monthly review"));
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+});
+
+// Real ask: "make it so it responds and says something like working on that
+// now, that way it doesn't look like it takes forever in the video."
+describe("<Coach /> answers the instant you send", () => {
+  const messages = [{ role: "assistant", text: "Hey" }, { role: "user", text: "make my program harder" }];
+
+  test("while waiting, a reply bubble appears right away instead of a loading line", () => {
+    render(<Coach messages={messages} loading={true} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} />);
+    expect(screen.getByText(coachAcknowledgement(messages.length))).toBeInTheDocument();
+    expect(screen.getByLabelText("Coach is typing")).toBeInTheDocument();
+    expect(screen.queryByText("Coach is thinking…")).not.toBeInTheDocument();
+  });
+
+  test("it disappears once the real answer is in, rather than piling up in the chat", () => {
+    const { rerender } = render(<Coach messages={messages} loading={true} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} />);
+    const ack = coachAcknowledgement(messages.length);
+    expect(screen.getByText(ack)).toBeInTheDocument();
+    const answered = [...messages, { role: "assistant", text: "Done — made every day harder." }];
+    rerender(<Coach messages={answered} loading={false} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} />);
+    expect(screen.queryByText(ack)).not.toBeInTheDocument();
+    expect(screen.getByText("Done — made every day harder.")).toBeInTheDocument();
+  });
+
+  test("nothing shows when the coach isn't working on anything", () => {
+    render(<Coach messages={messages} loading={false} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} />);
+    expect(screen.queryByLabelText("Coach is typing")).not.toBeInTheDocument();
+  });
+
+  test("the wording holds still for one wait but varies between turns", () => {
+    expect(coachAcknowledgement(4)).toBe(coachAcknowledgement(4));
+    const seen = new Set([0, 1, 2, 3].map(coachAcknowledgement));
+    expect(seen.size).toBeGreaterThan(1);
+    expect(() => coachAcknowledgement(undefined)).not.toThrow();
   });
 });
 
