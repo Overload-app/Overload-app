@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  resumeTiming,
+  MAX_UNATTENDED_MS,
   overrideDayIdx,
   overrideAppliesTo,
   overrideDisplayName,
@@ -1556,6 +1558,95 @@ describe("one-time changes belong to a specific day", () => {
     expect(st).toContain("setting a new \"todayOverride\" REPLACES it");
     // The old rule that made a change to any other day impossible is gone.
     expect(st).not.toContain("it cannot change any other day");
+  });
+});
+
+// Real ask: "if i don't have the tab open or i x out of the app the workout
+// timer stops — make it run in the background." Every reopen used to restart
+// the clock from that moment, throwing away the time the app was closed.
+describe("resumeTiming — the workout clock keeps running while you're away", () => {
+  const MIN = 60 * 1000;
+  const start = Date.parse("2026-10-01T18:00:00Z");
+
+  test("closing the app for 10 minutes mid-workout still counts those 10 minutes", () => {
+    // Started at 18:00, last checkmark 18:20 (20 min in), app closed, reopened 18:30.
+    const saved = { activeSeconds: 20 * 60, savedAt: new Date(start + 20 * MIN).toISOString(), runningSince: start, runningBaseline: 0 };
+    const now = start + 30 * MIN;
+    const t = resumeTiming(saved, now);
+    expect(accumulateActiveSeconds(t.baselineActiveSeconds, t.resumedAt, now)).toBe(30 * 60);
+  });
+
+  test("it keeps counting after you resume, from the true start, without double-counting", () => {
+    const saved = { activeSeconds: 20 * 60, savedAt: new Date(start + 20 * MIN).toISOString(), runningSince: start, runningBaseline: 0 };
+    const t = resumeTiming(saved, start + 30 * MIN);
+    // Finishing at 18:45 records 45 minutes — not 45 + the 20 already saved.
+    expect(accumulateActiveSeconds(t.baselineActiveSeconds, t.resumedAt, start + 45 * MIN)).toBe(45 * 60);
+  });
+
+  test("time banked from an earlier stretch carries through", () => {
+    // 15 min done earlier; this stretch began at 18:00; last touched 18:05.
+    const saved = { activeSeconds: 20 * 60, savedAt: new Date(start + 5 * MIN).toISOString(), runningSince: start, runningBaseline: 15 * 60 };
+    const now = start + 10 * MIN;
+    const t = resumeTiming(saved, now);
+    expect(accumulateActiveSeconds(t.baselineActiveSeconds, t.resumedAt, now)).toBe(25 * 60);
+  });
+
+  // Why the clock used to stop at all: a workout saved and finished days
+  // later must not log as days long.
+  test("walked away for longer than the limit: the clock stops at the last thing they did", () => {
+    const saved = { activeSeconds: 40 * 60, savedAt: new Date(start + 40 * MIN).toISOString(), runningSince: start, runningBaseline: 0 };
+    const nextDay = start + 24 * 60 * MIN;
+    const t = resumeTiming(saved, nextDay);
+    expect(accumulateActiveSeconds(t.baselineActiveSeconds, t.resumedAt, nextDay)).toBe(40 * 60);
+  });
+
+  test("the limit is generous enough for a real workout's longest gap", () => {
+    expect(MAX_UNATTENDED_MS).toBeGreaterThanOrEqual(60 * MIN);
+    const saved = { activeSeconds: 30 * 60, savedAt: new Date(start + 30 * MIN).toISOString(), runningSince: start, runningBaseline: 0 };
+    const now = start + 30 * MIN + MAX_UNATTENDED_MS - MIN; // just inside the limit
+    const t = resumeTiming(saved, now);
+    expect(t.resumedAt).toBe(start);
+  });
+
+  test("a workout saved before this change resumes exactly as it used to", () => {
+    const legacy = { activeSeconds: 20 * 60, savedAt: new Date(start).toISOString() };
+    const now = start + 30 * MIN;
+    expect(resumeTiming(legacy, now)).toEqual({ resumedAt: now, baselineActiveSeconds: 20 * 60 });
+  });
+
+  test("nothing saved at all starts from zero", () => {
+    expect(resumeTiming(null, start)).toEqual({ resumedAt: start, baselineActiveSeconds: 0 });
+  });
+});
+
+// Real ask: "make it so if the AI really has to, it asks questions to clarify.
+// e.g. if i say make my push day dumbbells, it has no idea which push day i'm
+// talking about since i have two."
+describe("the Coach asks which day only when it genuinely can't tell", () => {
+  const st = buildCoachStaticSystem();
+
+  test("it asks when a request fits two of their days, listing the real names", () => {
+    expect(st).toContain("If it fits TWO OR MORE");
+    expect(st).toContain("Which push day — Push (Chest/Triceps/Shoulders) or Push (Shoulders/Chest Volume)?");
+  });
+
+  test("asking means changing nothing — never a guess plus a question", () => {
+    expect(st).toContain('set "program", "programDayEdit", "todayOverride" and "targets" ALL to null');
+    expect(st).toContain("Never apply your best guess and ask at the same time");
+  });
+
+  test("'today' alone doesn't pick the day — the exact phrasing that went wrong", () => {
+    expect(st).toContain('"Today" / "for today" does not settle it by itself');
+  });
+
+  test("it doesn't ask when it doesn't have to", () => {
+    expect(st).toContain("If what they said fits exactly ONE of their days, that's the day. Don't ask.");
+    expect(st).toContain('"all my push days"');
+    expect(st).toContain("Don't ask a second clarifying question");
+  });
+
+  test("it's settled before choosing what kind of change to make", () => {
+    expect(st.indexOf("WHICH DAY — settle this BEFORE")).toBeLessThan(st.indexOf("There are THREE different kinds of training requests"));
   });
 });
 

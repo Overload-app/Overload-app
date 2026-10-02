@@ -4802,6 +4802,13 @@ The user will chat with you to adjust their training (swap exercises, change int
 
 You have REAL control over both the training program AND the calorie/macro targets shown in the app's Fuel section — you are not just giving verbal advice, your JSON response actually updates what the person sees and uses. So whenever a change in goal, activity, or body direction would logically change their calorie/macro needs, actually recalculate and set "targets" — don't just describe the change in words and leave the numbers stale. This includes cases where they only asked about training but the goal shift you made (e.g. from a fat-loss deficit to a muscle-building surplus) means the targets are now wrong and should move with it.
 
+WHICH DAY — settle this BEFORE you pick one of the three kinds of request below. Real report of getting it wrong: "make my push day full dumbbells and only 30 mins for today only", from someone with TWO push days ("Push (Chest/Triceps/Shoulders)" and "Push (Shoulders/Chest Volume)"). It was applied without asking, to a day they never meant, and it took five more messages to untangle.
+- If what they said fits exactly ONE of their days, that's the day. Don't ask.
+- If it fits TWO OR MORE ("my push day" with two push days, "leg day" with Legs A and Legs B) and nothing else they said picks one out, ASK. One short sentence that lists the real day names so they can just reply with one, e.g. "Which push day — Push (Chest/Triceps/Shoulders) or Push (Shoulders/Chest Volume)?" In that response set "program", "programDayEdit", "todayOverride" and "targets" ALL to null. Never apply your best guess and ask at the same time; a guess that's wrong is the thing that cost them five messages.
+- "Today" / "for today" does not settle it by itself. If the next scheduled day is one of the days that fits, that's the one they mean. If it isn't, they're doing something other than the rotation today, so ask which.
+- Don't ask when you don't need to. A request that clearly covers every matching day ("all my push days", "both leg days") needs no question — change them all. Ask only when the answer would change what you actually change; anything you can sensibly decide yourself, decide, and say what you did in "reply".
+- Once they've answered, do it. Don't ask a second clarifying question about something you could reasonably have decided.
+
 There are THREE different kinds of training requests — telling them apart matters, and it directly affects how long you take to respond (a real, measured problem: regenerating the full multi-day program when only one day actually changed made ordinary requests noticeably slower, and occasionally too slow to finish at all):
 1. PERMANENT change to ONE existing day only (e.g. "add abs to my workout," "swap squat for leg press," "give me more back volume on pull day," "my knees hurt in general, adjust leg day") — by far the most common case. Use "programDayEdit": {"dayIndex": <index into the CURRENT program's "days" array>, "day": {"name": "<string>", "exercises": [...]}} with ONLY that one day's full new exercise list. Leave "program" and "todayOverride" both null. Do NOT echo back the other days — they're untouched and the app keeps them exactly as they are, so re-sending them would only waste time regenerating identical content.
 2. PERMANENT change that's structural or spans MULTIPLE days at once (e.g. "change my split," "add a training day," "give me more back volume across the whole week," renaming/reorganizing days) — genuinely needs the full picture. Use "program" (the complete {"splitName", "days"} object, every day) and leave "programDayEdit" and "todayOverride" null.
@@ -5825,6 +5832,34 @@ export function exercisePR(logs, name) {
 // shouldn't count as a three-day-long workout. Pure so the accumulation
 // itself is unit-testable without faking real timers end to end; the caller
 // supplies "now" and the timestamp the current active stretch began.
+// Real ask: "if i don't have the tab open or i x out of the app the workout
+// timer stops — make it run in the background." It did stop: every reopen
+// started the clock fresh from that moment, deliberately, so a workout saved
+// today and finished in three days wouldn't log as three days long. That threw
+// away the time spent switching to music, answering a text, or iOS killing the
+// app mid-set — which is most of the reason anyone leaves the screen.
+//
+// Now the clock keeps running across ANY exit — switching apps, closing the
+// app, Save & exit, going to the Coach. The three-days case is handled by a
+// different rule instead: if nothing was touched for MAX_UNATTENDED_MS, they
+// walked away, and the clock stops at the last thing they did.
+export const MAX_UNATTENDED_MS = 2 * 60 * 60 * 1000;
+
+export function resumeTiming(inProgress, nowMs) {
+  const saved = inProgress?.activeSeconds || 0;
+  // Saved before this existed (no running clock stored): resume as before.
+  if (!inProgress || !Number.isFinite(inProgress.runningSince)) {
+    return { resumedAt: nowMs, baselineActiveSeconds: saved };
+  }
+  const lastActivity = new Date(inProgress.savedAt).getTime();
+  if (!Number.isFinite(lastActivity) || nowMs - lastActivity > MAX_UNATTENDED_MS) {
+    // Walked away: activeSeconds is exact up to their last action. Stop there.
+    return { resumedAt: nowMs, baselineActiveSeconds: saved };
+  }
+  // Still the same workout — the clock never stopped.
+  return { resumedAt: inProgress.runningSince, baselineActiveSeconds: inProgress.runningBaseline || 0 };
+}
+
 export function accumulateActiveSeconds(priorActiveSeconds, resumedAtMs, nowMs) {
   const thisStretch = Math.max(0, Math.round((nowMs - resumedAtMs) / 1000));
   return (priorActiveSeconds || 0) + thisStretch;
@@ -7709,10 +7744,9 @@ export default function App() {
     // the live state currently says), makes activeSeconds a pure function
     // of (baseline, resumedAt, now) — safe to recompute any number of
     // times without ever compounding.
-    const baseline = resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === dayIdx
-      ? (state.inProgressWorkout.activeSeconds || 0)
-      : 0;
-    setSession({ dayIdx, resume: !!resume, resumedAt: Date.now(), baselineActiveSeconds: baseline });
+    const resuming = resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === dayIdx;
+    const timing = resuming ? resumeTiming(state.inProgressWorkout, Date.now()) : { resumedAt: Date.now(), baselineActiveSeconds: 0 };
+    setSession({ dayIdx, resume: !!resume, ...timing });
   }
 
   // Applies a chosen swap — this step itself is always instant/offline,
@@ -7781,7 +7815,9 @@ export default function App() {
   // itself gets overwritten by every save and would otherwise compound.
   function saveWorkoutProgress(dayIdx, sets, rest) {
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds } }));
+    // runningSince/runningBaseline keep the clock going while they're away —
+    // see resumeTiming.
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds, runningSince: session.resumedAt, runningBaseline: session.baselineActiveSeconds } }));
     setSession(null);
   }
 
@@ -7796,7 +7832,7 @@ export default function App() {
   function autoSaveWorkoutProgress(dayIdx, sets, rest) {
     if (!session) return;
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds } }));
+    persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds, runningSince: session.resumedAt, runningBaseline: session.baselineActiveSeconds } }));
   }
 
   // "Don't like any of these? Talk to the Coach" — same save as
@@ -8246,7 +8282,7 @@ export default function App() {
                 // first checkmark's autosave overwrote the saved total with
                 // just this stretch, and Finish recorded only the time since
                 // resuming.
-                setSession({ dayIdx: idx, resume: true, resumedAt: Date.now(), baselineActiveSeconds: state.inProgressWorkout.activeSeconds || 0 });
+                setSession({ dayIdx: idx, resume: true, ...resumeTiming(state.inProgressWorkout, Date.now()) });
               }}
               style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}
             >
