@@ -25,6 +25,8 @@ export default defineConfig({
         skipWaiting: true,
         clientsClaim: true,
         cleanupOutdatedCaches: true,
+        // Workout reminders and rest alerts (public/push-sw.js).
+        importScripts: ["push-sw.js"],
         runtimeCaching: [
           {
             // Supabase reads: try the network first (fresh data when

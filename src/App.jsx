@@ -12,6 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
+import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -7536,7 +7537,53 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onEditQuiz }) {
+function NotificationSettings({ push, onSetPushEnabled }) {
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  async function toggle(kind) {
+    setError("");
+    setBusy(kind);
+    try {
+      await onSetPushEnabled(kind, !push?.[kind]);
+    } catch (e) {
+      setError(e?.message || "Couldn't turn that on.");
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <>
+      <TickRule label="Notifications" />
+      <Card>
+        {[["reminders", "Workout reminders", "A nudge in the evening on days you haven't trained yet."], ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."]].map(([kind, label, hint], i) => (
+          <div key={kind} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 12, color: T.steelDark }}>{hint}</div>
+            </div>
+            <button
+              role="switch"
+              aria-checked={!!push?.[kind]}
+              aria-label={`Toggle ${label.toLowerCase()}`}
+              disabled={busy !== null}
+              onClick={() => toggle(kind)}
+              style={{
+                width: 42, height: 24, borderRadius: 12, border: "none", cursor: "pointer", padding: 2, flexShrink: 0,
+                background: push?.[kind] ? T.charge : T.steel, opacity: busy === kind ? 0.6 : 1,
+                display: "flex", justifyContent: push?.[kind] ? "flex-end" : "flex-start",
+              }}
+            >
+              <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", display: "block" }} />
+            </button>
+          </div>
+        ))}
+        {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "8px 0 0" }}>{error}</p>}
+      </Card>
+    </>
+  );
+}
+
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -7667,6 +7714,8 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
+      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} />}
+
       <TickRule label="Support & legal" />
       <Card>
         <a href="mailto:support@overload-app.com" style={{ display: "block", fontSize: 13, color: T.ink, fontWeight: 600, padding: "8px 0", textDecoration: "none" }}>Contact support</a>
@@ -7728,6 +7777,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
+  const lastRestAlertRef = useRef(null);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [finishedSummary, setFinishedSummary] = useState(null);
@@ -8665,6 +8715,13 @@ export default function App() {
   // the moment the tab is suspended.
   function autoSaveWorkoutProgress(dayIdx, sets, rest) {
     if (!session) return;
+    // A new rest just started (or got +15s): ask the server to buzz the
+    // phone when it ends, in case the app is closed by then. It checks the
+    // saved rest again before sending, so Skip / the next set cancel it.
+    if (rest?.endAt && rest.endAt !== lastRestAlertRef.current && state?.push?.restAlerts) {
+      lastRestAlertRef.current = rest.endAt;
+      requestRestAlert(rest.endAt);
+    }
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds, runningSince: session.resumedAt, runningBaseline: session.baselineActiveSeconds } }));
   }
@@ -8825,6 +8882,21 @@ export default function App() {
       ].slice(0, PROGRAM_HISTORY_LIMIT),
     }));
     setRebuildingProgram(false);
+  }
+
+  // Workout reminders / rest alerts. Turning one on asks for notification
+  // permission and saves this device with the account; turning it off just
+  // stops sending (the device stays saved for the other switch).
+  async function setPushEnabled(kind, enabled) {
+    if (!enabled) {
+      persist((prev) => ({ ...prev, push: { ...prev.push, [kind]: false } }));
+      return;
+    }
+    const sub = await subscribeForPush();
+    persist((prev) => ({
+      ...prev,
+      push: { ...prev.push, subscriptions: withSubscription(prev.push, sub), [kind]: true, tz: deviceTimeZone() },
+    }));
   }
 
   function setReviewEnabled(cadence, enabled) {
@@ -9033,7 +9105,7 @@ export default function App() {
               onDeleteReview={deleteReview}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onEditQuiz={() => setQuizEditorOpen(true)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">
