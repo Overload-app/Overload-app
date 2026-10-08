@@ -6,3 +6,6 @@ dev-dist
 .DS_Store
 .vercel
 .env*
+
+# Coach eval reports (may contain real AI replies)
+evals/results/

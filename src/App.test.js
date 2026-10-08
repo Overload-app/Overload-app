@@ -1861,6 +1861,20 @@ describe("coachApiMessages — what the AI actually receives", () => {
     expect(coachApiMessages([{ role: "user", text: "hi" }])).toEqual([{ role: "user", content: "hi" }]);
   });
 
+  test("only the most recent messages are re-sent, and it still starts with the user", () => {
+    const chat = [];
+    for (let i = 0; i < 50; i++) chat.push({ role: "user", text: `q${i}` }, { role: "assistant", text: `a${i}` });
+    const out = coachApiMessages(chat, 30);
+    expect(out.length).toBeLessThanOrEqual(30);
+    expect(out[0].role).toBe("user");
+    expect(out[out.length - 1].content).toBe("a49");
+  });
+
+  test("a window that would start on an assistant reply skips forward to the next user message", () => {
+    const chat = [{ role: "user", text: "q0" }, { role: "assistant", text: "a0" }, { role: "user", text: "q1" }, { role: "assistant", text: "a1" }];
+    expect(coachApiMessages(chat, 3).map((m) => m.content)).toEqual(["q1", "a1"]);
+  });
+
   test("the opening greeting is dropped, since the conversation must start with the user", () => {
     expect(coachApiMessages([{ role: "assistant", text: "Hey" }])).toEqual([]);
   });

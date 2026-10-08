@@ -5434,12 +5434,22 @@ export function applyCoachUndo(prev) {
 // tell an old constraint from a new one, and a real one-time dumbbell workout
 // came back shortened by a "30 mins" said about an earlier workout. Messages
 // saved before this have no timestamp and are sent exactly as before.
-export function coachApiMessages(chat) {
+// How much of the conversation is re-sent with each message. Real ask:
+// "minimize API use — I spent $0.36 today barely using the app." Every message
+// re-sent the last 60 chat messages at full input price; 30 is still fifteen
+// exchanges, far more than any real follow-up refers back to, and the Coach
+// separately gets the whole current program, logs and settings every time, so
+// nothing about the person's actual state is lost. The chat on screen still
+// keeps 60.
+export const COACH_API_HISTORY_LIMIT = 30;
+
+export function coachApiMessages(chat, limit = COACH_API_HISTORY_LIMIT) {
+  const recent = chat.length > limit ? chat.slice(chat.length - limit) : chat;
   // The API requires the conversation to start with a "user" turn — drop the
   // assistant's opening greeting bubble (and anything before the first user message).
-  const firstUserIdx = chat.findIndex((m) => m.role === "user");
+  const firstUserIdx = recent.findIndex((m) => m.role === "user");
   if (firstUserIdx === -1) return [];
-  return chat.slice(firstUserIdx).map((m) => {
+  return recent.slice(firstUserIdx).map((m) => {
     if (m.role !== "user") return { role: "assistant", content: m.text };
     const sent = m.at ? new Date(m.at) : null;
     return { role: "user", content: sent && !Number.isNaN(sent.getTime()) ? `[Sent ${dateToISO(sent)}] ${m.text}` : m.text };
