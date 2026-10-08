@@ -981,6 +981,33 @@ export function sanitizeExercises(list) {
     }));
 }
 
+// A whole AI-generated program (onboarding, or a rebuild after editing quiz
+// answers), checked before it can become someone's plan. Returns the cleaned,
+// normalized program, or null if it isn't usable — the caller then keeps the
+// rule-based program, which is exhaustively tested on its own. The Coach's
+// replies were already validated; a brand-new account's very first program
+// wasn't, so nameless exercises, "three" sets, an empty day, or 4 days for
+// someone who picked 3 would have been saved as their plan.
+export function acceptGeneratedProgram(parsed, profile, priorProgram) {
+  let days = parsed?.days;
+  if (typeof days === "string") { try { days = JSON.parse(days); } catch (e) { return null; } }
+  if (!Array.isArray(days) || days.length === 0) return null;
+  const wanted = Number(profile?.daysPerWeek);
+  if (Number.isInteger(wanted) && wanted > 0 && days.length !== wanted) return null;
+  const cleaned = [];
+  for (const d of days) {
+    const name = typeof d?.name === "string" ? d.name.trim() : "";
+    const exercises = sanitizeExercises(d?.exercises);
+    if (!name || exercises.length === 0) return null;
+    cleaned.push({
+      ...d,
+      name,
+      exercises: normalizeExerciseCount(exercises, profile.sessionLength, profile.experience, profile.equipment, profile.injuries, false, { dayName: name }),
+    });
+  }
+  return normalizeProgramTips({ splitName: deriveSplitName(cleaned) || parsed?.splitName || "Custom", days: cleaned }, priorProgram);
+}
+
 // Cleans a Coach reply against what the app can actually apply, BEFORE any of
 // it is acted on. Returns the cleaned reply plus the parts that had to be
 // thrown away, so the reply shown can say so instead of claiming success.
@@ -3425,17 +3452,14 @@ export function Onboarding({ onComplete }) {
         messages: [{ role: "user", content: "Design my personalized training program now." }],
       });
       const parsed = parseJSONLoose(raw);
-      if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
-        // Deterministic backstop, not just a prompt request — the AI is
-        // told a hard ceiling and a guaranteed minimum, but a prompt
-        // instruction is never a hard guarantee on its own. Enforces both
-        // on every day regardless of whether the model actually complied.
-        const normalizedDays = parsed.days.map((d) => ({
-          ...d,
-          exercises: normalizeExerciseCount(d.exercises || [], profile.sessionLength, profile.experience, profile.equipment, profile.injuries, false, { dayName: d.name }),
-        }));
-        program = { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays };
-      }
+      // Validated and normalized as a whole — see acceptGeneratedProgram. An
+      // unusable one keeps the rule-based program, and is logged.
+      const accepted = acceptGeneratedProgram(parsed, profile);
+      if (accepted) program = accepted;
+      else logError("Onboarding AI program was unusable; used rule-based fallback", {
+        stack: String(raw || "").slice(0, 4000),
+        context: { type: "onboarding-ai-unusable", daysPerWeek: profile.daysPerWeek },
+      });
     } catch (e) {
       // Still falls back to the rule-based program below — a new account
       // must never be left with nothing. But this used to be SILENT, and
@@ -8590,21 +8614,14 @@ export default function App() {
         messages: [{ role: "user", content: "Design my personalized training program now." }],
       });
       const parsed = parseJSONLoose(raw);
-      if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
-        // Same deterministic backstops onboarding applies — the prompt states
-        // a ceiling and a minimum, but a prompt is never a guarantee. Split
-        // name derived from the day names the same way, rather than trusting
-        // the model's own label. priorProgram is passed so an exercise being
-        // carried over keeps its real tips instead of regenerating them.
-        const normalizedDays = parsed.days.map((d) => ({
-          ...d,
-          exercises: normalizeExerciseCount(d.exercises || [], newProfile.sessionLength, newProfile.experience, newProfile.equipment, newProfile.injuries, false, { dayName: d.name }),
-        }));
-        program = normalizeProgramTips(
-          { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays },
-          priorProgram
-        );
-      }
+      // Same validation as onboarding (acceptGeneratedProgram). priorProgram
+      // lets an exercise being carried over keep its real tips.
+      const accepted = acceptGeneratedProgram(parsed, newProfile, priorProgram);
+      if (accepted) program = accepted;
+      else logError("Quiz-edit AI program was unusable; used rule-based fallback", {
+        stack: String(raw || "").slice(0, 4000),
+        context: { type: "quiz-edit-ai-unusable", daysPerWeek: newProfile.daysPerWeek },
+      });
     } catch (e) {
       logError("Quiz-edit program rebuild fell back to the rule-based generator", {
         stack: e?.stack || e?.message || String(e),

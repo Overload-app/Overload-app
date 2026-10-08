@@ -57,6 +57,7 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  acceptGeneratedProgram,
   mealNumber,
   sanitizeMeal,
   extractPartialReply,
@@ -2045,6 +2046,41 @@ describe("meal numbers are always real numbers", () => {
 
   test("sanitizeMeal rounds, fills a missing name, and never saves text", () => {
     expect(sanitizeMeal({ name: "  ", cal: "450.6", protein: "", carb: 60.4, fat: "x" })).toMatchObject({ name: "Meal", cal: 451, protein: 0, carb: 60, fat: 0 });
+  });
+});
+
+// A brand-new account's very first program was never validated the way Coach
+// replies are. An unusable one now falls back to the rule-based builder.
+describe("acceptGeneratedProgram — a new user's first program", () => {
+  const profile = { daysPerWeek: 3, sessionLength: 60, experience: "intermediate", equipment: "full", injuries: ["none"] };
+  const ex = (name, extra = {}) => ({ name, sets: 3, reps: "8-12", rest: 90, tips: ["t"], ...extra });
+  const day = (name, n = 4) => ({ name, exercises: ["Barbell Bench Press", "Overhead Press", "Cable Fly", "Tricep Pushdown", "Lat Pulldown"].slice(0, n).map((x) => ex(x)) });
+
+  test("a good program is accepted, cleaned and given tips", () => {
+    const p = acceptGeneratedProgram({ days: [day("Push"), day("Pull"), day("Legs")] }, profile);
+    expect(p.days.map((d) => d.name)).toEqual(["Push", "Pull", "Legs"]);
+    p.days.forEach((d) => d.exercises.forEach((e) => expect(e.tips.length).toBeGreaterThan(0)));
+  });
+
+  test("a different number of days than they picked is rejected", () => {
+    expect(acceptGeneratedProgram({ days: [day("A"), day("B"), day("C"), day("D")] }, profile)).toBe(null);
+  });
+
+  test("an empty or nameless day is rejected", () => {
+    expect(acceptGeneratedProgram({ days: [day("A"), { name: "B", exercises: [] }, day("C")] }, profile)).toBe(null);
+    expect(acceptGeneratedProgram({ days: [day("A"), { ...day("B"), name: " " }, day("C")] }, profile)).toBe(null);
+  });
+
+  test("broken exercises are cleaned rather than saved", () => {
+    const p = acceptGeneratedProgram({ days: [{ name: "A", exercises: [ex("Barbell Squat", { sets: "three" }), { sets: 3 }, ex("Leg Press"), ex("Leg Curl"), ex("Calf Raise")] }, day("B"), day("C")] }, profile);
+    expect(p.days[0].exercises.map((e) => e.name)).not.toContain(undefined);
+    expect(p.days[0].exercises[0].sets).toBe(3);
+  });
+
+  test("days sent as a JSON string are read, and nonsense is rejected", () => {
+    expect(acceptGeneratedProgram({ days: JSON.stringify([day("A"), day("B"), day("C")]) }, profile).days.length).toBe(3);
+    expect(acceptGeneratedProgram(null, profile)).toBe(null);
+    expect(acceptGeneratedProgram({ days: "nope" }, profile)).toBe(null);
   });
 });
 
