@@ -183,6 +183,38 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(legs[2].tips).toEqual(["drive through the toes"]);
   }, 20000);
 
+  // Real ask: an Undo button on every Coach change.
+  test("Undo puts the program back exactly, and marks the change as undone", async () => {
+    const user = userEvent.setup();
+    const before = baseState();
+    await send(user, "swap squat for hack squat", toolReply({ ...blank, reply: "Swapped it.", programDayEdit: { dayIndex: 2, day: { name: "Legs", exercises: [ex("Hack Squat"), ex("Romanian Deadlift"), ex("Leg Press"), ex("Leg Curl")] } } }));
+    expect(stored.program.days[2].exercises[0].name).toBe("Hack Squat");
+    await user.click(screen.getByRole("button", { name: "Undo this change" }));
+    expect(stored.program).toEqual(before.program);
+    expect(stored.lastCoachChange).toBe(null);
+    expect(screen.getByText("Undone")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo this change" })).not.toBeInTheDocument();
+    // Their own logs are untouched by an undo too.
+    expect(stored.logs).toEqual(before.logs);
+  }, 20000);
+
+  test("Undo also takes back a one-time workout and new calorie targets", async () => {
+    const user = userEvent.setup();
+    await send(user, "dumbbells only today, and more calories", toolReply({ ...blank, reply: "Done.", todayOverride: [ex("Dumbbell Row"), ex("Dumbbell Curl"), ex("Dumbbell Pullover"), ex("Renegade Row")], todayOverrideDayIndex: 1, targets: { calories: 3100, protein: 180, carbs: 380, fat: 85 } }));
+    expect(stored.todayOverride).not.toBe(null);
+    expect(stored.targets.calories).toBe(3100);
+    await user.click(screen.getByRole("button", { name: "Undo this change" }));
+    expect(stored.todayOverride).toBe(null);
+    expect(stored.targets.calories).toBe(2800);
+  }, 20000);
+
+  test("a plain question offers no Undo — nothing changed", async () => {
+    const user = userEvent.setup();
+    await send(user, "how do I do an RDL", toolReply({ ...blank, reply: "Hinge at the hips, soft knees, bar close to your legs." }));
+    expect(screen.queryByRole("button", { name: "Undo this change" })).not.toBeInTheDocument();
+    expect(stored.lastCoachChange ?? null).toBe(null);
+  }, 20000);
+
   for (const [name, response, expectation] of CASES) {
     test(name, async () => {
       const before = baseState();

@@ -5355,6 +5355,55 @@ export function buildCoachSystem(state) {
   return buildCoachStaticSystem() + "\n\n" + buildCoachDynamicSystem(state);
 }
 
+// Real ask: an Undo button on every Coach change. Mistakes this month all
+// needed a follow-up message ("undo that"), and a wrong answer there cost
+// another round. Wraps the Coach's save: if the program, the targets or a
+// one-time workout actually changed, remembers exactly what they were before
+// and tags the reply with an id the Undo button looks for. Works off what
+// changed, not which branch ran, so a branch added later can't forget it.
+export function withUndoSnapshot(prev, next) {
+  if (!prev || !next) return next;
+  const changed = next.program !== prev.program || next.targets !== prev.targets
+    || next.todayOverride !== prev.todayOverride || next.todayOverrideDayIdx !== prev.todayOverrideDayIdx;
+  if (!changed) return next;
+  const id = `c${Date.now()}`;
+  const chat = [...(next.coachChat || [])];
+  const last = chat.length - 1;
+  if (last >= 0 && chat[last].role === "assistant") chat[last] = { ...chat[last], changeId: id };
+  return {
+    ...next,
+    coachChat: chat,
+    lastCoachChange: {
+      id,
+      at: new Date().toISOString(),
+      before: { program: prev.program, targets: prev.targets, todayOverride: prev.todayOverride ?? null, todayOverrideDayIdx: prev.todayOverrideDayIdx ?? null },
+    },
+  };
+}
+
+// Puts everything back exactly as it was before the last Coach change. The
+// version being undone goes into history first, so "redo" is still one Coach
+// message away ("put that back").
+export function applyCoachUndo(prev) {
+  const change = prev?.lastCoachChange;
+  if (!change) return prev;
+  const history = [
+    { program: prev.program, targets: prev.targets, savedAt: new Date().toISOString() },
+    ...(prev.programHistory || []),
+  ].slice(0, PROGRAM_HISTORY_LIMIT);
+  const chat = (prev.coachChat || []).map((m) => (m.changeId === change.id ? { ...m, undone: true } : m));
+  return {
+    ...prev,
+    program: change.before.program,
+    targets: change.before.targets,
+    todayOverride: change.before.todayOverride,
+    todayOverrideDayIdx: change.before.todayOverrideDayIdx,
+    programHistory: history,
+    lastCoachChange: null,
+    coachChat: trimCoachChat([...chat, { role: "assistant", text: "Undone — everything's back to how it was before that change." }]),
+  };
+}
+
 // The conversation as the AI receives it. The system prompt has long told the
 // Coach that "each user message is prefixed with the date it was actually
 // sent" so a one-off like "30 minutes today" could be recognised as stale a
@@ -5482,7 +5531,7 @@ export function coachAcknowledgement(messageCount) {
   return COACH_ACKNOWLEDGEMENTS[n % COACH_ACKNOWLEDGEMENTS.length];
 }
 
-export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit }) {
+export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit, lastChangeId, onUndo }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
@@ -5567,6 +5616,21 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
               }}>
                 <FormattedText text={m.text} />
               </div>
+              {/* One tap, and only on the most recent change — older ones
+                  can still be undone by asking the Coach. */}
+              {m.role === "assistant" && m.changeId && m.changeId === lastChangeId && !m.undone && onUndo && (
+                <button
+                  onClick={onUndo}
+                  disabled={loading}
+                  aria-label="Undo this change"
+                  style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.chargeDeep, fontSize: 12, fontWeight: 700, padding: "6px 2px 0", cursor: loading ? "default" : "pointer" }}
+                >
+                  <RotateCcw size={12} /> Undo
+                </button>
+              )}
+              {m.role === "assistant" && m.undone && (
+                <div style={{ fontSize: 11, color: T.steelDark, padding: "6px 2px 0" }}>Undone</div>
+              )}
             </div>
           ))
         )}
@@ -7583,11 +7647,15 @@ export default function App() {
     persist((prev) => applyAiUsage(prev, costCents));
   }
 
+  function undoLastCoachChange() {
+    persist((prev) => applyCoachUndo(prev));
+  }
+
   // Lives at the App level (not inside the Coach tab component) so an in-flight
   // request keeps running — and its reply gets saved — even if the person
   // switches to Train, Fuel, etc. while waiting on it.
   function clearCoachChat() {
-    persist((prev) => ({ ...prev, coachChat: DEFAULT_COACH_MESSAGES }));
+    persist((prev) => ({ ...prev, coachChat: DEFAULT_COACH_MESSAGES, lastCoachChange: null }));
   }
 
   const COACH_DAILY_LIMIT = 30;
@@ -7729,7 +7797,9 @@ export default function App() {
         console.warn("Message looked like a revert request but nothing changed (no restoreIndex, restoreOriginal, program, or targets set). Full parsed response: " + JSON.stringify(parsed));
       }
 
-      persist((prev) => {
+      // Wrapped so any branch below that changes something leaves an Undo
+      // behind — see withUndoSnapshot.
+      persist((prev) => withUndoSnapshot(prev, ((prev) => {
         const history = prev.programHistory || [];
 
         // Restoring the permanently-kept original — always reliable,
@@ -7902,7 +7972,7 @@ export default function App() {
           coachChat: withReply,
           ...overridePatch,
         };
-      });
+      })(prev)));
     } catch (e) {
       console.error("Coach send failed:", e);
       // Real report: this generic message showed up in place of the usual
@@ -8069,8 +8139,10 @@ export default function App() {
         i === exIdx ? { name: newExerciseName, sets: ex.sets, reps: ex.reps, rest: ex.rest, tips: tipsForExercise(newExerciseName), noVideoLookup: !!skipVideoLookup } : ex
       );
 
+      // Anything else that changes the program retires the Coach's Undo —
+      // restoring a snapshot from before would silently throw this away.
       if (scope === "today") {
-        return { ...prev, todayOverride: newExercises, todayOverrideDayIdx: dayIdx };
+        return { ...prev, todayOverride: newExercises, todayOverrideDayIdx: dayIdx, lastCoachChange: null };
       }
 
       const history = prev.programHistory || [];
@@ -8079,7 +8151,7 @@ export default function App() {
         ...history,
       ].slice(0, PROGRAM_HISTORY_LIMIT);
       const newDays = prev.program.days.map((d, i) => (i === dayIdx ? { ...d, exercises: newExercises } : d));
-      return { ...prev, program: { ...prev.program, days: newDays }, programHistory: newHistory };
+      return { ...prev, program: { ...prev.program, days: newDays }, programHistory: newHistory, lastCoachChange: null };
     });
   }
 
@@ -8173,7 +8245,7 @@ export default function App() {
         ...prev,
         logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] },
         inProgressWorkout: null,
-        ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null } : {}),
+        ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null, lastCoachChange: null } : {}),
       };
     });
     setSession(null);
@@ -8250,6 +8322,7 @@ export default function App() {
       ...prev,
       profile: newProfile,
       ...(applyTargets ? { targets: { ...prev.targets, ...calcTargets(newProfile) } } : {}),
+      ...(applyTargets || rebuildProgram ? { lastCoachChange: null } : {}),
     }));
     if (!rebuildProgram) return;
     // Generated only AFTER they accepted it, so rejecting a rebuild never
@@ -8493,7 +8566,7 @@ export default function App() {
               onOpenHistoryEntry={(idx) => { setHistoryEditorInitialIdx(idx); setHistoryEditorOpen(true); }}
             />
           )}
-          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} lastChangeId={state.lastCoachChange?.id} onUndo={undoLastCoachChange} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && (
             <Progress

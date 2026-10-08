@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  withUndoSnapshot,
+  applyCoachUndo,
   coachApiMessages,
   buildMealSuggestionSystem,
   mealSuggestionUserMessage,
@@ -1874,6 +1876,34 @@ describe("withTips restores alternatives for kept exercises too", () => {
     const prior = [{ name: "Bench Press", tips: ["t"], alternatives: ["Push-Up"] }];
     const [out] = withTips([{ name: "Bench Press", tips: ["x"], alternatives: ["Floor Press"] }], prior);
     expect(out.alternatives).toEqual(["Floor Press"]);
+  });
+});
+
+describe("Coach Undo", () => {
+  const program = { days: [{ name: "Legs", exercises: [{ name: "Squat" }] }] };
+  const targets = { calories: 2800 };
+  const prev = { program, targets, todayOverride: null, todayOverrideDayIdx: null, coachChat: [{ role: "user", text: "x" }], programHistory: [] };
+
+  test("a turn that changed nothing leaves no Undo behind", () => {
+    const next = { ...prev, coachChat: [...prev.coachChat, { role: "assistant", text: "answer" }] };
+    expect(withUndoSnapshot(prev, next)).toBe(next);
+  });
+
+  test("a change remembers exactly what was there before, and tags the reply", () => {
+    const newProgram = { days: [{ name: "Legs", exercises: [{ name: "Hack Squat" }] }] };
+    const next = withUndoSnapshot(prev, { ...prev, program: newProgram, coachChat: [...prev.coachChat, { role: "assistant", text: "Swapped." }] });
+    expect(next.lastCoachChange.before.program).toBe(program);
+    expect(next.coachChat[1].changeId).toBe(next.lastCoachChange.id);
+  });
+
+  test("undoing restores it, records the undone version in history, and can't be done twice", () => {
+    const newProgram = { days: [{ name: "Legs", exercises: [{ name: "Hack Squat" }] }] };
+    const changed = withUndoSnapshot(prev, { ...prev, program: newProgram, coachChat: [...prev.coachChat, { role: "assistant", text: "Swapped." }] });
+    const undone = applyCoachUndo(changed);
+    expect(undone.program).toBe(program);
+    expect(undone.programHistory[0].program).toBe(newProgram);
+    expect(undone.lastCoachChange).toBe(null);
+    expect(applyCoachUndo(undone)).toBe(undone);
   });
 });
 
