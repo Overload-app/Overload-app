@@ -876,7 +876,10 @@ export function normalizeCoachStructuredFields(parsed) {
 export async function requestCoachResponse(system, messages, onPartialReply) {
   const raw = await claudeChat({ system, messages, onPartialReply });
   try {
-    return { parsed: normalizeCoachStructuredFields(parseJSONLoose(raw)), raw, parseFailed: false };
+    const parsed = normalizeCoachStructuredFields(parseJSONLoose(raw));
+    // Plain text from the very first read, so the blank-reply retry check
+    // below never calls .trim() on an object.
+    return { parsed: { ...parsed, reply: asText(parsed?.reply) }, raw, parseFailed: false };
   } catch (parseErr) {
     const extractedReply = extractReplyOnly(raw);
     console.error("Coach JSON parse failed. Raw response was: " + raw + (extractedReply ? "\nExtracted reply text (not shown to the user, since we can't verify what state change it was describing): " + extractedReply : ""));
@@ -1024,6 +1027,9 @@ export function acceptGeneratedProgram(parsed, profile, priorProgram) {
 export function sanitizeCoachResponse(parsed, state) {
   const out = { ...parsed };
   const rejected = [];
+  // A non-string reply (an object, a number) used to throw inside the
+  // "reply.trim()" check and surface as "couldn't reach the coach".
+  out.reply = asText(out.reply);
 
   if (out.todayOverride != null) {
     const clean = sanitizeExercises(out.todayOverride);
@@ -5292,6 +5298,30 @@ export function coachDayContext(state) {
   return { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout };
 }
 
+// AI-written text, made safe to put on screen. React throws on an object or
+// array rendered as text, and that throw takes down the whole tab — so an AI
+// reply with, say, an "overview" that came back as an object would be saved
+// and then break the Progress tab every time it opened. Strings and numbers
+// pass through; anything else becomes "".
+export function asText(v) {
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return "";
+}
+
+// An AI meal estimate (photo, describe, or a suggestion) in the exact shape
+// the review card and addMeal expect.
+export function cleanAiMeal(m) {
+  return {
+    name: asText(m?.name) || "Meal",
+    note: asText(m?.note),
+    cal: Math.round(mealNumber(m?.cal)),
+    protein: Math.round(mealNumber(m?.protein)),
+    carb: Math.round(mealNumber(m?.carb)),
+    fat: Math.round(mealNumber(m?.fat)),
+  };
+}
+
 // A meal's calories or a macro as a real number. Found while testing: the
 // meal-photo review card lets someone clear a box, which saved "" — and an AI
 // estimate can come back as "500" — and day totals are built with +, so one
@@ -5985,7 +6015,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         messages: [{ role: "user", content: text }],
       });
       const parsed = parseJSONLoose(raw);
-      setPhotoResult(parsed);
+      setPhotoResult(cleanAiMeal(parsed));
       setDescribeText("");
       setShowDescribe(false);
     } catch (err) {
@@ -6008,7 +6038,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       const userMsg = mealSuggestionUserMessage(profile, remaining);
       const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
       const parsed = parseJSONLoose(raw);
-      setSuggestions(parsed.suggestions || []);
+      setSuggestions((Array.isArray(parsed?.suggestions) ? parsed.suggestions : []).map(cleanAiMeal));
     } catch (e) {
       setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Couldn't get suggestions — try again.");
     } finally {
@@ -6047,7 +6077,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         ] }],
       });
       const parsed = parseJSONLoose(raw);
-      setPhotoResult(parsed);
+      setPhotoResult(cleanAiMeal(parsed));
     } catch (err) {
       if (err.offline) {
         // Connectivity dropped between the check above and the request
@@ -6728,8 +6758,8 @@ function ReviewCard({ label, entry, onDelete }) {
       </div>
       {open && (
         <div style={{ marginTop: 8 }}>
-          {entry.overview ? (
-            <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{entry.overview}</p>
+          {asText(entry.overview) ? (
+            <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{asText(entry.overview)}</p>
           ) : (
             <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
               {entry.summary?.workoutCount ?? 0} workout{entry.summary?.workoutCount === 1 ? "" : "s"} logged this period.
@@ -6737,7 +6767,7 @@ function ReviewCard({ label, entry, onDelete }) {
           )}
           {entry.advice && entry.advice.length > 0 && (
             <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {entry.advice.map((tip, i) => (
+              {entry.advice.map(asText).filter(Boolean).map((tip, i) => (
                 <li key={i} style={{ fontSize: 12.5, color: T.steelDark, marginBottom: 3 }}>{tip}</li>
               ))}
             </ul>
@@ -7598,8 +7628,8 @@ export default function App() {
             messages: [{ role: "user", content: "Write my review now." }],
           });
           const parsed = parseJSONLoose(raw);
-          overview = parsed?.overview || null;
-          advice = Array.isArray(parsed?.advice) ? parsed.advice : [];
+          overview = asText(parsed?.overview) || null;
+          advice = Array.isArray(parsed?.advice) ? parsed.advice.map(asText).filter(Boolean) : [];
         } catch (e) {
           // No connection or the call failed — still record a real,
           // data-only review below rather than losing the period

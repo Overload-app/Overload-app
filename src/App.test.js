@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  asText,
+  cleanAiMeal,
   acceptGeneratedProgram,
   mealNumber,
   sanitizeMeal,
@@ -2081,6 +2083,21 @@ describe("acceptGeneratedProgram — a new user's first program", () => {
     expect(acceptGeneratedProgram({ days: JSON.stringify([day("A"), day("B"), day("C")]) }, profile).days.length).toBe(3);
     expect(acceptGeneratedProgram(null, profile)).toBe(null);
     expect(acceptGeneratedProgram({ days: "nope" }, profile)).toBe(null);
+  });
+});
+
+describe("AI text is always safe to put on screen", () => {
+  test("strings and numbers pass, anything else becomes empty", () => {
+    expect(asText("  hi ")).toBe("hi");
+    expect(asText(42)).toBe("42");
+    expect(asText({ a: 1 })).toBe("");
+    expect(asText(["a"])).toBe("");
+    expect(asText(null)).toBe("");
+    expect(asText(NaN)).toBe("");
+  });
+
+  test("an AI meal always comes out drawable and addable", () => {
+    expect(cleanAiMeal({ name: { en: "x" }, cal: "450", note: ["a"] })).toEqual({ name: "Meal", note: "", cal: 450, protein: 0, carb: 0, fat: 0 });
   });
 });
 

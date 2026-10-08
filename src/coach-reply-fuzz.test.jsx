@@ -144,6 +144,8 @@ const CASES = [
   ["HTTP 500", { ok: false, status: 500, json: async () => ({ error: { message: "Overloaded" } }) }, "no-change"],
   ["HTTP 429 rate limit", { ok: false, status: 429, json: async () => ({ error: { message: "rate_limit" } }) }, "no-change"],
   ["names with qualifiers and emoji", toolReply({ ...blank, reply: "Updated.", programDayEdit: { dayIndex: 2, day: { name: "Legs 🦵", exercises: [ex("Barbell Squat (High Bar)"), ex("Leg Press - Wide Stance"), ex("Leg Curl 🔥"), ex("Calf Raise")] } } }), "change"],
+  ["a reply that's an object, not text", toolReply({ ...blank, reply: { text: "Done" } }), "no-change"],
+  ["a reply that's a number", toolReply({ ...blank, reply: 42 }), "no-change"],
   ["a 40-exercise day", toolReply({ ...blank, reply: "Updated.", overrideCeiling: true, programDayEdit: { dayIndex: 2, day: { name: "Legs", exercises: Array.from({ length: 40 }, (_, i) => ex(`Leg Exercise ${i}`)) } } }), "change"],
 ];
 
@@ -236,6 +238,31 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(meal).toMatchObject({ name: "Bagel with cream cheese", cal: 450, protein: 12, carb: 60, fat: 0 });
     // And the rest of the app can still add it up.
     expect(screen.queryByText(/0450|450450/)).not.toBeInTheDocument();
+  }, 20000);
+
+  test("a saved review whose text is the wrong shape doesn't break the Progress tab", async () => {
+    const user = userEvent.setup();
+    stored.reviews = { weekly: [{ generatedAt: "2026-10-01T00:00:00.000Z", summary: { workoutCount: 3 }, overview: { text: "bad" }, advice: [{ tip: 1 }, "Sleep more."], seen: true }], monthly: [] };
+    stored.reviewsEnabled = { weekly: false, monthly: false };
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Progress$/ }));
+    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    expect(screen.getByText("Sleep more.")).toBeInTheDocument();
+  }, 20000);
+
+  test("a meal estimate with a non-text name doesn't break the Fuel tab", async () => {
+    const user = userEvent.setup();
+    nextResponse = toolReply({ name: { en: "Bagel" }, cal: 450, protein: 12, carb: 60, fat: 16, note: ["one", "bagel"] });
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Fuel$/ }));
+    await user.click(screen.getByText("Describe"));
+    await user.type(screen.getByPlaceholderText(/What did you eat/), "a bagel");
+    await user.click(screen.getByText("Estimate"));
+    await screen.findByText("Add to log");
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   }, 20000);
 
   for (const [name, response, expectation] of CASES) {
