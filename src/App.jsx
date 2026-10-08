@@ -1349,7 +1349,16 @@ export async function fetchSimilarExercises(name, equipment, injuries) {
   });
   let res;
   try {
-    res = await fetch(`/api/exercise-alternatives?${params.toString()}`);
+    // The endpoint now requires a signed-in session (it calls Claude on this
+    // project's key), the same way /api/claude does.
+    let accessToken = null;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      accessToken = sessionData?.session?.access_token || null;
+    } catch (e) {}
+    res = await fetch(`/api/exercise-alternatives?${params.toString()}`, {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    });
   } catch (networkErr) {
     // Same reasoning as claudeChat/fetchExerciseGif — a genuine fetch()
     // throw (not just a bad HTTP status) is the real connectivity signal.

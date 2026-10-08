@@ -15,6 +15,14 @@ import { createClient } from "@supabase/supabase-js";
 // can't show a demo for — exactly the reported problem ("it is still giving
 // alternatives that don't have instruction videos"). A new key retires them
 // instead of serving them forever.
+// Deliberately duplicated rather than imported across endpoint files, same as
+// create-portal-session.js — each function stays self-contained.
+export function bearerToken(req) {
+  const header = (req && req.headers && (req.headers.authorization || req.headers.Authorization)) || "";
+  const match = /^Bearer\s+(.+)$/i.exec(String(header).trim());
+  return match ? match[1].trim() : null;
+}
+
 export function cacheKey(name, equipment) {
   return `v2|${name.trim().toLowerCase()}|${equipment}`;
 }
@@ -50,6 +58,31 @@ export default async function handler(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "Server is missing the ANTHROPIC_API_KEY environment variable." });
+  }
+
+  // Found in a pre-launch security pass: this endpoint called Claude on this
+  // project's key for anyone who found its address — and since the cache is
+  // keyed on the exercise name, varying the name walked straight past it, so
+  // anyone could run up unlimited API spend. /api/claude already required a
+  // signed-in session; this now does too. The swap picker falls back to its
+  // built-in list whenever this lookup fails, so the worst case is the
+  // offline list, never a broken screen.
+  const token = bearerToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "Not signed in." });
+  }
+  const authUrl = process.env.SUPABASE_URL;
+  const authKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!authUrl || !authKey) {
+    return res.status(500).json({ error: "Server is missing required environment variables." });
+  }
+  try {
+    const { data, error } = await createClient(authUrl, authKey).auth.getUser(token);
+    if (error || !data || !data.user) {
+      return res.status(401).json({ error: "Not signed in." });
+    }
+  } catch (e) {
+    return res.status(401).json({ error: "Not signed in." });
   }
 
   const name = (req.query.name || "").toString().trim();
