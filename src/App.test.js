@@ -333,10 +333,14 @@ describe("filterPool", () => {
     expect(filtered.legs).not.toContain("Back Squat");
   });
 
-  test("never empties a group entirely, even if every exercise would match", () => {
+  // Reversed on purpose. Testing every quiz combination showed this fallback
+  // handed the excluded exercises straight back: elbow pain got curls, a home
+  // trainee with a shoulder injury got push-ups. A day that ends up short is
+  // topped up with SAFE exercises by fillShortDay instead.
+  test("empties a group when every exercise in it hits the injury, rather than giving them back", () => {
     const allElbowPool = { biceps: ["Barbell Curl", "Hammer Curl"] };
     const filtered = filterPool(allElbowPool, ["elbows"]);
-    expect(filtered.biceps.length).toBeGreaterThan(0);
+    expect(filtered.biceps).toEqual([]);
   });
 
   test("doesn't touch unrelated groups", () => {

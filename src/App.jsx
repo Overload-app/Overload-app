@@ -1199,9 +1199,15 @@ export function filterPool(pool, injuries) {
   const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
   const out = {};
   Object.keys(pool).forEach((group) => {
-    let list = pool[group].filter((name) => !terms.some((t) => name.toLowerCase().includes(t)));
-    if (list.length === 0) list = pool[group];
-    out[group] = list;
+    // Found by testing every quiz combination: when an injury ruled out
+    // EVERY exercise in a group, this used to fall back to the whole
+    // unfiltered group — so the exercises it had just excluded came straight
+    // back. A home trainee with a shoulder injury got push-ups and dips on
+    // every push day; elbow pain got curls and skull crushers. That fallback
+    // also fed the swap picker and the workout top-up. A group with nothing
+    // safe left is now empty: a shorter day beats one that aggravates the
+    // injury they told us about.
+    out[group] = pool[group].filter((name) => !terms.some((t) => name.toLowerCase().includes(t)));
   });
   return out;
 }
@@ -1257,12 +1263,31 @@ function coreNameTokens(name) {
 // happen to share a word. A plain exact-string check missed exactly this
 // case (the real report below); this catches it without needing to hand-
 // maintain a list of every stance/equipment qualifier word.
+// Words that turn one exercise into a genuinely DIFFERENT one when added to
+// its name — a different angle, grip, stance or target muscle, not just a
+// more specific label for the same lift. Found by testing every quiz
+// combination: plain "one name's words are inside the other's" matching
+// treated Push-Up and Pike Push-Up, Dumbbell Curl and Dumbbell Hammer Curl,
+// Dumbbell Fly and Dumbbell Rear Delt Fly, Squat and Bulgarian Split Squat
+// as the same exercise. This matching drives PRs and the "last time"
+// numbers, so a hammer curl could show up as someone's curl record.
+const DISTINGUISHING_WORDS = new Set([
+  "incline", "decline", "pike", "diamond", "hammer", "rear", "reverse", "split", "front",
+  "sumo", "romanian", "stiff", "close", "wide", "pause", "paused", "deficit", "tap", "jump",
+  "hack", "goblet", "bulgarian", "overhead", "lateral", "preacher", "concentration", "spider",
+  "zottman", "sissy", "nordic", "pistol", "archer", "kneeling", "renegade", "pendlay", "seal",
+]);
+
 export function isSameCoreExercise(a, b) {
   const tokensA = coreNameTokens(a);
   const tokensB = coreNameTokens(b);
   if (tokensA.size === 0 || tokensB.size === 0) return false;
   const [smaller, larger] = tokensA.size <= tokensB.size ? [tokensA, tokensB] : [tokensB, tokensA];
   for (const t of smaller) if (!larger.has(t)) return false;
+  // Still the same lift when the longer name only adds a label like
+  // "Seated" or "Barbell" — the case this matching exists for ("Leg Curl" vs
+  // "Seated Leg Curl"). Not when what it adds changes the movement.
+  for (const t of larger) if (!smaller.has(t) && DISTINGUISHING_WORDS.has(t)) return false;
   return true;
 }
 
@@ -2007,9 +2032,31 @@ export function buildProgram(profile) {
     const kind = split.kinds[i];
     const occurrence = kindOccurrence[kind] || 0;
     kindOccurrence[kind] = occurrence + 1;
-    return { name: label, exercises: buildDay(kind, pool, profile.goal, cap, occurrence, sets, rest) };
+    const built = buildDay(kind, pool, profile.goal, cap, occurrence, sets, rest);
+    return { name: label, exercises: fillShortDay(built, pool, Math.min(TARGET_MIN_EXERCISES, cap), { sets, reps: GOAL_SCHEME[profile.goal]?.reps, rest }) };
   });
   return { splitName: splitDisplayName(split.key), days };
+}
+
+// Testing every quiz combination found that once injured exercises are
+// properly left out (see filterPool), some days had nothing left at all —
+// a home trainee with a shoulder injury had an EMPTY push day, and an
+// elbow injury emptied the whole "Arms" day. An empty workout is broken in
+// its own way. This tops a short day up from whatever is SAFE: core first,
+// since it fits any day, then any other group. The pool is already
+// injury-filtered, so nothing added here can be one they told us to avoid.
+export function fillShortDay(exercises, pool, minCount, scheme = {}) {
+  if (exercises.length >= minCount) return exercises;
+  const out = [...exercises];
+  const order = ["core", ...Object.keys(pool).filter((g) => g !== "core")];
+  for (const group of order) {
+    for (const name of pool[group] || []) {
+      if (out.length >= minCount) return out;
+      if (out.some((e) => isSameCoreExercise(e.name, name))) continue;
+      out.push({ name, sets: scheme.sets ?? 3, reps: scheme.reps ?? "8-12", rest: scheme.rest ?? 60 });
+    }
+  }
+  return out;
 }
 
 function splitGuidanceFor(days) {
@@ -2124,7 +2171,14 @@ export function calcTargets(profile) {
   if (goal === "recomp") calories = tdee * 0.97;
   calories = enforceSafeCalorieFloor(calories, sex);
   calories = Math.round(calories / 5) * 5;
-  const protein = Math.round(weightLb * 1.0);
+  // 1g per lb of bodyweight, capped at 35% of calories. Found by testing every
+  // quiz combination: uncapped, a 450 lb user got 450g of protein a day —
+  // 1,800 calories of protein alone — which drove carbs to zero and made the
+  // four numbers add up to MORE than the calorie target shown next to them.
+  // The cap only ever bites for heavier bodies on lower calories; a 170 lb
+  // person on 2,400 calories is nowhere near it and gets exactly what they
+  // always did.
+  const protein = Math.min(Math.round(weightLb * 1.0), Math.round((calories * 0.35) / 4));
   const fat = Math.round((calories * 0.25) / 9);
   const carbs = Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
   return { calories, protein, carbs, fat, tdee: Math.round(tdee) };
@@ -5847,11 +5901,22 @@ function MonthlySummary({ logs }) {
 // did last time" — this session alone renamed exercises in several ways
 // (POOLS corrections, automatic bracket-stripping), each capable of
 // orphaning real history this way.
+// Within one logged workout, the entry with exactly this name wins over a
+// looser match — two related exercises in the same session (Leg Curl and
+// Seated Leg Curl) used to resolve to whichever happened to be listed first,
+// so "last time" and the PR could come from the wrong one.
+export function findLoggedExercise(workout, name) {
+  const exercises = workout?.exercises || [];
+  const lower = (name || "").trim().toLowerCase();
+  return exercises.find((e) => (e.name || "").trim().toLowerCase() === lower)
+    || exercises.find((e) => isSameCoreExercise(e.name, name));
+}
+
 export function exerciseHistory(logs, name) {
   return logs.workouts
     .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
     .map((w) => {
-      const ex = w.exercises.find((e) => isSameCoreExercise(e.name, name));
+      const ex = findLoggedExercise(w, name);
       const withWeight = ex.logged.filter((l) => l.weight && l.reps);
       if (withWeight.length === 0) return null;
       const top = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) ? l : max), withWeight[0]);
@@ -5873,7 +5938,7 @@ export function exerciseLastSession(logs, name) {
     .sort((a, b) => (a.date > b.date ? -1 : 1)); // most recent first
   if (matches.length === 0) return null;
   const w = matches[0];
-  const ex = w.exercises.find((e) => isSameCoreExercise(e.name, name));
+  const ex = findLoggedExercise(w, name);
   const loggedSets = ex.logged.filter((l) => l.weight && l.reps);
   if (loggedSets.length === 0) return null;
   return { date: w.date, sets: loggedSets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) };
