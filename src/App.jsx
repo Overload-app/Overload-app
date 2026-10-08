@@ -4,11 +4,13 @@ import {
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
   Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, Repeat, Clock, FileText,
+  Bell, BellOff,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import { supabase } from "./supabaseClient.js";
+import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -3631,6 +3633,15 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
 function RestTimer({ seconds, total, onAdd, onSkip }) {
   const pct = Math.max(0, seconds / total);
   const done = seconds <= 0;
+  const [muted, setMuted] = useState(() => isRestChimeMuted());
+  // The chime itself was scheduled ahead of time when the set was checked
+  // off; this adds the buzz, once, at the moment the countdown hits zero —
+  // not when reopening a workout whose rest had already finished.
+  const wasDone = useRef(done);
+  useEffect(() => {
+    if (done && !wasDone.current) buzzRestDone();
+    wasDone.current = done;
+  }, [done]);
   return (
     <div
       style={{
@@ -3652,6 +3663,13 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
           {done ? "REST COMPLETE" : "RESTING"}
         </div>
       </div>
+      <button
+        onClick={() => { setRestChimeMuted(!muted); setMuted(!muted); }}
+        aria-label={muted ? "Turn rest sound on" : "Turn rest sound off"}
+        style={{ background: "none", border: "none", color: muted ? "#5B6470" : "#B9BEC6", padding: 6, cursor: "pointer", flexShrink: 0, lineHeight: 0 }}
+      >
+        {muted ? <BellOff size={16} /> : <Bell size={16} />}
+      </button>
       {!done && (
         <button
           onClick={onAdd} aria-label="Add 15 seconds to rest"
@@ -3790,7 +3808,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     if (autoSaveTimer.current) { clearTimeout(autoSaveTimer.current); autoSaveTimer.current = null; }
     onAutoSave?.(nextSets, nextRest);
   };
-  useEffect(() => () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); }, []);
+  useEffect(() => () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); cancelRestChime(); }, []);
   // Live "how long have I been at this" display in the header — same
   // absolute-timestamp technique as the rest timer above (immune to
   // background throttling), reusing the exact accumulateActiveSeconds()
@@ -4156,6 +4174,8 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         const restSeconds = copy[exIdx].rest;
         newRest = { endAt: Date.now() + restSeconds * 1000, total: restSeconds };
         setRest(newRest);
+        // Scheduled now, inside the tap, which is what lets it play later.
+        scheduleRestChime(restSeconds);
 
         // Real PR check, computed from the same copy the rest-timer read
         // above (the established safe pattern here — never read a value
@@ -4361,10 +4381,12 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
           onAdd={() => setRest((r) => {
             const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
             saveNow(setsRef.current, next);
+            scheduleRestChime((next.endAt - Date.now()) / 1000);
             return next;
           })}
           onSkip={() => {
             setRest(null);
+            cancelRestChime();
             saveNow(setsRef.current, null);
           }}
         />
