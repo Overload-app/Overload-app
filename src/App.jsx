@@ -4854,7 +4854,7 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
     : program.days[nextIdx];
   const today = todayISO();
   const todayMeals = (logs.nutrition.find((d) => d.date === today) || { meals: [] }).meals;
-  const cals = todayMeals.reduce((a, m) => a + m.cal, 0);
+  const cals = todayMeals.reduce((a, m) => a + mealNumber(m.cal), 0);
   // Built from the same last-7-local-calendar-days set logic as weekStreak,
   // rather than raw Date subtraction — mixing a UTC-parsed date-only string
   // against a local "now" silently drifts by hours depending on timezone.
@@ -5268,6 +5268,30 @@ export function coachDayContext(state) {
   return { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout };
 }
 
+// A meal's calories or a macro as a real number. Found while testing: the
+// meal-photo review card lets someone clear a box, which saved "" — and an AI
+// estimate can come back as "500" — and day totals are built with +, so one
+// such value turned a sum into stuck-together text ("0" + 500 -> "0500").
+// Used by every total, so values already saved that way read correctly too.
+export function mealNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Every meal is cleaned on the way in (see addMeal), so nothing new can be
+// saved with a text or blank number.
+export function sanitizeMeal(meal) {
+  const name = typeof meal?.name === "string" && meal.name.trim() ? meal.name.trim() : "Meal";
+  return {
+    ...meal,
+    name,
+    cal: Math.round(mealNumber(meal?.cal)),
+    protein: Math.round(mealNumber(meal?.protein)),
+    carb: Math.round(mealNumber(meal?.carb)),
+    fat: Math.round(mealNumber(meal?.fat)),
+  };
+}
+
 // Real report — the Coach saying, twice, "I don't currently have visibility
 // into your ongoing weight log between messages." It was true: the prompt
 // carried the profile, the program and the targets, and nothing they'd ever
@@ -5331,7 +5355,7 @@ export function coachLogSummary(state) {
     lines.push("Food log: nothing logged yet.");
   } else {
     const perDay = nutrition.map((d) => {
-      const t = d.meals.reduce((a, m) => ({ cal: a.cal + (m.cal || 0), protein: a.protein + (m.protein || 0) }), { cal: 0, protein: 0 });
+      const t = d.meals.reduce((a, m) => ({ cal: a.cal + mealNumber(m.cal), protein: a.protein + mealNumber(m.protein) }), { cal: 0, protein: 0 });
       return { date: d.date, ...t, meals: d.meals.length };
     });
     const avgCal = Math.round(perDay.reduce((a, d) => a + d.cal, 0) / perDay.length);
@@ -5843,7 +5867,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   const { targets, logs, profile } = state;
   const today = todayISO();
   const todayLog = logs.nutrition.find((d) => d.date === today) || { date: today, meals: [] };
-  const totals = todayLog.meals.reduce((a, m) => ({ cal: a.cal + m.cal, protein: a.protein + m.protein, carb: a.carb + m.carb, fat: a.fat + m.fat }), { cal: 0, protein: 0, carb: 0, fat: 0 });
+  const totals = todayLog.meals.reduce((a, m) => ({ cal: a.cal + mealNumber(m.cal), protein: a.protein + mealNumber(m.protein), carb: a.carb + mealNumber(m.carb), fat: a.fat + mealNumber(m.fat) }), { cal: 0, protein: 0, carb: 0, fat: 0 });
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carb: "", fat: "" });
@@ -6149,7 +6173,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
               <div key={k}>
                 <label style={{ fontSize: 10, color: T.steelDark, fontWeight: 600 }}>{lab}</label>
                 <input
-                  type="number" value={photoResult[k]}
+                  type="number" value={photoResult[k]} aria-label={lab}
                   onChange={(e) => setPhotoResult({ ...photoResult, [k]: e.target.value === "" ? "" : Number(e.target.value) })}
                   style={{ width: "100%", marginTop: 2, padding: 10, borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontSize: 16, boxSizing: "border-box" }}
                 />
@@ -8487,7 +8511,8 @@ export default function App() {
 
   // dateISO defaults to today, but a photo analyzed after coming back online
   // passes the date it was actually captured, so it lands on the right day.
-  function addMeal(meal, dateISO) {
+  function addMeal(rawMeal, dateISO) {
+    const meal = sanitizeMeal(rawMeal);
     const date = dateISO || todayISO();
     persist((prev) => {
       const nutrition = [...prev.logs.nutrition];

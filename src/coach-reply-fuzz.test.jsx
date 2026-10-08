@@ -215,6 +215,29 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(stored.lastCoachChange ?? null).toBe(null);
   }, 20000);
 
+  // Found while testing: the meal review card saved a cleared box as "", and
+  // an AI estimate can come back as text — and day totals are built with +,
+  // so either turned a sum into stuck-together text ("0" + 500 -> "0500").
+  test("a meal with a cleared box and text numbers is saved as real numbers", async () => {
+    const user = userEvent.setup();
+    nextResponse = toolReply({ name: "Bagel with cream cheese", cal: "450", protein: "12", carb: "60", fat: "16", note: "one standard bagel" });
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Fuel$/ }));
+    await user.click(screen.getByText("Describe"));
+    await user.type(screen.getByPlaceholderText(/What did you eat/), "a bagel with cream cheese");
+    await user.click(screen.getByText("Estimate"));
+    await screen.findByText("Bagel with cream cheese");
+    await user.clear(screen.getByLabelText("Fat (g)"));
+    await user.click(screen.getByText("Add to log"));
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    const meal = stored.logs.nutrition.find((d) => d.date === iso).meals.at(-1);
+    expect(meal).toMatchObject({ name: "Bagel with cream cheese", cal: 450, protein: 12, carb: 60, fat: 0 });
+    // And the rest of the app can still add it up.
+    expect(screen.queryByText(/0450|450450/)).not.toBeInTheDocument();
+  }, 20000);
+
   for (const [name, response, expectation] of CASES) {
     test(name, async () => {
       const before = baseState();

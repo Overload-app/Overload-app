@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  mealNumber,
+  sanitizeMeal,
   extractPartialReply,
   readCoachStream,
   COACH_STREAMING_ENABLED,
@@ -2024,6 +2026,25 @@ describe("streamed Coach replies", () => {
 
   test("an error event in the stream becomes a real error", async () => {
     await expect(readCoachStream(sseStream([{ type: "error", error: { message: "Overloaded" } }], 50))).rejects.toThrow("Overloaded");
+  });
+});
+
+describe("meal numbers are always real numbers", () => {
+  test("text, blanks and junk become numbers", () => {
+    expect(mealNumber("450")).toBe(450);
+    expect(mealNumber("")).toBe(0);
+    expect(mealNumber(null)).toBe(0);
+    expect(mealNumber("abc")).toBe(0);
+    expect(mealNumber(-20)).toBe(0);
+  });
+
+  test("a day built from mixed old values still adds up", () => {
+    const meals = [{ cal: 500 }, { cal: "400" }, { cal: "" }, { cal: undefined }];
+    expect(meals.reduce((a, m) => a + mealNumber(m.cal), 0)).toBe(900);
+  });
+
+  test("sanitizeMeal rounds, fills a missing name, and never saves text", () => {
+    expect(sanitizeMeal({ name: "  ", cal: "450.6", protein: "", carb: 60.4, fat: "x" })).toMatchObject({ name: "Meal", cal: 451, protein: 0, carb: 60, fat: 0 });
   });
 });
 
