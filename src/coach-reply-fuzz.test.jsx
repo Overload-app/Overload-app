@@ -265,6 +265,29 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   }, 20000);
 
+  // Real ask: gentler plans for under-18s unless they explicitly ask otherwise.
+  test("a teen on the gentle plan is held at the teen calorie floor, and told why", async () => {
+    const user = userEvent.setup();
+    stored.profile = { ...stored.profile, age: 15 };
+    const { reply } = await send(user, "put me on 1500 calories", toolReply({ ...blank, reply: "Set you to 1,500 calories.", targets: { calories: 1500, protein: 130, carbs: 160, fat: 45 } }));
+    expect(stored.targets.calories).toBe(1800);
+    expect(reply).toContain("I kept calories at 1,800");
+  }, 20000);
+
+  test("a teen who explicitly asks for the standard plan gets it, recorded, with the adult floor", async () => {
+    const user = userEvent.setup();
+    stored.profile = { ...stored.profile, age: 16 };
+    await send(user, "I don't want the gentle plan, give me a normal one", toolReply({ ...blank, reply: "Switched you to the standard plan.", standardPlan: true, targets: { calories: 1600, protein: 150, carbs: 150, fat: 50 } }));
+    expect(stored.profile.standardPlan).toBe(true);
+    expect(stored.targets.calories).toBe(1600);
+  }, 20000);
+
+  test("an adult can't be switched onto or off a teen plan by the Coach", async () => {
+    const user = userEvent.setup();
+    await send(user, "hi", toolReply({ ...blank, reply: "Hey!", standardPlan: true }));
+    expect(stored.profile.standardPlan).toBeUndefined();
+  }, 20000);
+
   for (const [name, response, expectation] of CASES) {
     test(name, async () => {
       const before = baseState();

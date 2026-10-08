@@ -57,6 +57,10 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  MINOR_CALORIE_FLOOR,
+  applyStandardPlanChoice,
+  gentlePlan,
+  isUnder18,
   buildCoachStaticSystemFull,
   COACH_PROMPT_VERSION,
   asText,
@@ -2152,6 +2156,82 @@ describe("compact Coach rulebook", () => {
 
   test("is identical for every account, so it stays cache-shareable", () => {
     expect(compact()).toBe(compact());
+  });
+});
+
+// Real ask: "gentler plans for under 18 unless specifically told not gentle,
+// and make sure the AI tells them the plan's gentler."
+describe("gentler plans for under-18s", () => {
+  const teen = { sex: "male", age: 15, heightIn: 68, weightLb: 140, activity: "light", goal: "lose", experience: "beginner", equipment: "full", daysPerWeek: 3, sessionLength: 60, injuries: ["none"] };
+  const adult = { ...teen, age: 25 };
+
+  test("under 18 means gentle by default, and only an explicit choice switches it off", () => {
+    expect(isUnder18(teen)).toBe(true);
+    expect(isUnder18(adult)).toBe(false);
+    expect(isUnder18({})).toBe(false);
+    expect(gentlePlan(teen)).toBe(true);
+    expect(gentlePlan({ ...teen, standardPlan: true })).toBe(false);
+    expect(gentlePlan(adult)).toBe(false);
+  });
+
+  test("a teen's fat loss is a milder deficit than an adult's", () => {
+    const t = calcTargets(teen);
+    expect(t.calories).toBeGreaterThanOrEqual(Math.round((t.tdee * 0.9) / 5) * 5 - 5);
+    expect(calcTargets(adult).calories).toBeLessThan(Math.round(calcTargets(adult).tdee * 0.85));
+  });
+
+  test("a teen never drops below the higher teen floor", () => {
+    const small = { ...teen, sex: "female", heightIn: 58, weightLb: 85, activity: "sedentary", age: 13 };
+    expect(calcTargets(small).calories).toBeGreaterThanOrEqual(MINOR_CALORIE_FLOOR.female);
+  });
+
+  test("choosing the standard plan gives a teen the adult numbers", () => {
+    const std = { ...teen, standardPlan: true };
+    expect(calcTargets(std).calories).toBe(calcTargets({ ...adult, age: 15, standardPlan: true }).calories);
+    expect(calcTargets(std).calories).toBeLessThan(calcTargets(teen).calories);
+  });
+
+  test("a teen's program has at most 3 sets per exercise, an adult's isn't capped", () => {
+    expect(planSetsRest({ ...teen, goal: "build" }).sets).toBeLessThanOrEqual(3);
+    expect(planSetsRest({ ...adult, goal: "build" }).sets).toBe(4);
+    for (const goal of ["lose", "build", "recomp"]) for (const days of [3, 4, 5, 6]) {
+      buildProgram({ ...teen, goal, daysPerWeek: days, experience: "advanced" }).days.forEach((d) => d.exercises.forEach((e) => expect(e.sets).toBeLessThanOrEqual(3)));
+    }
+  });
+
+  test("the Coach is told their age, and which plan a teen is on", () => {
+    const base = { targets: { calories: 2200, protein: 140, carbs: 250, fat: 60 }, logs: { workouts: [] }, program: { splitName: "FB", days: [{ name: "Full Body A", exercises: [{ name: "Goblet Squat", sets: 3, rest: 60 }] }] }, programHistory: [] };
+    expect(buildCoachDynamicSystem({ ...base, profile: teen })).toContain("age=15");
+    expect(buildCoachDynamicSystem({ ...base, profile: teen })).toContain("on the GENTLE plan");
+    expect(buildCoachDynamicSystem({ ...base, profile: { ...teen, standardPlan: true } })).toContain("has explicitly chosen the STANDARD plan");
+    expect(buildCoachDynamicSystem({ ...base, profile: adult })).not.toContain("Age plan");
+  });
+
+  test("both rulebooks tell the Coach how to handle it, including telling them", () => {
+    const full = buildCoachStaticSystem();
+    globalThis.__OVERLOAD_PROMPT__ = "compact";
+    const compact = buildCoachStaticSystem();
+    delete globalThis.__OVERLOAD_PROMPT__;
+    for (const text of [full, compact]) {
+      expect(text).toContain("UNDER 18");
+      expect(text).toContain("tell them in one short clause that their plan is set up a bit gentler");
+      expect(text).toContain("set \"standardPlan\": true");
+      expect(text).toContain("\"standardPlan\": null or true or false");
+    }
+  });
+
+  test("the program builder is told to keep a new teen's program gentle", () => {
+    expect(buildProgramGenSystem(teen)).toContain("UNDER 18 — build a GENTLE program");
+    expect(buildProgramGenSystem(adult)).not.toContain("UNDER 18");
+  });
+
+  test("the Coach's standard-plan choice is recorded for a teen, and ignored otherwise", () => {
+    const st = { profile: teen };
+    expect(applyStandardPlanChoice({ standardPlan: true }, st).profile.standardPlan).toBe(true);
+    expect(applyStandardPlanChoice({ standardPlan: false }, { profile: { ...teen, standardPlan: true } }).profile.standardPlan).toBe(false);
+    expect(applyStandardPlanChoice({ standardPlan: true }, { profile: adult })).toEqual({ profile: adult });
+    expect(applyStandardPlanChoice({ standardPlan: "yes" }, st)).toBe(st);
+    expect(applyStandardPlanChoice({}, st)).toBe(st);
   });
 });
 

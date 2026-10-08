@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, coachAcknowledgement, dateToISO, todayISO } from "./App.jsx";
+import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, coachAcknowledgement, dateToISO, todayISO, buildProgram as buildProgramFn, calcTargets as calcTargetsFn } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -2317,6 +2317,22 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
 
 // Real ask: "make it so it responds and says something like working on that
 // now, that way it doesn't look like it takes forever in the video."
+describe("<OnboardingSummary /> for an under-18", () => {
+  const profile = { sex: "male", age: 15, heightIn: 68, weightLb: 140, activity: "light", goal: "lose", experience: "beginner", equipment: "full", daysPerWeek: 3, sessionLength: 60, injuries: ["none"] };
+
+  test("tells them the plan is gentler, and that they can ask for a standard one", () => {
+    render(<OnboardingSummary profile={profile} program={buildProgramFn(profile)} targets={calcTargetsFn(profile)} onContinue={vi.fn()} />);
+    expect(screen.getByText("A GENTLER PLAN")).toBeInTheDocument();
+    expect(screen.getByText(/just ask your coach/)).toBeInTheDocument();
+  });
+
+  test("says nothing of the sort to an adult", () => {
+    const adult = { ...profile, age: 30 };
+    render(<OnboardingSummary profile={adult} program={buildProgramFn(adult)} targets={calcTargetsFn(adult)} onContinue={vi.fn()} />);
+    expect(screen.queryByText("A GENTLER PLAN")).not.toBeInTheDocument();
+  });
+});
+
 describe("<Coach /> answers the instant you send", () => {
   const messages = [{ role: "assistant", text: "Hey" }, { role: "user", text: "make my program harder" }];
 

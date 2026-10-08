@@ -1076,6 +1076,15 @@ export function sanitizeCoachResponse(parsed, state) {
   return { parsed: out, rejected };
 }
 
+// A minor's choice of the standard plan over the gentle one, as recorded by
+// the Coach (only when they explicitly ask — see COACH_MINOR_RULES). Ignored
+// for adults, and for anything that isn't a real true/false.
+export function applyStandardPlanChoice(parsed, next) {
+  if (!next || typeof parsed?.standardPlan !== "boolean" || !isUnder18(next.profile)) return next;
+  if (next.profile.standardPlan === parsed.standardPlan) return next;
+  return { ...next, profile: { ...next.profile, standardPlan: parsed.standardPlan } };
+}
+
 // The honest reply for a turn where part or all of the Coach's change had to
 // be thrown away. Specific where it can be, so the person knows what to do.
 export function rejectedReplyText(rejected, madeChange) {
@@ -2002,7 +2011,8 @@ const TARGET_MIN_EXERCISES = 4;
 // sets/rest was really non-negotiable for a time-constrained session.
 export function planSetsRest(profile) {
   const scheme = GOAL_SCHEME[profile.goal] || GOAL_SCHEME.recomp;
-  let sets = scheme.sets;
+  // Gentle plan (under 18): at most 3 sets an exercise.
+  let sets = gentlePlan(profile) ? Math.min(scheme.sets, 3) : scheme.sets;
   let rest = scheme.rest;
   // Must mirror capFromSeconds' own experience adjustment exactly, not just
   // the raw floor-divide — otherwise this loop can stop as soon as the RAW
@@ -2379,7 +2389,8 @@ export function buildProgramGenSystem(profile) {
   const { sets: recSets, rest: recRest } = planSetsRest(profile);
   return `You are a world-class evidence-based strength & physique coach designing a brand-new, fully personalized training program from scratch for a new client. Apply mainstream exercise-science consensus: progressive overload, sensible per-muscle volume landmarks, rep ranges matched to the goal, and adequate recovery between sessions hitting the same muscles.
 
-Client details:
+Client details:${gentlePlan(profile) ? `
+- UNDER 18 — build a GENTLE program: at most 3 sets per exercise, rep ranges of 8 or more (nothing heavier than about a 6-rep weight, no max-effort lifts), technique-focused exercise choices, and moderate total volume. This is the default for anyone under 18.` : ""}
 - Sex: ${profile.sex}, Age: ${profile.age}, Height: ${Math.floor(profile.heightIn / 12)}'${profile.heightIn % 12}", Weight: ${profile.weightLb} lb
 - Goal: ${profile.goal} (${GOAL_SCHEME[profile.goal]?.label})
 - Current build: ${(profile.currentPhysique || "").replace(/_/g, " ")}
@@ -2435,8 +2446,29 @@ ${profile.notes ? `- Actually honor the client's own additional notes above ("${
 // calcTargets (initial onboarding numbers) and Coach's own target-setting
 // (sendCoachMessage) — Coach computes its own calorie numbers
 // independently and nothing enforced this floor there before either.
-export function enforceSafeCalorieFloor(calories, sex) {
-  const floor = sex === "male" ? 1500 : 1200;
+// Real ask: "gentler plans for under 18 unless specifically told not gentle —
+// and make sure the AI tells them the plan's gentler." The quiz accepts ages
+// from 13, and a 13-year-old used to get exactly an adult's 20% calorie
+// deficit and four hard sets per exercise. Gentle is the default for anyone
+// under 18; profile.standardPlan is set only when they've explicitly asked the
+// Coach for a standard plan.
+export const MINOR_CALORIE_FLOOR = { male: 1800, female: 1600 };
+
+export function isUnder18(profile) {
+  const age = Number(profile?.age);
+  return Number.isFinite(age) && age > 0 && age < 18;
+}
+
+export function gentlePlan(profile) {
+  return isUnder18(profile) && profile?.standardPlan !== true;
+}
+
+// With a profile, a gentle plan gets the higher teen floor; without one
+// (or for adults / a minor who chose the standard plan) the adult floor.
+export function enforceSafeCalorieFloor(calories, sex, profile) {
+  const floor = profile && gentlePlan(profile)
+    ? (sex === "male" ? MINOR_CALORIE_FLOOR.male : MINOR_CALORIE_FLOOR.female)
+    : (sex === "male" ? 1500 : 1200);
   return Math.max(calories, floor);
 }
 
@@ -2448,10 +2480,13 @@ export function calcTargets(profile) {
   const actMult = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725 }[activity];
   let tdee = bmr * actMult;
   let calories = tdee;
-  if (goal === "lose") calories = tdee * 0.8;
+  const gentle = gentlePlan(profile);
+  // A gentle plan never runs more than a mild deficit — teenagers are still
+  // growing — and "lose fat & build muscle" sits at maintenance.
+  if (goal === "lose") calories = tdee * (gentle ? 0.9 : 0.8);
   if (goal === "build") calories = tdee * 1.1;
-  if (goal === "recomp") calories = tdee * 0.97;
-  calories = enforceSafeCalorieFloor(calories, sex);
+  if (goal === "recomp") calories = tdee * (gentle ? 1.0 : 0.97);
+  calories = enforceSafeCalorieFloor(calories, sex, profile);
   calories = Math.round(calories / 5) * 5;
   // 1g per lb of bodyweight, capped at 35% of calories. Found by testing every
   // quiz combination: uncapped, a 450 lb user got 450g of protein a day —
@@ -3700,6 +3735,16 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
         <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 14, color: T.steelDark, lineHeight: 1.5, margin: "0 0 20px" }}>
           Built around {goalLabel.toLowerCase()}, {profile.daysPerWeek} days a week, ~{profile.sessionLength} min sessions.
         </p>
+
+        {/* Real ask: gentler plans for under-18s, and they're told so. */}
+        {gentlePlan(profile) && (
+          <Card style={{ marginBottom: 16, background: "#EEEDFF", border: "none" }}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1, color: T.chargeDeep, fontWeight: 700, marginBottom: 4 }}>A GENTLER PLAN</div>
+            <p style={{ fontSize: 13, color: T.ink, lineHeight: 1.5, margin: 0 }}>
+              Because you're under 18, your plan is set up a little gentler: a smaller calorie deficit, no more than 3 sets per exercise, and a focus on good form over max weight. If you'd rather have a standard plan, just ask your coach.
+            </p>
+          </Card>
+        )}
 
         <TickRule label="Your split" />
         <Card style={{ marginBottom: 16 }}>
@@ -5249,7 +5294,7 @@ EXAMPLES:
 - "go back to my original program" -> "restoreOriginal": true; everything else null.
 
 RESPOND ONLY with this JSON object — start with "{", no text before or after it:
-{"reply": "<short, friendly, written to them>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [same exercise shape]}}, "todayOverride": null or [same exercise shape], "todayOverrideDayIndex": null or <number — required whenever "todayOverride" is set>, "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number from the version history>, "restoreOriginal": true or false, "overrideCeiling": true or false}
+{"reply": "<short, friendly, written to them>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [same exercise shape]}}, "todayOverride": null or [same exercise shape], "todayOverrideDayIndex": null or <number — required whenever "todayOverride" is set>, "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number from the version history>, "restoreOriginal": true or false, "overrideCeiling": true or false, "standardPlan": null or true or false}
 
 RULES:
 - Build permanent changes by editing the exact "Current program JSON" — never from memory of earlier messages.
@@ -5273,7 +5318,14 @@ NUMERIC LIMITS — EXERCISE_CEILING, SESSION_LENGTH, TIGHTEST_SETS and TIGHTEST_
 - Many existing days already exceed it — that's fine. Count the real exercises before ever calling a day "full".
 - If they explicitly ask for a specific number of exercises, or to add or remove a named exercise, do it, set "overrideCeiling": true, and mention the time tradeoff in a short clause. Don't ask permission first.
 - If EXERCISE_CEILING is below 4 and the session should fit 4, tighten every exercise on the day toward TIGHTEST_SETS x TIGHTEST_REST first; only if that still can't fit 4, say the session length is the limit.
-- If they question the number, explain what drives it (setup time per exercise, single-limb work, sets/rest that were never tightened) rather than repeating it.`;
+- If they question the number, explain what drives it (setup time per exercise, single-limb work, sets/rest that were never tightened) rather than repeating it.
+
+UNDER 18 — read the "Age plan" line in your context. If it says GENTLE plan:
+- Fat loss stays mild: at most about a 10% calorie deficit, never a crash diet, and NEVER below 1800 calories for a boy or 1600 for a girl. "Lose fat and build muscle" sits at maintenance.
+- Training: at most 3 sets per exercise, nothing heavier than about a 6-rep weight, no max-effort lifts — the emphasis is good form and steady progress.
+- The first time you change or discuss their training or diet in a conversation, tell them in one short clause that their plan is set up a bit gentler because they're under 18, and that they can ask for a standard plan if they'd rather. Don't repeat it every message, and never lecture.
+- Only if they EXPLICITLY ask for a standard / not-gentle / normal plan: set "standardPlan": true and give them the normal adult plan from then on (the adult calorie floor still applies). If they later ask for the gentler plan back, set "standardPlan": false. Otherwise leave "standardPlan" null.
+If the "Age plan" line says STANDARD, or there is no "Age plan" line, ignore this section.`;
 
 export function buildCoachStaticSystemFull() {
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
@@ -5324,7 +5376,7 @@ Worked example for reverting to the ORIGINAL — user says "go back to my origin
 In both worked examples above, even though most fields are null, "reply" must still be a real, non-empty sentence confirming what you restored (e.g. "Done — you're back on your original Push/Pull/Legs split and the fat-loss calorie targets."). Never leave "reply" blank, even when the other fields are null.
 
 Respond ONLY with a JSON object, no markdown fences, no prose outside the JSON, in exactly this shape. Your response must START with the { character — do not write any sentence, greeting, or summary before it, even a short one:
-{"reply": "<a short, friendly explanation, written directly to the user — as brief as the situation genuinely allows, see the rule below>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "todayOverrideDayIndex": null or <number — the dayIndex this one-time change is for; required whenever "todayOverride" is set>, "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false, "overrideCeiling": true or false}
+{"reply": "<a short, friendly explanation, written directly to the user — as brief as the situation genuinely allows, see the rule below>", "program": null or {"splitName": "<string>", "days": [{"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}]}, "programDayEdit": null or {"dayIndex": <number>, "day": {"name": "<string>", "exercises": [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}]}}, "todayOverride": null or [{"name": "<string>", "sets": <number>, "reps": "<string like 8-12>", "rest": <number seconds>, "tips": ["<tip>", "<tip>", "<tip>", "<tip>"], "alternatives": ["<exercise name>", "<exercise name>", "<exercise name>"]}], "todayOverrideDayIndex": null or <number — the dayIndex this one-time change is for; required whenever "todayOverride" is set>, "targets": null or {"calories": <number>, "protein": <number>, "carbs": <number>, "fat": <number>}, "restoreIndex": null or <number, an index from the version history above>, "restoreOriginal": true or false, "overrideCeiling": true or false, "standardPlan": null or true or false}
 
 Rules:
 - For a PERMANENT change (case 1 or 2 above), always build the new day(s) by editing the exact "Current program JSON" given in your context below — never reconstruct any of it from your memory of earlier messages in this conversation, since that risks silently undoing an earlier change or re-adding something that was already removed. If the user asked you to remove, stop using, or never include a specific exercise or piece of equipment, re-check the day(s) you're about to return and confirm it genuinely does not appear anywhere in them before you answer — if honoring that fully would leave a day with too few exercises, say so plainly in "reply" instead of quietly leaving it in while claiming it's done.
@@ -5363,6 +5415,8 @@ ${COACH_DAY_RULES}
 ${COACH_LOG_RULES}
 
 ${COACH_FOOD_RULES}
+
+${COACH_MINOR_RULES}
 
 ${COACH_LIMIT_RULES}`;
 }
@@ -5560,6 +5614,15 @@ const COACH_FOOD_RULES = `FOOD ADVICE. Real report: "the AI suggestions for what
 - If there is NO "Food preferences" line, they skipped those questions. Don't pretend to know their tastes, and don't invent a restriction. Give a short answer and ask one specific question about what they like — then use what they tell you for the rest of that conversation.
 - Never rewrite their calorie or macro numbers just because you're discussing food. "targets" is for a real change to the numbers, not for answering "what should I eat."`;
 
+// Real ask: gentler plans for under-18s unless they say otherwise, and the
+// Coach must tell them the plan is gentler.
+const COACH_MINOR_RULES = `UNDER 18 — read the "Age plan" line in your context. If it says GENTLE plan:
+- Fat loss stays mild: at most about a 10% calorie deficit, never a crash diet, and NEVER below 1800 calories for a boy or 1600 for a girl. "Lose fat and build muscle" sits at maintenance.
+- Training: at most 3 sets per exercise, nothing heavier than about a 6-rep weight, no max-effort lifts — the emphasis is good form and steady progress.
+- The first time you change or discuss their training or diet in a conversation, tell them in one short clause that their plan is set up a bit gentler because they're under 18, and that they can ask for a standard plan if they'd rather. Don't repeat it every message, and never lecture.
+- Only if they EXPLICITLY ask for a standard / not-gentle / normal plan: set "standardPlan": true and give them the normal adult plan from then on (the adult calorie floor still applies). If they later ask for the gentler plan back, set "standardPlan": false. Otherwise leave "standardPlan" null.
+If the "Age plan" line says STANDARD, or there is no "Age plan" line, ignore this section.`;
+
 const COACH_LOG_RULES = `THEIR LOGGED DATA. Your context below carries a summary of what they have actually logged — every workout's date/day/duration, their most-trained lifts with best and latest sets, their bodyweight history with the current weight, and their recent daily calories and protein against target.
 - You can see all of it. NEVER say you have no visibility into their weight log, their workouts, or their food — a real report is you saying exactly that twice in one conversation. If they ask how they're progressing, whether they're gaining or losing too fast, whether their protein is actually where it should be, or what they lifted last time, answer from these numbers and cite the real ones.
 - What you genuinely CANNOT do is act later on your own. You only ever run when they send a message, so you cannot watch their log and alert them when something happens. If they ask you to tell them when they hit a target weight, say plainly that you can't watch for it, but that you WILL see their latest weight every time they message you, so they can just ask — and if the number in your context already meets what they described, say so immediately instead of waiting to be asked again. The app's own weekly/monthly reviews are the only thing that runs by itself.
@@ -5618,8 +5681,8 @@ export function buildCoachDynamicSystem(state) {
     calories: h.targets?.calories,
   }));
   return `Today's date: ${todayISO()}.
-User profile: goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
-Current program JSON (each exercise's form "tips" are omitted here — you don't need them to edit a program, and they cost real money to re-send every message; write fresh tips only for exercises you ADD): ${JSON.stringify(programForPrompt(state.program))}
+User profile: age=${p.age ?? "unknown"}, sex=${p.sex ?? "unknown"}, goal=${p.goal}, experience=${p.experience}, equipment=${p.equipment}, days/week=${p.daysPerWeek}, session length=${p.sessionLength} min, injuries=${injuryDescription(p)}, current build="${p.currentPhysique}", desired physique="${p.desiredPhysique}", specific performance goals="${p.specificGoals || "none stated"}", bodyweight=${p.weightLb} lb.${p.notes ? ` Additional notes from the client, in their own words — a real preference/constraint, not a nice-to-have: "${p.notes}"` : ""}
+${isUnder18(p) ? (gentlePlan(p) ? `Age plan: UNDER 18 — on the GENTLE plan (the default for under-18s). See the UNDER 18 rules.\n` : `Age plan: UNDER 18 — has explicitly chosen the STANDARD plan instead of the gentle one. Adult rules apply.\n`) : ""}Current program JSON (each exercise's form "tips" are omitted here — you don't need them to edit a program, and they cost real money to re-send every message; write fresh tips only for exercises you ADD): ${JSON.stringify(programForPrompt(state.program))}
 ${coachDayContextText(state)}
 Current nutrition targets JSON: ${JSON.stringify(state.targets)}
 Original program & targets — exactly what they had right after finishing onboarding, kept forever and always available no matter how many changes they've made since: {"splitName": ${JSON.stringify(state.originalProgram?.splitName)}, "dayNames": ${JSON.stringify((state.originalProgram?.days || []).map((d) => d.name))}, "calories": ${state.originalTargets?.calories ?? "unknown"}}${state.originalProgram ? "" : " — not available for this account (set up before this feature existed); be upfront that you can't restore to it and offer to rebuild it from a fresh description instead."}
@@ -8165,8 +8228,11 @@ export default function App() {
       // The safe calorie floor is applied when targets are saved; if it moved
       // the number, the reply has to say so. "Set you to 800 calories" while
       // 1,500 is what's actually saved is a lie on the Fuel screen.
-      const floorNote = hasValidTargets && Number(parsed.targets.calories) < enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex)
-        ? `I kept calories at ${enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex).toLocaleString()} — going lower than that isn't safe.`
+      // The profile the targets will be judged against — including a minor
+      // opting out of the gentle plan in this very message.
+      const floorProfile = parsed.standardPlan === true ? { ...stateRef.current.profile, standardPlan: true } : stateRef.current.profile;
+      const floorNote = hasValidTargets && Number(parsed.targets.calories) < enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex, floorProfile)
+        ? `I kept calories at ${enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex, floorProfile).toLocaleString()} — going lower than that isn't safe.`
         : "";
       const replyText = intendedButInvalid || overrideTargetInvalid
         ? "Sorry — that change didn't actually go through on my end. Mind asking again, and say which day?"
@@ -8193,7 +8259,7 @@ export default function App() {
 
       // Wrapped so any branch below that changes something leaves an Undo
       // behind — see withUndoSnapshot.
-      persist((prev) => withUndoSnapshot(prev, ((prev) => {
+      persist((prev) => withUndoSnapshot(prev, applyStandardPlanChoice(parsed, ((prev) => {
         const history = prev.programHistory || [];
 
         // Restoring the permanently-kept original — always reliable,
@@ -8349,7 +8415,7 @@ export default function App() {
                   const protein = Math.round(parsed.targets.protein);
                   const fat = Math.round(parsed.targets.fat);
                   const rawCalories = Math.round(parsed.targets.calories);
-                  const calories = enforceSafeCalorieFloor(rawCalories, p.sex);
+                  const calories = enforceSafeCalorieFloor(rawCalories, p.sex, parsed.standardPlan === true ? { ...p, standardPlan: true } : p);
                   const carbs = calories === rawCalories
                     ? Math.round(parsed.targets.carbs)
                     : Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
@@ -8366,7 +8432,7 @@ export default function App() {
           coachChat: withReply,
           ...overridePatch,
         };
-      })(prev)));
+      })(prev))));
     } catch (e) {
       console.error("Coach send failed:", e);
       // Real report: this generic message showed up in place of the usual
