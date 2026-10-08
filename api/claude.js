@@ -37,6 +37,8 @@ export function buildUpstreamBody(clientBody) {
   for (const field of ["system", "messages", "tools", "tool_choice", "output_config"]) {
     if (body[field] !== undefined) upstream[field] = body[field];
   }
+  // Only a literal true — anything else means the ordinary, non-streamed reply.
+  if (body.stream === true) upstream.stream = true;
   return upstream;
 }
 
@@ -44,6 +46,22 @@ export function buildUpstreamBody(clientBody) {
 // response, and Vercel's 10s default would kill it server-side no matter
 // what the client does.
 export const config = { maxDuration: 60 };
+
+// Passes Anthropic's server-sent events straight through to the browser as
+// they arrive, rather than waiting for the whole reply.
+export async function pipeEventStream(body, res) {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  const reader = body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    res.write(Buffer.from(value));
+  }
+  res.end();
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -75,6 +93,7 @@ export default async function handler(req, res) {
   }
 
   try {
+    const upstreamBody = buildUpstreamBody(req.body);
     const upstream = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -82,8 +101,15 @@ export default async function handler(req, res) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(buildUpstreamBody(req.body)),
+      body: JSON.stringify(upstreamBody),
     });
+    // Streamed only when the app asked for it (see COACH_STREAMING_ENABLED in
+    // App.jsx), and only for a successful response — an error from Anthropic
+    // is a normal JSON body and goes through the ordinary path below.
+    if (upstreamBody.stream && upstream.ok && upstream.body) {
+      await pipeEventStream(upstream.body, res);
+      return;
+    }
     const data = await upstream.json();
     res.status(upstream.status).json(data);
   } catch (e) {

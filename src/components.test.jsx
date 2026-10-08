@@ -2337,6 +2337,13 @@ describe("<Coach /> answers the instant you send", () => {
     expect(screen.getByText("Done — made every day harder.")).toBeInTheDocument();
   });
 
+  test("once the reply starts arriving, it replaces the placeholder line", () => {
+    render(<Coach messages={messages} loading={true} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} streamingReply="Swapped bench for dumb" />);
+    expect(screen.getByText("Swapped bench for dumb")).toBeInTheDocument();
+    expect(screen.queryByText(coachAcknowledgement(messages.length))).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Coach is typing")).toBeInTheDocument();
+  });
+
   test("nothing shows when the coach isn't working on anything", () => {
     render(<Coach messages={messages} loading={false} onSend={vi.fn()} onClearChat={vi.fn()} coachUsage={null} dailyLimit={null} />);
     expect(screen.queryByLabelText("Coach is typing")).not.toBeInTheDocument();

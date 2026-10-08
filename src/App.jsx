@@ -373,7 +373,90 @@ export function setAiBudgetContext(ctx) { aiBudgetContext = ctx; }
 let onAiUsageRecorded = null; // (costCents) => void — persists the running total
 export function setAiUsageRecordedCallback(cb) { onAiUsageRecorded = cb; }
 
-export async function claudeChat({ system, messages }) {
+// Showing the Coach's reply as it's written. Real ask: replies felt slow,
+// because nothing appeared until the whole answer — reply text AND any program
+// change — had finished generating. "reply" is the first field the model
+// writes, so streaming the response lets its words appear within a second or
+// two while the rest is still being written.
+//
+// OFF until checked against the real model and the live server: it changes
+// the most fragile path in the app, and that can't be verified without a real
+// API call. With this false, claudeChat never asks for a stream and the server
+// behaves exactly as it always has.
+export const COACH_STREAMING_ENABLED = false;
+
+// The "reply" value so far, from tool-call JSON that's still arriving — e.g.
+// '{"reply": "Swapped bench for dum' -> 'Swapped bench for dum'. Handles
+// escapes, including one split across two chunks (it waits for the rest).
+export function extractPartialReply(partialJson) {
+  const m = /"reply"\s*:\s*"/.exec(partialJson || "");
+  if (!m) return null;
+  let out = "";
+  for (let i = m.index + m[0].length; i < partialJson.length; i++) {
+    const c = partialJson[i];
+    if (c === '"') return out;
+    if (c !== "\\") { out += c; continue; }
+    const n = partialJson[i + 1];
+    if (n === undefined) break;
+    if (n === "u") {
+      const hex = partialJson.slice(i + 2, i + 6);
+      if (hex.length < 4) break;
+      out += String.fromCharCode(parseInt(hex, 16));
+      i += 5;
+      continue;
+    }
+    out += { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" }[n] ?? n;
+    i += 1;
+  }
+  return out;
+}
+
+// Reads Anthropic's server-sent events for one forced "respond" tool call:
+// returns the tool input's full JSON text and the combined token usage,
+// calling onPartialReply as the reply grows. Events can be split across
+// network chunks at any byte, so this buffers until each one is complete.
+export async function readCoachStream(body, onPartialReply) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let toolJson = "";
+  let inRespond = false;
+  let lastReply = null;
+  const usage = {};
+  const handle = (event) => {
+    if (event.type === "message_start") Object.assign(usage, event.message?.usage || {});
+    else if (event.type === "message_delta") Object.assign(usage, event.usage || {});
+    else if (event.type === "content_block_start") inRespond = event.content_block?.type === "tool_use" && event.content_block?.name === "respond";
+    else if (event.type === "content_block_stop") inRespond = false;
+    else if (event.type === "content_block_delta" && inRespond && event.delta?.type === "input_json_delta") {
+      toolJson += event.delta.partial_json || "";
+      const reply = extractPartialReply(toolJson);
+      if (reply && reply !== lastReply) { lastReply = reply; try { onPartialReply?.(reply); } catch (e) {} }
+    } else if (event.type === "error") {
+      const err = new Error(event.error?.message || "The response stream failed");
+      err.status = 500;
+      throw err;
+    }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const data = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+      if (!data) continue;
+      let event;
+      try { event = JSON.parse(data); } catch (e) { continue; }
+      handle(event);
+    }
+  }
+  return { toolJson, usage };
+}
+
+export async function claudeChat({ system, messages, onPartialReply }) {
   if (aiBudgetContext?.isTrialUnsubscribed && !budgetAllows(aiBudgetContext.aiUsage)) {
     throw budgetExceededError();
   }
@@ -495,6 +578,9 @@ export async function claudeChat({ system, messages }) {
         // making a correct removal look like it never happened regardless
         // of what effort level generated it.
         output_config: { effort: "low" },
+        // The global is only ever set by the Coach test list (EVAL_STREAMING=1),
+        // to check streaming against the real model before switching it on.
+        ...((COACH_STREAMING_ENABLED || globalThis.__OVERLOAD_FORCE_STREAMING__) && onPartialReply ? { stream: true } : {}),
       }),
       signal: controller.signal,
     });
@@ -517,6 +603,16 @@ export async function claudeChat({ system, messages }) {
     const httpErr = new Error(detail || `API error ${res.status}`);
     httpErr.status = res.status;
     throw httpErr;
+  }
+  // A streamed reply (only ever requested when COACH_STREAMING_ENABLED) is
+  // read event by event; everything downstream gets exactly the same JSON
+  // text the non-streamed path returns.
+  if (res.body && (res.headers?.get?.("content-type") || "").includes("text/event-stream")) {
+    const { toolJson, usage } = await readCoachStream(res.body, onPartialReply);
+    const costCents = estimateCostCents(usage);
+    console.log(`[ai-cost] ${costCents.toFixed(4)}c (streamed) | uncached in ${usage.input_tokens || 0} | cache read ${usage.cache_read_input_tokens || 0} | cache write ${usage.cache_creation_input_tokens || 0} | out ${usage.output_tokens || 0}`);
+    if (onAiUsageRecorded) onAiUsageRecorded(costCents);
+    return toolJson;
   }
   const data = await res.json();
   if (data.usage) {
@@ -777,8 +873,8 @@ export function normalizeCoachStructuredFields(parsed) {
   return normalized;
 }
 
-export async function requestCoachResponse(system, messages) {
-  const raw = await claudeChat({ system, messages });
+export async function requestCoachResponse(system, messages, onPartialReply) {
+  const raw = await claudeChat({ system, messages, onPartialReply });
   try {
     return { parsed: normalizeCoachStructuredFields(parseJSONLoose(raw)), raw, parseFailed: false };
   } catch (parseErr) {
@@ -5564,7 +5660,7 @@ export function coachAcknowledgement(messageCount) {
   return COACH_ACKNOWLEDGEMENTS[n % COACH_ACKNOWLEDGEMENTS.length];
 }
 
-export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit, lastChangeId, onUndo }) {
+export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit, lastChangeId, onUndo, streamingReply }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef(null);
@@ -5677,7 +5773,10 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
               padding: "10px 14px", borderRadius: 14, borderBottomLeftRadius: 4,
               fontSize: 14, lineHeight: 1.4,
             }}>
-              {coachAcknowledgement(list.length)}
+              {/* The reply as it's written, once it starts arriving. Slightly
+                  faded: it isn't final until the app has checked what the
+                  Coach actually changed. */}
+              {streamingReply ? <span style={{ opacity: 0.85 }}>{streamingReply}</span> : coachAcknowledgement(list.length)}
               <div style={{ display: "flex", gap: 4, marginTop: 8 }} aria-label="Coach is typing">
                 {[0, 1, 2].map((d) => (
                   <span key={d} style={{ width: 6, height: 6, borderRadius: 3, background: T.steelDark, animation: `pulseDot 1.2s ease-in-out ${d * 0.18}s infinite` }} />
@@ -7401,6 +7500,7 @@ export default function App() {
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [finishedSummary, setFinishedSummary] = useState(null);
+  const [streamingReply, setStreamingReply] = useState("");
   const [quizEditorOpen, setQuizEditorOpen] = useState(false);
   const [rebuildingProgram, setRebuildingProgram] = useState(false);
   const [historyEditorInitialIdx, setHistoryEditorInitialIdx] = useState(null); // real index to jump straight to, or null for the plain list
@@ -7849,7 +7949,7 @@ export default function App() {
       // response always gets one automatic retry with direct feedback
       // before the person ever sees a dead-end failure message.
       const { parsed: rawParsed } = await withBlankReplyRetry(
-        (msgs) => requestCoachResponse(system, msgs),
+        (msgs) => { setStreamingReply(""); return requestCoachResponse(system, msgs, setStreamingReply); },
         apiMessages
       );
       console.log("Coach response received:", JSON.stringify(rawParsed));
@@ -8121,6 +8221,7 @@ export default function App() {
       persist((prev) => ({ ...prev, coachChat: trimCoachChat([...withUser, { role: "assistant", text: failText }]) }));
     } finally {
       setCoachLoading(false);
+      setStreamingReply("");
     }
   }
 
@@ -8694,7 +8795,7 @@ export default function App() {
               onOpenHistoryEntry={(idx) => { setHistoryEditorInitialIdx(idx); setHistoryEditorOpen(true); }}
             />
           )}
-          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} lastChangeId={state.lastCoachChange?.id} onUndo={undoLastCoachChange} />}
+          {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} lastChangeId={state.lastCoachChange?.id} onUndo={undoLastCoachChange} streamingReply={streamingReply} />}
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && (
             <Progress

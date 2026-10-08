@@ -57,6 +57,9 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  extractPartialReply,
+  readCoachStream,
+  COACH_STREAMING_ENABLED,
   workoutSummary,
   withUndoSnapshot,
   applyCoachUndo,
@@ -1962,6 +1965,65 @@ describe("workoutSummary — the numbers on the post-workout screen and share ca
   test("an empty or malformed entry still produces something drawable", () => {
     const s = workoutSummary({}, null);
     expect(s).toMatchObject({ dayName: "Workout", setsDone: 0, volume: 0, prs: [], exercises: [] });
+  });
+});
+
+// Showing the Coach's reply as it's written — built, but switched off until
+// it's been checked against the real model and server.
+describe("streamed Coach replies", () => {
+  test("ships switched off", () => {
+    expect(COACH_STREAMING_ENABLED).toBe(false);
+  });
+
+  test("the reply so far is read out of JSON that's still arriving", () => {
+    expect(extractPartialReply('{"reply": "Swapped bench for dum')).toBe("Swapped bench for dum");
+    expect(extractPartialReply('{"reply": "Done.", "program": null')).toBe("Done.");
+    expect(extractPartialReply('{"program": null')).toBe(null);
+  });
+
+  test("escapes are decoded, and one split across chunks waits for the rest", () => {
+    expect(extractPartialReply('{"reply": "Line one\\nand \\"two\\"')).toBe('Line one\nand "two"');
+    expect(extractPartialReply('{"reply": "caf\\u00e9')).toBe("café");
+    expect(extractPartialReply('{"reply": "waits \\')).toBe("waits ");
+    expect(extractPartialReply('{"reply": "waits \\u00')).toBe("waits ");
+  });
+
+  function sseStream(events, splitEvery) {
+    const text = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+    const bytes = new TextEncoder().encode(text);
+    return new ReadableStream({
+      start(c) { for (let i = 0; i < bytes.length; i += splitEvery) c.enqueue(bytes.slice(i, i + splitEvery)); c.close(); },
+    });
+  }
+  const input = { reply: "Swapped bench for dumbbell bench.", programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: [{ name: "Dumbbell Bench Press", sets: 3 }] } } };
+  const json = JSON.stringify(input);
+  const events = [
+    { type: "message_start", message: { usage: { input_tokens: 1200, cache_read_input_tokens: 9000, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", name: "respond", input: {} } },
+    ...[0, 9, 25, 47, 80].map((at, i, arr) => ({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: json.slice(at, arr[i + 1] ?? json.length) } })),
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 140 } },
+    { type: "message_stop" },
+  ];
+
+  test("reassembles exactly the same JSON the non-streamed path returns, even split mid-character", async () => {
+    for (const split of [1, 7, 64, 100000]) {
+      const { toolJson, usage } = await readCoachStream(sseStream(events, split));
+      expect(JSON.parse(toolJson)).toEqual(input);
+      expect(usage).toMatchObject({ input_tokens: 1200, cache_read_input_tokens: 9000, output_tokens: 140 });
+    }
+  });
+
+  test("reports the reply as it grows, ending on the full sentence", async () => {
+    const seen = [];
+    await readCoachStream(sseStream(events, 13), (r) => seen.push(r));
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen[seen.length - 1]).toBe("Swapped bench for dumbbell bench.");
+    seen.forEach((r) => expect("Swapped bench for dumbbell bench.".startsWith(r)).toBe(true));
+  });
+
+  test("an error event in the stream becomes a real error", async () => {
+    await expect(readCoachStream(sseStream([{ type: "error", error: { message: "Overloaded" } }], 50))).rejects.toThrow("Overloaded");
   });
 });
 

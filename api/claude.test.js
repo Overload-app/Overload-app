@@ -69,3 +69,26 @@ describe("buildUpstreamBody", () => {
     expect(buildUpstreamBody("nope").model).toBe(MODEL);
   });
 });
+
+// Showing replies as they're written: the server streams only when the app
+// literally asks, and otherwise behaves exactly as before.
+describe("streaming", () => {
+  test("only a literal stream:true is passed on", () => {
+    expect(buildUpstreamBody({ stream: true }).stream).toBe(true);
+    expect(buildUpstreamBody({ stream: "true" }).stream).toBeUndefined();
+    expect(buildUpstreamBody({}).stream).toBeUndefined();
+  });
+
+  test("events are passed straight through, in order, then the response ends", async () => {
+    const { pipeEventStream } = await import("./claude.js");
+    const chunks = ["event: a\ndata: {\"x\":1}\n\n", "event: b\ndata: {\"x\":2}\n\n"].map((t) => new TextEncoder().encode(t));
+    const body = new ReadableStream({ start(c) { chunks.forEach((ch) => c.enqueue(ch)); c.close(); } });
+    const written = [];
+    const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, write(b) { written.push(Buffer.from(b).toString()); }, end() { this.ended = true; } };
+    await pipeEventStream(body, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["Content-Type"]).toMatch(/text\/event-stream/);
+    expect(written.join("")).toBe("event: a\ndata: {\"x\":1}\n\nevent: b\ndata: {\"x\":2}\n\n");
+    expect(res.ended).toBe(true);
+  });
+});

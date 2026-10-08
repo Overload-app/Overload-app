@@ -13,6 +13,8 @@
 //   ANTHROPIC_API_KEY=sk-ant-... npm run eval:coach
 //   EVAL_BUDGET_USD=1.50   hard stop for the run (default 1.50)
 //   EVAL_ONLY=pull,undo    run only scenarios whose id contains one of these
+//   EVAL_STREAMING=1       run with streamed replies switched on — the check
+//                          to do before turning COACH_STREAMING_ENABLED on
 // A report is written to evals/results/. Typical full run: well under $1.
 import { describe, test, expect, vi, beforeAll, afterAll } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -25,6 +27,7 @@ const KEY = process.env.ANTHROPIC_API_KEY;
 const BUDGET_CENTS = Number(process.env.EVAL_BUDGET_USD || 1.5) * 100;
 const ONLY = (process.env.EVAL_ONLY || "").split(",").map((x) => x.trim()).filter(Boolean);
 const USER = { id: "eval-user", email: "eval@example.com", user_metadata: { name: "Eval" } };
+if (process.env.EVAL_STREAMING === "1") globalThis.__OVERLOAD_FORCE_STREAMING__ = true;
 
 const ex = (name, sets = 3, reps = "8-12", rest = 90) => ({ name, sets, reps, rest, tips: ["Brace", "Control it", "Full range", "Don't rush"], alternatives: [] });
 const PROGRAM = { splitName: "Push / Pull / Legs", days: [
@@ -96,17 +99,25 @@ async function proxyToAnthropic(_url, init) {
     headers: { "Content-Type": "application/json", "x-api-key": KEY, "anthropic-version": "2023-06-01" },
     body: JSON.stringify(body),
   });
+  const record = (u) => {
+    const c = costCents(u || {});
+    ledger.cents += c;
+    ledger.calls++;
+    ledger.rows.push({ ms: Date.now() - started, cents: c, in: u?.input_tokens, read: u?.cache_read_input_tokens, write: u?.cache_creation_input_tokens, out: u?.output_tokens, streamed: !!body.stream });
+  };
+  if (body.stream && res.ok && res.body) {
+    // One copy to the app, one to read the bill from.
+    const [forApp, forLedger] = res.body.tee();
+    readCoachStream(forLedger).then(({ usage }) => record(usage)).catch(() => record({}));
+    return { ok: true, status: 200, headers: res.headers, body: forApp, json: async () => { throw new Error("streamed"); } };
+  }
   const data = await res.json();
-  const u = data.usage || {};
-  const c = costCents(u);
-  ledger.cents += c;
-  ledger.calls++;
-  ledger.rows.push({ ms: Date.now() - started, cents: c, in: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, out: u.output_tokens });
+  record(data.usage);
   return { ok: res.ok, status: res.status, json: async () => data };
 }
 
 const { default: App } = await import("../src/App.jsx");
-const { dayFocusGroups, inferMuscleGroup, INJURY_EXCLUDES } = await import("../src/App.jsx");
+const { dayFocusGroups, inferMuscleGroup, INJURY_EXCLUDES, readCoachStream } = await import("../src/App.jsx");
 
 async function converse(messages, state) {
   stored = state;
