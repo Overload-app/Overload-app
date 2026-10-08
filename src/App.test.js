@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  buildCoachStaticSystemFull,
+  COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
   acceptGeneratedProgram,
@@ -2098,6 +2100,58 @@ describe("AI text is always safe to put on screen", () => {
 
   test("an AI meal always comes out drawable and addable", () => {
     expect(cleanAiMeal({ name: { en: "x" }, cal: "450", note: ["a"] })).toEqual({ name: "Meal", note: "", cal: 450, protein: 0, carb: 0, fat: 0 });
+  });
+});
+
+// The compact rulebook: the same rules in roughly a quarter of the tokens.
+// Shipped switched off until the Coach test list has compared both.
+describe("compact Coach rulebook", () => {
+  function compact() {
+    globalThis.__OVERLOAD_PROMPT__ = "compact";
+    try { return buildCoachStaticSystem(); } finally { delete globalThis.__OVERLOAD_PROMPT__; }
+  }
+
+  test("ships switched off — the full rulebook is what the Coach gets", () => {
+    expect(COACH_PROMPT_VERSION).toBe("full");
+    expect(buildCoachStaticSystem()).toBe(buildCoachStaticSystemFull());
+  });
+
+  test("is far smaller, which is the point", () => {
+    expect(compact().length).toBeLessThan(buildCoachStaticSystemFull().length * 0.35);
+  });
+
+  test("still covers every field and context line the app relies on", () => {
+    const c = compact();
+    ["\"reply\"", "\"program\"", "\"programDayEdit\"", "\"todayOverride\"", "\"todayOverrideDayIndex\"", "\"targets\"", "\"restoreIndex\"", "\"restoreOriginal\"", "\"overrideCeiling\"",
+      "Their days, by dayIndex", "Open right now", "Next scheduled", "One-time change already set", "Current program JSON", "Current nutrition targets JSON",
+      "Food preferences", "MUST NOT eat", "EXERCISE_CEILING", "SESSION_LENGTH", "TIGHTEST_SETS", "TIGHTEST_REST", "[Sent YYYY-MM-DD]"]
+      .forEach((needle) => expect(c).toContain(needle));
+  });
+
+  test("keeps the rules behind every bug fixed before launch", () => {
+    const c = compact();
+    [
+      "ASK — one short sentence listing the real day names",
+      "Never apply a guess and ask at the same time",
+      "keep the same number of exercises and the same sets/reps",
+      "never add another day's exercise as filler",
+      "Never remove an exercise they didn't ask to remove",
+      "is case 1 or 2, never case 3",
+      "you MUST set one of them",
+      "Never call a one-time change permanent",
+      "Never invent a reason to defend a mistake",
+      "NEVER below 1200 calories for a woman or 1500 for a man",
+      "never more than ~35% of calories",
+      "Never say you can't see them",
+      "is a hard rule",
+      "Never moralize",
+      "never carry it into a later request",
+      "\"tips\": [] and \"alternatives\": []",
+    ].forEach((rule) => expect(c).toContain(rule));
+  });
+
+  test("is identical for every account, so it stays cache-shareable", () => {
+    expect(compact()).toBe(compact());
   });
 });
 

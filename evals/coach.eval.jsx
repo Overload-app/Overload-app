@@ -15,6 +15,9 @@
 //   EVAL_ONLY=pull,undo    run only scenarios whose id contains one of these
 //   EVAL_STREAMING=1       run with streamed replies switched on — the check
 //                          to do before turning COACH_STREAMING_ENABLED on
+//   EVAL_PROMPT=compact    run with the compact Coach rulebook — compare its
+//                          pass rate and cost against a normal run before
+//                          switching COACH_PROMPT_VERSION
 // A report is written to evals/results/. Typical full run: well under $1.
 import { describe, test, expect, vi, beforeAll, afterAll } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -28,6 +31,8 @@ const BUDGET_CENTS = Number(process.env.EVAL_BUDGET_USD || 1.5) * 100;
 const ONLY = (process.env.EVAL_ONLY || "").split(",").map((x) => x.trim()).filter(Boolean);
 const USER = { id: "eval-user", email: "eval@example.com", user_metadata: { name: "Eval" } };
 if (process.env.EVAL_STREAMING === "1") globalThis.__OVERLOAD_FORCE_STREAMING__ = true;
+if (process.env.EVAL_PROMPT) globalThis.__OVERLOAD_PROMPT__ = process.env.EVAL_PROMPT;
+const RUN_LABEL = `rulebook: ${process.env.EVAL_PROMPT || "full (shipped)"} · streaming: ${process.env.EVAL_STREAMING === "1" ? "on" : "off"}`;
 
 const ex = (name, sets = 3, reps = "8-12", rest = 90) => ({ name, sets, reps, rest, tips: ["Brace", "Control it", "Full range", "Don't rush"], alternatives: [] });
 const PROGRAM = { splitName: "Push / Pull / Legs", days: [
@@ -304,6 +309,8 @@ run("Coach test list (real AI)", () => {
     const lines = [
       `# Coach test list — ${new Date().toISOString()}`,
       ``,
+      `_${RUN_LABEL}_`,
+      ``,
       `**${passed}/${results.length} passed** · ${ledger.calls} AI calls · $${(ledger.cents / 100).toFixed(3)} spent · median ${ms[Math.floor(ms.length / 2)] || 0} ms, slowest ${ms[ms.length - 1] || 0} ms per reply`,
       ``,
       ...results.map((r) => `- ${r.failures.length ? "FAIL" : "pass"} **${r.id}** — ${r.what}${r.failures.length ? `\n  - ${r.failures.join("\n  - ")}\n  - reply: "${(r.reply || "").slice(0, 300)}"` : ""}`),
@@ -311,7 +318,7 @@ run("Coach test list (real AI)", () => {
       `Per call: ${ledger.rows.map((r) => `${(r.cents).toFixed(2)}c/${r.ms}ms (in ${r.in}, cache read ${r.read}, cache write ${r.write}, out ${r.out})`).join("; ")}`,
     ];
     mkdirSync("evals/results", { recursive: true });
-    const file = `evals/results/coach-${Date.now()}.md`;
+    const file = `evals/results/coach-${process.env.EVAL_PROMPT || "full"}-${Date.now()}.md`;
     writeFileSync(file, lines.join("\n"));
     console.log("\n" + lines.slice(0, 3).join("\n") + `\nFull report: ${file}\n`);
   });
