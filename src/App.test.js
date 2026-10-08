@@ -57,6 +57,9 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  sanitizeExercises,
+  sanitizeCoachResponse,
+  rejectedReplyText,
   dayFocusGroups,
   impliedEquipment,
   resumeTiming,
@@ -1731,6 +1734,60 @@ describe("one-time workouts keep the day's length and stay on its muscles", () =
     expect(st).toContain('"30 minutes" said about a previous workout does not carry over');
     expect(st).toContain("Never add another day's exercise as filler");
     expect(st).toContain("Never invent a training reason to defend a mistake");
+  });
+});
+
+describe("sanitizeCoachResponse — nothing broken reaches the saved program", () => {
+  const ex = (name, extra = {}) => ({ name, sets: 3, reps: "8-12", rest: 90, tips: ["a"], ...extra });
+  const state = { programHistory: [{ program: {}, targets: {} }], originalProgram: { days: [] } };
+
+  test("drops nameless exercises and fixes numbers that aren't numbers", () => {
+    const out = sanitizeExercises([ex("Squat", { sets: "three", rest: null, reps: 10 }), { sets: 3 }, ex("  Leg Press  ", { sets: "40" })]);
+    expect(out.map((e) => e.name)).toEqual(["Squat", "Leg Press"]);
+    expect(out[0]).toMatchObject({ sets: 3, rest: 90, reps: "10" });
+    expect(out[1].sets).toBe(10); // clamped
+  });
+
+  test("anything that isn't a list of exercises becomes an empty list", () => {
+    expect(sanitizeExercises({ name: "Row" })).toEqual([]);
+    expect(sanitizeExercises(null)).toEqual([]);
+    expect(sanitizeExercises("Row")).toEqual([]);
+  });
+
+  test("a program with no days, or an empty day, is rejected whole", () => {
+    expect(sanitizeCoachResponse({ program: { days: [] } }, state).rejected).toEqual(["program"]);
+    const r = sanitizeCoachResponse({ program: { days: [{ name: "A", exercises: [ex("Row")] }, { name: "B", exercises: [] }] } }, state);
+    expect(r.parsed.program).toBe(null);
+    expect(r.rejected).toEqual(["program"]);
+  });
+
+  test("a good program comes through cleaned, not rejected", () => {
+    const r = sanitizeCoachResponse({ program: { days: [{ name: " A ", exercises: [ex("Row", { sets: "4" })] }] } }, state);
+    expect(r.rejected).toEqual([]);
+    expect(r.parsed.program.days[0]).toMatchObject({ name: "A", exercises: [{ name: "Row", sets: 4 }] });
+  });
+
+  test("an empty day edit and a non-list one-time change are rejected", () => {
+    expect(sanitizeCoachResponse({ programDayEdit: { dayIndex: 0, day: { exercises: [] } } }, state).rejected).toEqual(["programDayEdit"]);
+    expect(sanitizeCoachResponse({ todayOverride: { name: "Row" } }, state).rejected).toEqual(["todayOverride"]);
+  });
+
+  test("a restore to a version that doesn't exist is rejected", () => {
+    expect(sanitizeCoachResponse({ restoreIndex: 5 }, state).rejected).toEqual(["restoreIndex"]);
+    expect(sanitizeCoachResponse({ restoreIndex: 0 }, state).rejected).toEqual([]);
+    expect(sanitizeCoachResponse({ restoreOriginal: true }, { programHistory: [] }).rejected).toEqual(["restoreOriginal"]);
+  });
+
+  test("absurd targets are rejected; ordinary ones and incomplete ones are left alone", () => {
+    expect(sanitizeCoachResponse({ targets: { calories: 999999, protein: 1, carbs: 1, fat: 1 } }, state).rejected).toEqual(["targets"]);
+    expect(sanitizeCoachResponse({ targets: { calories: 2800, protein: 180, carbs: 300, fat: 80 } }, state).rejected).toEqual([]);
+    expect(sanitizeCoachResponse({ targets: { calories: 3000 } }, state).rejected).toEqual([]);
+  });
+
+  test("the reply says what actually happened", () => {
+    expect(rejectedReplyText(["restoreIndex"], false)).toMatch(/couldn't find that earlier version/);
+    expect(rejectedReplyText(["program"], false)).toMatch(/nothing was changed/);
+    expect(rejectedReplyText(["targets"], true)).toMatch(/Part of that didn't go through/);
   });
 });
 

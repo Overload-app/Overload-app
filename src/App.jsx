@@ -849,6 +849,111 @@ function coercePositiveNumber(n) {
   return Number.isFinite(num) && num > 0 ? num : null;
 }
 
+// Every exercise the AI writes passes through here before it can be saved.
+// Found by feeding the real Coach every kind of malformed reply: a missing
+// name, sets: "three", rest: null and tips as a bare string were all saved
+// straight into the program, where a workout would then render zero set rows
+// or a NaN rest timer. Anything without a usable name is dropped; numbers that
+// aren't numbers fall back to sensible defaults and are clamped to a sane range.
+function saneInt(value, min, max, fallback) {
+  // Number(null) and Number("") are both 0, so a missing rest would otherwise
+  // become "0 seconds" instead of the default.
+  if (value === null || value === undefined || value === "") return fallback;
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+export function sanitizeExercises(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((e) => e && typeof e === "object" && typeof e.name === "string" && e.name.trim())
+    .map((e) => ({
+      ...e,
+      name: e.name.trim(),
+      sets: saneInt(e.sets, 1, 10, 3),
+      reps: typeof e.reps === "string" && e.reps.trim()
+        ? e.reps.trim()
+        : Number(e.reps) > 0 ? String(Math.round(Number(e.reps))) : "8-12",
+      rest: saneInt(e.rest, 0, 600, 90),
+      tips: Array.isArray(e.tips)
+        ? e.tips.filter((t) => typeof t === "string" && t.trim())
+        : typeof e.tips === "string" && e.tips.trim() ? [e.tips.trim()] : [],
+      alternatives: Array.isArray(e.alternatives) ? e.alternatives.filter((a) => typeof a === "string" && a.trim()) : [],
+    }));
+}
+
+// Cleans a Coach reply against what the app can actually apply, BEFORE any of
+// it is acted on. Returns the cleaned reply plus the parts that had to be
+// thrown away, so the reply shown can say so instead of claiming success.
+// Found by feeding the real Coach malformed replies; every one of these was
+// either saved as-is or answered with "Done":
+//   - a full program with zero days — saved, which would break the app on
+//     next open (every screen reads program.days[...])
+//   - a day edit with an empty exercise list — saved as an empty workout day
+//   - a one-time change sent as an object instead of a list — dropped, but
+//     the reply still said "Done — just for today."
+//   - a restore to a version that doesn't exist, or to an original the
+//     account never saved — nothing happened, reply said "Done — reverted it."
+//   - targets of 999,999 calories — saved
+export function sanitizeCoachResponse(parsed, state) {
+  const out = { ...parsed };
+  const rejected = [];
+
+  if (out.todayOverride != null) {
+    const clean = sanitizeExercises(out.todayOverride);
+    if (clean.length === 0) { rejected.push("todayOverride"); out.todayOverride = null; }
+    else out.todayOverride = clean;
+  }
+
+  if (out.programDayEdit != null) {
+    const de = out.programDayEdit;
+    const clean = de && typeof de === "object" && de.day ? sanitizeExercises(de.day.exercises) : [];
+    if (clean.length === 0) { rejected.push("programDayEdit"); out.programDayEdit = null; }
+    else {
+      const name = typeof de.day.name === "string" && de.day.name.trim() ? de.day.name.trim() : undefined;
+      out.programDayEdit = { ...de, day: { ...de.day, name, exercises: clean } };
+    }
+  }
+
+  if (out.program != null) {
+    const pr = out.program;
+    const days = pr && Array.isArray(pr.days)
+      ? pr.days.map((d) => ({ ...d, name: typeof d?.name === "string" ? d.name.trim() : "", exercises: sanitizeExercises(d?.exercises) }))
+      : [];
+    // All or nothing: a program with a nameless or empty day is not a
+    // program anyone can train from, and half-applying one is worse.
+    if (days.length === 0 || days.some((d) => !d.name || d.exercises.length === 0)) { rejected.push("program"); out.program = null; }
+    else out.program = { ...pr, days };
+  }
+
+  if (out.targets != null) {
+    const t = out.targets || {};
+    const [cal, pro, carb, fat] = [t.calories, t.protein, t.carbs, t.fat].map(Number);
+    const sane = [cal, pro, carb, fat].every(Number.isFinite)
+      && cal > 0 && cal <= 7000 && pro >= 0 && pro <= 500 && carb >= 0 && carb <= 1000 && fat >= 0 && fat <= 400;
+    // A missing field is left for coachResponseFlags to ignore as before;
+    // only numbers that are present but absurd are rejected here.
+    const allPresent = [t.calories, t.protein, t.carbs, t.fat].every((v) => v !== undefined && v !== null && v !== "");
+    if (allPresent && !sane) { rejected.push("targets"); out.targets = null; }
+  }
+
+  const restoreIdx = coerceInt(out.restoreIndex);
+  if (restoreIdx !== null && !(state?.programHistory || [])[restoreIdx]) { rejected.push("restoreIndex"); out.restoreIndex = null; }
+  if (out.restoreOriginal === true && !state?.originalProgram) { rejected.push("restoreOriginal"); out.restoreOriginal = false; }
+
+  return { parsed: out, rejected };
+}
+
+// The honest reply for a turn where part or all of the Coach's change had to
+// be thrown away. Specific where it can be, so the person knows what to do.
+export function rejectedReplyText(rejected, madeChange) {
+  if (madeChange) return "Part of that didn't go through on my end — mind asking again for the rest?";
+  if (rejected.includes("restoreIndex") || rejected.includes("restoreOriginal")) {
+    return "I couldn't find that earlier version to go back to, so nothing was changed. Tell me what you want it to look like and I'll set it up.";
+  }
+  return "Sorry — that didn't actually go through on my end, so nothing was changed. Mind asking again?";
+}
+
 // What the Coach's parsed JSON response actually DOES, independent of what its
 // "reply" text claims — shared by the fallback-reply text below and by the
 // persist logic that applies the change, so the two can never disagree about
@@ -7502,11 +7607,19 @@ export default function App() {
       // See withBlankReplyRetry's own comment — a blank/unparseable
       // response always gets one automatic retry with direct feedback
       // before the person ever sees a dead-end failure message.
-      const { parsed } = await withBlankReplyRetry(
+      const { parsed: rawParsed } = await withBlankReplyRetry(
         (msgs) => requestCoachResponse(system, msgs),
         apiMessages
       );
-      console.log("Coach response received:", JSON.stringify(parsed));
+      console.log("Coach response received:", JSON.stringify(rawParsed));
+      // Everything below reads the cleaned reply — see sanitizeCoachResponse.
+      const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current);
+      if (rejected.length > 0) {
+        logError("Coach reply had parts the app couldn't use", {
+          stack: JSON.stringify(rawParsed).slice(0, 4000),
+          context: { type: "coach-reply-rejected", rejected },
+        });
+      }
       const { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid } = coachResponseFlags(parsed);
       // Real, DEFINITIVELY confirmed report (direct database check): asked
       // to remove an exercise, Coach named the correct day and replied
@@ -7536,12 +7649,21 @@ export default function App() {
           context: { type: "coach-override-bad-day", todayOverrideDayIndex: parsed.todayOverrideDayIndex },
         });
       }
-      const changeNote = intendedButInvalid || overrideTargetInvalid
+      const nothingWorked = rejected.length > 0 && !madeChange;
+      const changeNote = intendedButInvalid || overrideTargetInvalid || nothingWorked
         ? ""
         : coachChangeNote(flags, parsed, stateRef.current.program, overrideTarget?.dayIdx);
+      // The safe calorie floor is applied when targets are saved; if it moved
+      // the number, the reply has to say so. "Set you to 800 calories" while
+      // 1,500 is what's actually saved is a lie on the Fuel screen.
+      const floorNote = hasValidTargets && Number(parsed.targets.calories) < enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex)
+        ? `I kept calories at ${enforceSafeCalorieFloor(Number(parsed.targets.calories), stateRef.current.profile?.sex).toLocaleString()} — going lower than that isn't safe.`
+        : "";
       const replyText = intendedButInvalid || overrideTargetInvalid
         ? "Sorry — that change didn't actually go through on my end. Mind asking again, and say which day?"
-        : [coachReplyText(parsed, madeChange), changeNote].filter(Boolean).join(" ");
+        : nothingWorked
+          ? rejectedReplyText(rejected, false)
+          : [coachReplyText(parsed, madeChange), changeNote, floorNote, rejected.length > 0 ? rejectedReplyText(rejected, true) : ""].filter(Boolean).join(" ");
       const withReply = trimCoachChat([...withUser, { role: "assistant", text: replyText }]);
 
       // Diagnostics: flag cases that look like a bug so they're visible in the
