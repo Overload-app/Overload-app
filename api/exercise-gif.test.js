@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { searchCandidates, bestFuzzyMatch } from "./exercise-gif.js";
+import handler, { searchCandidates, bestFuzzyMatch, bearerToken } from "./exercise-gif.js";
 
 describe("searchCandidates", () => {
   test("a plain name with no qualifiers or equipment prefix has just itself as a candidate", () => {
@@ -106,5 +106,22 @@ describe("bestFuzzyMatch", () => {
   test("still rejects two different specific lower-body sub-parts from matching each other", () => {
     const gymCatalog = [{ name_key: "seated hamstring extension machine", gif_url: "https://api.workoutxapp.com/v1/gifs/1001.gif" }];
     expect(bestFuzzyMatch("Seated Quad Extension Machine", gymCatalog)).toBeNull();
+  });
+});
+
+// Found in a pre-launch security pass: anyone could spend the shared WorkoutX
+// lookup quota, which would stop demo videos loading for every user.
+describe("requires a signed-in session", () => {
+  test("a request with no session token is refused before WorkoutX is called", async () => {
+    process.env.WORKOUTX_API_KEY = "test-key";
+    process.env.SUPABASE_URL = "https://example.supabase.co";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
+    const res = { statusCode: 0, status(c) { this.statusCode = c; return this; }, json() { return this; } };
+    await handler({ method: "GET", headers: {}, query: { name: "Bench Press" } }, res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  test("bearerToken reads the Authorization header", () => {
+    expect(bearerToken({ headers: { authorization: "Bearer xyz" } })).toBe("xyz");
   });
 });

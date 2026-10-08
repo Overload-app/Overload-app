@@ -125,6 +125,13 @@ export function bestFuzzyMatch(query, candidates) {
   return bestScore > 0.5 ? best : null;
 }
 
+// Deliberately duplicated rather than imported across endpoint files.
+export function bearerToken(req) {
+  const header = (req && req.headers && (req.headers.authorization || req.headers.Authorization)) || "";
+  const match = /^Bearer\s+(.+)$/i.exec(String(header).trim());
+  return match ? match[1].trim() : null;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -133,6 +140,30 @@ export default async function handler(req, res) {
   const apiKey = process.env.WORKOUTX_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "Server is missing the WORKOUTX_API_KEY environment variable." });
+  }
+
+  // Found in a pre-launch security pass: anyone could call this, and each
+  // uncached name spends from the shared WorkoutX quota (free tier: 500
+  // requests/month). Exhausting it would stop demo videos loading for every
+  // user. Requires a signed-in session now, like /api/claude. The app treats
+  // a failed lookup as "unconfirmed" and simply retries later, never as a
+  // permanent "no video".
+  const token = bearerToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "Not signed in." });
+  }
+  const authUrl = process.env.SUPABASE_URL;
+  const authKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!authUrl || !authKey) {
+    return res.status(500).json({ error: "Server is missing required environment variables." });
+  }
+  try {
+    const { data, error } = await createClient(authUrl, authKey).auth.getUser(token);
+    if (error || !data || !data.user) {
+      return res.status(401).json({ error: "Not signed in." });
+    }
+  } catch (e) {
+    return res.status(401).json({ error: "Not signed in." });
   }
 
   const name = (req.query.name || "").toString().trim();

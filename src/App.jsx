@@ -1304,7 +1304,15 @@ export async function fetchExerciseGif(name) {
   // report: wanted the failure message to actually say "you're offline"
   // when that's the real reason, which needs this to be trustworthy.
   try {
-    const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`);
+    // Signed-in only now (it spends a shared, limited lookup quota).
+    let accessToken = null;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      accessToken = sessionData?.session?.access_token || null;
+    } catch (e) {}
+    const res = await fetch(`/api/exercise-gif?name=${encodeURIComponent(name)}`, {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    });
     const data = await res.json().catch(() => null);
     if (!res.ok) {
       console.warn(`Exercise GIF lookup failed for "${name}": ${res.status}`, data?.error, data?.detail);
