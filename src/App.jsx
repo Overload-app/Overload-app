@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
+import { renderShareCard, shareOrDownload } from "./shareCard.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -6192,6 +6193,39 @@ export function exercisePR(logs, name) {
   ), history[0]);
 }
 
+// Everything the post-workout screen and the share card show, from one logged
+// workout. PRs are judged against the workouts logged BEFORE this one, and —
+// same rule as the in-workout PR toast — only count when there was a real
+// earlier number to beat.
+export function workoutSummary(entry, priorLogs) {
+  const exercises = (entry?.exercises || []).map((e) => {
+    const done = (e.logged || []).filter((l) => l.done);
+    const weighted = done.filter((l) => Number(l.weight) > 0 && Number(l.reps) > 0);
+    const top = weighted.reduce((best, l) => {
+      const w = Number(l.weight), r = Number(l.reps);
+      return !best || w > best.weight || (w === best.weight && r > best.reps) ? { weight: w, reps: r } : best;
+    }, null);
+    return { name: e.name, setsDone: done.length, weight: top?.weight || 0, reps: top?.reps || 0 };
+  });
+  const prs = exercises.filter((e) => {
+    if (!(e.weight > 0)) return false;
+    const prior = exercisePR(priorLogs || { workouts: [] }, e.name);
+    return !!prior && (e.weight > prior.weight || (e.weight === prior.weight && e.reps > prior.reps));
+  }).map((e) => ({ name: e.name, weight: e.weight, reps: e.reps }));
+  const volume = (entry?.exercises || []).reduce((a, e) => a + (e.logged || []).reduce((b, l) => b + (l.done && Number(l.weight) > 0 && Number(l.reps) > 0 ? Number(l.weight) * Number(l.reps) : 0), 0), 0);
+  let dateLabel = entry?.date || "";
+  try { dateLabel = parseISODate(entry.date).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }); } catch (e) {}
+  return {
+    dayName: entry?.dayName || "Workout",
+    dateLabel,
+    durationSec: entry?.durationSec || 0,
+    setsDone: exercises.reduce((a, e) => a + e.setsDone, 0),
+    volume: Math.round(volume),
+    prs,
+    exercises: exercises.filter((e) => e.setsDone > 0),
+  };
+}
+
 // Active-time-only workout duration: the wall-clock time the workout screen
 // was actually open, deliberately excluding any gap after "save & exit"
 // until it's resumed — saving a workout and finishing it three days later
@@ -6795,6 +6829,8 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
               ))}
             </Card>
           ))}
+          {/* PRs judged against the workouts logged before this one. */}
+          <ShareWorkoutButton summary={workoutSummary(entry, { workouts: workouts.slice(0, openIdx) })} style={{ marginTop: 6 }} />
         </div>
         <div style={{ padding: 16, borderTop: `1px solid ${T.steel}`, display: "flex", gap: 8, flexShrink: 0 }}>
           <Btn variant="ghost" onClick={() => setConfirmDelete(true)} style={{ flexShrink: 0 }}>Delete</Btn>
@@ -6870,6 +6906,63 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Real ask (launch prep): every share to a story is free advertising.
+export function ShareWorkoutButton({ summary, style }) {
+  const [status, setStatus] = useState(null); // null | "working" | "downloaded" | "error"
+  async function share() {
+    setStatus("working");
+    try {
+      const blob = await renderShareCard(summary);
+      const result = await shareOrDownload(blob, `overload-${(summary.dayName || "workout").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.png`);
+      setStatus(result === "downloaded" ? "downloaded" : null);
+    } catch (e) {
+      setStatus("error");
+    }
+  }
+  return (
+    <div style={style}>
+      <Btn variant="accent" onClick={share} disabled={status === "working"} style={{ width: "100%" }}>
+        {status === "working" ? "Making your card…" : "Share workout"}
+      </Btn>
+      {status === "downloaded" && <p style={{ fontSize: 12, color: T.steelDark, textAlign: "center", margin: "8px 0 0" }}>Saved the image — post it from your photos.</p>}
+      {status === "error" && <p style={{ fontSize: 12, color: T.warn, textAlign: "center", margin: "8px 0 0" }}>Couldn't make the image on this device.</p>}
+    </div>
+  );
+}
+
+// Shown right after Finish. Used to drop straight back to the Train tab with
+// no acknowledgement of what they'd just done.
+export function WorkoutCompleteSheet({ summary, onClose }) {
+  const mins = Math.max(1, Math.round((summary.durationSec || 0) / 60));
+  return (
+    <div className="fullscreen-overlay" style={{ background: "rgba(13,14,21,0.94)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 380, background: T.card, borderRadius: 20, padding: 22 }}>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 1 }}>WORKOUT COMPLETE</div>
+        <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: "4px 0 2px", color: T.ink }}>{summary.dayName}</h2>
+        <div style={{ fontSize: 13, color: T.steelDark, marginBottom: 16 }}>{summary.dateLabel}</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {[["Time", `${mins} min`], ["Sets", summary.setsDone], ["Volume", summary.volume > 0 ? `${summary.volume.toLocaleString()} lb` : "—"]].map(([label, val]) => (
+            <div key={label} style={{ flex: 1, background: T.paper, borderRadius: 12, padding: "10px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: T.steelDark, fontWeight: 600 }}>{label}</div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, color: T.ink }}>{val}</div>
+            </div>
+          ))}
+        </div>
+        {summary.prs.length > 0 && (
+          <div style={{ background: "#E9F7F1", borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.good, letterSpacing: 0.5, marginBottom: 4 }}>{summary.prs.length === 1 ? "NEW PR" : `${summary.prs.length} NEW PRS`}</div>
+            {summary.prs.map((pr) => (
+              <div key={pr.name} style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{pr.name} — {pr.weight} lb × {pr.reps}</div>
+            ))}
+          </div>
+        )}
+        <ShareWorkoutButton summary={summary} />
+        <button onClick={onClose} style={{ width: "100%", background: "none", border: "none", color: T.steelDark, fontSize: 14, fontWeight: 600, padding: "12px 0 0", cursor: "pointer" }}>Done</button>
       </div>
     </div>
   );
@@ -7297,6 +7390,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
+  const [finishedSummary, setFinishedSummary] = useState(null);
   const [quizEditorOpen, setQuizEditorOpen] = useState(false);
   const [rebuildingProgram, setRebuildingProgram] = useState(false);
   const [historyEditorInitialIdx, setHistoryEditorInitialIdx] = useState(null); // real index to jump straight to, or null for the plain list
@@ -8259,6 +8353,8 @@ export default function App() {
     // reached this line. The frozen baseline is the only correct "prior".
     const durationSec = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
+    // Judged against the workouts logged BEFORE this one, for its PRs.
+    setFinishedSummary(workoutSummary(entry, state.logs));
     // See overrideUsedUpBy: only the workout a one-time change was for uses it up.
     const finishedDayIdx = session.dayIdx;
     persist((prev) => {
@@ -8715,6 +8811,10 @@ export default function App() {
           gifCache={state.gifCache || {}}
           onCacheGif={cacheGif}
         />
+      )}
+
+      {finishedSummary && (
+        <WorkoutCompleteSheet summary={finishedSummary} onClose={() => setFinishedSummary(null)} />
       )}
 
       {quizEditorOpen && (

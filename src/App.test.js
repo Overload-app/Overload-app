@@ -57,6 +57,7 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  workoutSummary,
   withUndoSnapshot,
   applyCoachUndo,
   coachApiMessages,
@@ -1904,6 +1905,49 @@ describe("Coach Undo", () => {
     expect(undone.programHistory[0].program).toBe(newProgram);
     expect(undone.lastCoachChange).toBe(null);
     expect(applyCoachUndo(undone)).toBe(undone);
+  });
+});
+
+// Real ask (launch prep): a shareable card after every workout.
+describe("workoutSummary — the numbers on the post-workout screen and share card", () => {
+  const set = (weight, reps, done = true) => ({ weight: String(weight), reps: String(reps), done });
+  const entry = {
+    date: "2026-10-07", dayName: "Push", durationSec: 3120,
+    exercises: [
+      { name: "Bench Press", logged: [set(185, 8), set(205, 6), set(225, 2, false)] },
+      { name: "Overhead Press", logged: [set(115, 8), set(115, 8)] },
+      { name: "Push-Up", logged: [{ weight: "", reps: "20", done: true }] },
+      { name: "Cable Fly", logged: [set(40, 12, false)] },
+    ],
+  };
+  const prior = { workouts: [{ date: "2026-10-01", dayName: "Push", exercises: [
+    { name: "Bench Press", logged: [set(200, 6)] },
+    { name: "Overhead Press", logged: [set(120, 8)] },
+  ] }] };
+
+  test("counts only completed sets, and volume only from completed weighted sets", () => {
+    const s = workoutSummary(entry, prior);
+    expect(s.setsDone).toBe(5);
+    expect(s.volume).toBe(185 * 8 + 205 * 6 + 115 * 8 * 2);
+  });
+
+  test("a new PR is a completed set that beats a real earlier number", () => {
+    const s = workoutSummary(entry, prior);
+    expect(s.prs).toEqual([{ name: "Bench Press", weight: 205, reps: 6 }]);
+  });
+
+  test("an unchecked heavier set is not a PR, and a first-ever exercise isn't either", () => {
+    const s = workoutSummary(entry, { workouts: [] });
+    expect(s.prs).toEqual([]);
+  });
+
+  test("exercises with nothing completed are left off the card", () => {
+    expect(workoutSummary(entry, prior).exercises.map((e) => e.name)).toEqual(["Bench Press", "Overhead Press", "Push-Up"]);
+  });
+
+  test("an empty or malformed entry still produces something drawable", () => {
+    const s = workoutSummary({}, null);
+    expect(s).toMatchObject({ dayName: "Workout", setsDone: 0, volume: 0, prs: [], exercises: [] });
   });
 });
 

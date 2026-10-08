@@ -75,3 +75,18 @@ describe("rest-timer chime", () => {
     expect(screen.getByLabelText("Turn rest sound on")).toBeInTheDocument();
   });
 });
+
+describe("after Finish", () => {
+  test("the summary screen shows the workout and a Share button", async () => {
+    const { WorkoutCompleteSheet } = await import("./App.jsx");
+    const onClose = vi.fn();
+    render(<WorkoutCompleteSheet summary={{ dayName: "Push", dateLabel: "Tuesday, Oct 7", durationSec: 3120, setsDone: 18, volume: 21450, prs: [{ name: "Bench Press", weight: 205, reps: 6 }], exercises: [] }} onClose={onClose} />);
+    expect(screen.getByText("WORKOUT COMPLETE")).toBeInTheDocument();
+    expect(screen.getByText("52 min")).toBeInTheDocument();
+    expect(screen.getByText("21,450 lb")).toBeInTheDocument();
+    expect(screen.getByText("Bench Press — 205 lb × 6")).toBeInTheDocument();
+    expect(screen.getByText("Share workout")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Done"));
+    expect(onClose).toHaveBeenCalled();
+  });
+});
