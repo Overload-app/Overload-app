@@ -57,6 +57,8 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  dayFocusGroups,
+  impliedEquipment,
   resumeTiming,
   MAX_UNATTENDED_MS,
   overrideDayIdx,
@@ -1647,6 +1649,84 @@ describe("the Coach asks which day only when it genuinely can't tell", () => {
 
   test("it's settled before choosing what kind of change to make", () => {
     expect(st.indexOf("WHICH DAY — settle this BEFORE")).toBeLessThan(st.indexOf("There are THREE different kinds of training requests"));
+  });
+});
+
+// Real report: "change my pull day to only dumbbells for today" came back with
+// Dumbbell Lateral Raise in it — "that is ridiculous and a great way to get bad
+// reviews" — and with fewer exercises than their real pull day, "even though I
+// never told it to shorten this one."
+describe("one-time workouts keep the day's length and stay on its muscles", () => {
+  const ex = (name, sets = 4, rest = 90) => ({ name, sets, reps: "8-12", rest, tips: ["a"] });
+  const dumbbellPull = ["Dumbbell Row", "Chest-Supported Row", "Dumbbell Pullover", "Renegade Row", "Dumbbell Curl", "Dumbbell Hammer Curl"];
+
+  test("a reverse or rear-delt fly is no longer read as a chest exercise", () => {
+    expect(inferMuscleGroup("Dumbbell Reverse Fly")).toBe("shoulders");
+    expect(inferMuscleGroup("Dumbbell Rear Delt Fly")).toBe("shoulders");
+    expect(inferMuscleGroup("Face Pull")).toBe("shoulders");
+    // A real chest fly still is.
+    expect(inferMuscleGroup("Cable Fly")).toBe("chest");
+  });
+
+  test("a day's name says which muscles belong on it", () => {
+    expect([...dayFocusGroups("Pull (Back/Biceps + Conditioning)")].sort()).toEqual(["back", "biceps"]);
+    expect([...dayFocusGroups("Push (Shoulders/Chest Volume)")].sort()).toEqual(["chest", "shoulders", "triceps"]);
+    expect(dayFocusGroups("Legs & Conditioning").has("legs")).toBe(true);
+    expect(dayFocusGroups("Full Body A")).toBe(null);
+    expect(dayFocusGroups("Day 1")).toBe(null);
+  });
+
+  test("an all-dumbbell day is topped up from dumbbells, not the full gym", () => {
+    expect(impliedEquipment([{ name: "Dumbbell Row" }, { name: "Dumbbell Curl" }], "full")).toBe("dumbbell");
+    expect(impliedEquipment([{ name: "Dumbbell Row" }, { name: "Lat Pulldown" }], "full")).toBe("full");
+    expect(impliedEquipment([{ name: "Dumbbell Row" }], "bodyweight")).toBe("bodyweight");
+  });
+
+  test("topping up a pull day never adds a shoulder or chest exercise", () => {
+    const padded = padToMinimum([ex("Dumbbell Row"), ex("Dumbbell Rear Delt Fly"), ex("Dumbbell Hammer Curl")], 6, "full", ["none"], "Pull (Back/Biceps)");
+    padded.forEach((e) => {
+      expect(e.name).not.toMatch(/lateral raise|shoulder press|bench|chest fly/i);
+    });
+  });
+
+  test("topping up a dumbbell-only day never adds a barbell or machine exercise", () => {
+    const padded = padToMinimum([ex("Dumbbell Row"), ex("Dumbbell Curl")], 4, "full", ["none"], "Pull (Back/Biceps)");
+    expect(padded.length).toBe(4);
+    padded.forEach((e) => expect(e.name).not.toMatch(/barbell|cable|machine|pulldown/i));
+  });
+
+  test("the old reverse-fly bug: a back day is never given Bench Press", () => {
+    const padded = padToMinimum([ex("Dumbbell Row"), ex("Dumbbell Reverse Fly"), ex("Dumbbell Curl")], 4, "full", ["none"], "Pull (Back/Biceps)");
+    expect(padded.map((e) => e.name).join(" ")).not.toMatch(/bench/i);
+  });
+
+  test("when nothing fitting is left, it adds nothing rather than something wrong", () => {
+    const allDumbbellBack = ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Chest-Supported Row"];
+    const padded = padToMinimum(allDumbbellBack.map((n) => ex(n)), 9, "dumbbell", ["none"], "Back");
+    expect(padded.length).toBe(4);
+  });
+
+  test("the reported cut: 6 exercises at 4x90s used to be trimmed to 4 on a 60-minute plan", () => {
+    const trimmed = normalizeExerciseCount(dumbbellPull.map((n) => ex(n)), 60, "intermediate", "full", ["none"]);
+    expect(trimmed.length).toBe(4); // what used to happen, still the rule with no floor
+  });
+
+  test("with the day's own length as the floor, the one-time version keeps all 6", () => {
+    const kept = normalizeExerciseCount(dumbbellPull.map((n) => ex(n)), 60, "intermediate", "full", ["none"], false, { dayName: "Pull (Back/Biceps)", minCount: 6 });
+    expect(kept.map((e) => e.name)).toEqual(dumbbellPull);
+  });
+
+  test("asking for a shorter one still works — the floor never adds exercises back", () => {
+    const short = normalizeExerciseCount(dumbbellPull.slice(0, 4).map((n) => ex(n)), 60, "intermediate", "full", ["none"], false, { dayName: "Pull (Back/Biceps)", minCount: 6 });
+    expect(short.length).toBe(4);
+  });
+
+  test("the Coach is told to keep the day's length, not carry old limits, and not invent excuses", () => {
+    const st = buildCoachStaticSystem();
+    expect(st).toContain("Keep the same number of exercises, and the same sets and reps, as the day it replaces");
+    expect(st).toContain('"30 minutes" said about a previous workout does not carry over');
+    expect(st).toContain("Never add another day's exercise as filler");
+    expect(st).toContain("Never invent a training reason to defend a mistake");
   });
 });
 

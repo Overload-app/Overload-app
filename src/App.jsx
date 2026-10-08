@@ -1229,6 +1229,10 @@ export function inferMuscleGroup(name) {
   if (/squat|lunge|deadlift|leg press|leg curl|leg extension|calf|step-?up|glute|split squat|wall sit/.test(n)) return "legs";
   if (/curl/.test(n) && !/leg curl/.test(n)) return "biceps";
   if (/pushdown|skull crusher|tricep|overhead.*extension|kickback|dip|diamond push-?up/.test(n)) return "triceps";
+  // Before the chest rule, which matches any "fly": a reverse/rear-delt fly is
+  // a pull-day exercise, and calling it chest made the top-up below add Bench
+  // Press to a back day that contained one.
+  if (/rear delt|reverse fly|face pull/.test(n)) return "shoulders";
   if (/press|fly|pec deck|push-?up/.test(n) && !/overhead press|shoulder press|leg press/.test(n)) return "chest";
   if (/overhead press|shoulder press|lateral raise|rear delt|face pull|y-raise|arnold|handstand|pike push-?up/.test(n)) return "shoulders";
   if (/row|pulldown|pull-?up|chin-?up|pullover/.test(n)) return "back";
@@ -1789,14 +1793,57 @@ export function enforceExerciseCeiling(exercises, ceiling) {
 // for the alternatives picker). New exercises borrow the day's own
 // sets/rest for consistency, defaulting to a sensible scheme if the day
 // was completely empty.
-export function padToMinimum(exercises, targetCount, equipment, injuries) {
+// The muscle groups a day is FOR, read from its name. Real report: a one-time
+// dumbbell Pull (Back/Biceps) workout came back with Dumbbell Lateral Raise in
+// it — "that is ridiculous and a great way to get bad reviews." A day's name
+// is the clearest statement of what belongs on it. Returns null for names that
+// don't say (Full Body, "Day 1"), meaning no restriction.
+export function dayFocusGroups(dayName) {
+  const n = (dayName || "").toLowerCase();
+  if (!n || /full[ -]?body|total body/.test(n)) return null;
+  const g = new Set();
+  const add = (...xs) => xs.forEach((x) => g.add(x));
+  if (/\bpush\b/.test(n)) add("chest", "shoulders", "triceps");
+  if (/\bpull\b/.test(n)) add("back", "biceps");
+  if (/\blegs?\b|lower|glute|quad|hamstring/.test(n)) add("legs", "core");
+  if (/upper/.test(n)) add("chest", "back", "shoulders", "biceps", "triceps");
+  if (/chest/.test(n)) add("chest");
+  if (/\bback\b/.test(n)) add("back");
+  if (/shoulder|delt/.test(n)) add("shoulders");
+  if (/bicep/.test(n)) add("biceps");
+  if (/tricep/.test(n)) add("triceps");
+  if (/\barms?\b/.test(n)) add("biceps", "triceps");
+  if (/\bcore\b|\babs\b/.test(n)) add("core");
+  return g.size > 0 ? g : null;
+}
+
+// The equipment a day actually uses. A full-gym member who asks for "only
+// dumbbells today" still has equipment "full" on their profile, so topping up
+// from the full-gym pool put Barbell Row and Lat Pulldown into a dumbbell-only
+// workout. If nothing on the day needs more than dumbbells, neither does the
+// top-up.
+export function impliedEquipment(exercises, equipment) {
+  if (equipment !== "full") return equipment;
+  const names = (exercises || []).map((e) => (e.name || "").toLowerCase());
+  if (names.length === 0) return equipment;
+  const needsGym = /barbell|cable|machine|smith|pulldown|pull-down|leg press|leg extension|leg curl|ez[- ]?bar|trap bar|hack squat|pec deck|t-bar/;
+  if (names.some((n) => needsGym.test(n))) return equipment;
+  return names.some((n) => /dumbbell/.test(n)) ? "dumbbell" : equipment;
+}
+
+export function padToMinimum(exercises, targetCount, equipment, injuries, dayName) {
   if (exercises.length >= targetCount) return exercises;
-  const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
+  const pool = filterPool(POOLS[impliedEquipment(exercises, equipment)] || POOLS.full, injuries);
   const usedGroups = new Set(
     exercises.map((e) => EXERCISE_TO_GROUP[e.name] || inferMuscleGroup(e.name)).filter(Boolean)
   );
+  // Only groups the day is actually for. This used to merely PREFER them and
+  // fall through to anything once those ran out. A shorter workout is better
+  // than one with the wrong exercise in it, so if nothing fits, add nothing.
+  const allowed = dayFocusGroups(dayName) || (usedGroups.size > 0 ? usedGroups : null);
   const candidates = Object.keys(pool)
     .flatMap((group) => pool[group].map((name) => ({ name, group })))
+    .filter(({ group }) => !allowed || allowed.has(group))
     .filter(({ name }) => !exercises.some((e) => isSameCoreExercise(e.name, name)))
     // Muscle groups the day ALREADY trains come first, so a focused day
     // stays focused. Real report: "it gave them bench press on leg day."
@@ -1845,8 +1892,18 @@ export function padToMinimum(exercises, targetCount, equipment, injuries) {
 // actually goes through — the padding-up-to-minimum behavior is left
 // untouched either way, since nobody's ever asking for FEWER exercises
 // than the minimum via this flag.
-export function normalizeExerciseCount(exercises, sessionLength, experience, equipment, injuries, overrideCeiling) {
-  const ceiling = overrideCeiling ? Infinity : (capForProgram({ days: [{ exercises }] }, sessionLength, experience) ?? TARGET_MIN_EXERCISES);
+// options.dayName: which day this is, so a top-up stays on that day's muscles.
+// options.minCount: never trim below this many. Real report: "that workout was
+// also shorter, only 4 exercises 3 sets each, even though I never told it to
+// shorten this one." A one-time dumbbell version of a 6-exercise Pull day was
+// estimated against the session length and silently cut to 4 — after the
+// Coach's reply describing the full workout had already been written. A
+// one-time version of a day should be as long as the day it replaces unless
+// they ask otherwise; if they DO ask for shorter, the Coach sends fewer and
+// this floor never adds any back.
+export function normalizeExerciseCount(exercises, sessionLength, experience, equipment, injuries, overrideCeiling, options = {}) {
+  const budget = capForProgram({ days: [{ exercises }] }, sessionLength, experience) ?? TARGET_MIN_EXERCISES;
+  const ceiling = overrideCeiling ? Infinity : Math.max(budget, options.minCount || 0);
   let result = enforceExerciseCeiling(exercises, ceiling);
   // Real, confirmed report: asked Coach to remove one exercise from a day
   // that was already at (or one above) the 4-exercise minimum — 3 tries,
@@ -1862,7 +1919,7 @@ export function normalizeExerciseCount(exercises, sessionLength, experience, equ
   // — same reasoning as the ceiling override, just the other direction.
   const padTarget = overrideCeiling ? 0 : Math.min(TARGET_MIN_EXERCISES, ceiling);
   if (result.length < padTarget) {
-    result = padToMinimum(result, padTarget, equipment, injuries);
+    result = padToMinimum(result, padTarget, equipment, injuries, options.dayName);
   }
   return result;
 }
@@ -3089,7 +3146,7 @@ export function Onboarding({ onComplete }) {
         // on every day regardless of whether the model actually complied.
         const normalizedDays = parsed.days.map((d) => ({
           ...d,
-          exercises: normalizeExerciseCount(d.exercises || [], profile.sessionLength, profile.experience, profile.equipment, profile.injuries),
+          exercises: normalizeExerciseCount(d.exercises || [], profile.sessionLength, profile.experience, profile.equipment, profile.injuries, false, { dayName: d.name }),
         }));
         program = { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays };
       }
@@ -4813,6 +4870,12 @@ There are THREE different kinds of training requests — telling them apart matt
 1. PERMANENT change to ONE existing day only (e.g. "add abs to my workout," "swap squat for leg press," "give me more back volume on pull day," "my knees hurt in general, adjust leg day") — by far the most common case. Use "programDayEdit": {"dayIndex": <index into the CURRENT program's "days" array>, "day": {"name": "<string>", "exercises": [...]}} with ONLY that one day's full new exercise list. Leave "program" and "todayOverride" both null. Do NOT echo back the other days — they're untouched and the app keeps them exactly as they are, so re-sending them would only waste time regenerating identical content.
 2. PERMANENT change that's structural or spans MULTIPLE days at once (e.g. "change my split," "add a training day," "give me more back volume across the whole week," renaming/reorganizing days) — genuinely needs the full picture. Use "program" (the complete {"splitName", "days"} object, every day) and leave "programDayEdit" and "todayOverride" null.
 3. ONE-TIME swap for exactly ONE workout — their next session and nothing after it. The user says "today," "this session," "this workout," "just for now," or gives a reason that only affects one day (short on time today, a passing ache, a busy gym). Set "program" and "programDayEdit" both to null, put ONLY the substituted exercises for that one session in "todayOverride", and ALWAYS set "todayOverrideDayIndex" to the dayIndex of the day it's for — which can be ANY of their days, not just the next scheduled one. It's used the next time they start that day, then removed. Never rename or permanently relabel a day for a one-time request.
+
+A one-time version of a day is THAT day, changed only in the way they asked. Real report, all in one workout: "change my pull day to only dumbbells for today" came back with a shoulder exercise in it and fewer exercises and sets than their normal pull day, and when asked why, the Coach invented a reason ("dumbbells don't let us hit back as hard"). So:
+- Keep the same number of exercises, and the same sets and reps, as the day it replaces — unless THIS message asks for shorter, longer, or fewer. Don't shorten it on your own.
+- A constraint from an earlier request applies to that request only. "30 minutes" said about a previous workout does not carry over to a new one.
+- Stay on that day's muscles. A pull day is back and biceps (rear delts count); a push day is chest, shoulders and triceps; a leg day is legs. Never add another day's exercise as filler. Every equipment limit has real options: with only dumbbells, back is dumbbell rows, chest-supported rows, pullovers, renegade rows, reverse flyes and shrugs.
+- If they ask why something is in their workout and it doesn't belong there, say so plainly and offer to swap it. Never invent a training reason to defend a mistake — they can tell, and that is exactly how an app gets bad reviews.
 
 Real report of why "todayOverrideDayIndex" is required: asked to make Push (Shoulders/Chest Volume) all-dumbbell for one session while Pull was next in the rotation, the change kept landing on Pull — and the reply said "Push" five times while the workout sat on Pull. Name the day by index, every time, and only say in "reply" the day you actually put in that field.
 
@@ -7401,6 +7464,7 @@ export default function App() {
       const flags = { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid };
       const overrideTarget = hasOverride ? resolveOverrideTarget(parsed, stateRef.current) : null;
       const overrideTargetInvalid = !!overrideTarget && !overrideTarget.valid;
+      const overrideTargetDay = overrideTarget?.valid ? stateRef.current.program?.days?.[overrideTarget.dayIdx] : null;
       if (overrideTargetInvalid) {
         logError("Coach set a one-time change for a day that doesn't exist", {
           stack: JSON.stringify(parsed).slice(0, 4000),
@@ -7485,7 +7549,7 @@ export default function App() {
         const normalizedProgramDays = hasNewProgram
           ? parsed.program.days.map((d) => ({
               ...d,
-              exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling),
+              exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling, { dayName: d.name }),
             }))
           : null;
         // A programDayEdit is ALWAYS a direct response to something the
@@ -7519,7 +7583,10 @@ export default function App() {
           ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
           : null;
         const normalizedOverride = hasOverride
-          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling)
+          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling, {
+              dayName: overrideTargetDay?.name,
+              minCount: overrideTargetDay?.exercises?.length || 0,
+            })
           : null;
         // Applied only when the day resolved; otherwise ...prev keeps whatever
         // one-time change (and its day) was already there.
@@ -7970,7 +8037,7 @@ export default function App() {
         // carried over keeps its real tips instead of regenerating them.
         const normalizedDays = parsed.days.map((d) => ({
           ...d,
-          exercises: normalizeExerciseCount(d.exercises || [], newProfile.sessionLength, newProfile.experience, newProfile.equipment, newProfile.injuries),
+          exercises: normalizeExerciseCount(d.exercises || [], newProfile.sessionLength, newProfile.experience, newProfile.equipment, newProfile.injuries, false, { dayName: d.name }),
         }));
         program = normalizeProgramTips(
           { splitName: deriveSplitName(normalizedDays) || program.splitName, days: normalizedDays },

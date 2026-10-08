@@ -80,15 +80,40 @@ function coachReply() {
   };
 }
 
+// Real report: "change my pull day to only dumbbells for today" came back with
+// fewer exercises than their real pull day — "I never told it to shorten this
+// one." The AI's full dumbbell version was trimmed against the session length.
+const DUMBBELL_PULL = ["Dumbbell Row", "Chest-Supported Row", "Dumbbell Pullover", "Renegade Row", "Dumbbell Curl", "Dumbbell Hammer Curl"];
+function dumbbellPullReply() {
+  return {
+    ok: true,
+    json: async () => ({
+      content: [{
+        type: "tool_use", name: "respond",
+        input: {
+          reply: "Done — your next Pull (Back/Biceps + Conditioning) is all dumbbells.",
+          program: null, programDayEdit: null,
+          todayOverride: DUMBBELL_PULL.map((n) => ({ name: n, sets: 4, reps: "8-12", rest: 90, tips: [], alternatives: [] })),
+          todayOverrideDayIndex: 4,
+          targets: null, restoreIndex: null, restoreOriginal: false, overrideCeiling: false,
+        },
+      }],
+      usage: { input_tokens: 1500, output_tokens: 400, cache_read_input_tokens: 8000, cache_creation_input_tokens: 0 },
+    }),
+  };
+}
+let nextReply = coachReply;
+
 const { default: App } = await import("./App.jsx");
 
 describe("a one-time change asked for on a day that isn't next", () => {
   let fetchSpy;
   beforeEach(() => {
     stored = storedState();
+    nextReply = coachReply;
     try { localStorage.clear(); localStorage.setItem("overload_tester_unlocked", "1"); } catch (e) {}
     fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-      if (String(url).includes("/api/claude")) return coachReply();
+      if (String(url).includes("/api/claude")) return nextReply();
       return { ok: false, status: 404, json: async () => ({}) };
     });
   });
@@ -134,5 +159,24 @@ describe("a one-time change asked for on a day that isn't next", () => {
     expect(await screen.findByText("Lat Pulldown", {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText("Dumbbell Shoulder Press")).not.toBeInTheDocument();
     expect(screen.queryByText(/Chest\/Shoulders Day|Shoulders\/Chest Day/)).not.toBeInTheDocument();
+  }, 20000);
+
+  test("a one-time dumbbell version keeps every exercise the AI wrote, not a time-budget cut of it", async () => {
+    const user = userEvent.setup();
+    // Their real Pull day: six exercises, on a 60-minute plan.
+    stored.program.days[4].exercises = ["Lat Pulldown", "Barbell Row", "Seated Cable Row", "Face Pull", "Barbell Curl", "Hammer Curl"].map(ex);
+    stored.profile.sessionLength = 60;
+    nextReply = dumbbellPullReply;
+
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Coach$/ }));
+    await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "change my pull day to only dumbbells for today{enter}");
+    await screen.findByText(/Just for your next Pull \(Back\/Biceps \+ Conditioning\) workout/, {}, { timeout: 4000 });
+
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    const pullCard = screen.getByText("Pull (Back/Biceps + Conditioning)").closest("[style]").parentElement.parentElement;
+    // All six, in the preview of what they'll actually get.
+    DUMBBELL_PULL.forEach((name) => expect(within(pullCard).getByText(new RegExp(name))).toBeInTheDocument());
   }, 20000);
 });
