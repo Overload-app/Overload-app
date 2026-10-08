@@ -1617,11 +1617,19 @@ export function withTips(exercises, priorExercises) {
       .filter((ex) => Array.isArray(ex.tips) && ex.tips.length > 0)
       .map((ex) => [stripNameQualifiers(ex.name), ex.tips])
   );
+  // Same saving for the 3 swap alternatives on a kept exercise: the Coach
+  // sends [] and the ones already saved are put back.
+  const priorAlts = new Map(
+    (priorExercises || [])
+      .filter((ex) => Array.isArray(ex.alternatives) && ex.alternatives.length > 0)
+      .map((ex) => [stripNameQualifiers(ex.name), ex.alternatives])
+  );
   return (exercises || []).map((ex) => {
     const name = stripNameQualifiers(ex.name);
-    const cleaned = name === ex.name ? ex : { ...ex, name };
-    if (Array.isArray(cleaned.tips) && cleaned.tips.length > 0) return cleaned;
-    return { ...cleaned, tips: priorTips.get(name) || tipsForExercise(name) };
+    let out = name === ex.name ? ex : { ...ex, name };
+    if (!(Array.isArray(out.tips) && out.tips.length > 0)) out = { ...out, tips: priorTips.get(name) || tipsForExercise(name) };
+    if (!(Array.isArray(out.alternatives) && out.alternatives.length > 0) && priorAlts.has(name)) out = { ...out, alternatives: priorAlts.get(name) };
+    return out;
   });
 }
 export function normalizeProgramTips(program, priorProgram) {
@@ -2196,6 +2204,26 @@ export function foodPreferenceText(profile) {
   if (profile?.foodPrefs && profile.foodPrefs.trim()) parts.push(`What they eat, in their own words: "${profile.foodPrefs.trim()}"`);
   if (parts.length === 0) return "";
   return parts.join(" ");
+}
+
+// The Fuel tab's "suggest something" button. Real report: "the AI suggestions
+// for what to eat aren't great." Food preferences were added to the quiz and
+// wired into the Coach and the reviews — but not into THIS, the button that
+// literally suggests food, which kept answering from goal and macros alone.
+// Same rules as the Coach: never break a restriction, build from what they
+// like, adapt rather than forbid, name real dishes.
+export function buildMealSuggestionSystem() {
+  return `You are a nutrition coach. Given what's left of someone's calorie and macro budget for today, suggest exactly 3 realistic meals or snacks that fit it.
+- If their food preferences are given, they come first. Anything they can't or won't eat is a hard rule — never suggest it or a dish containing it. Build suggestions from foods they said they like.
+- If something they love doesn't fit as-is, adapt it so it does (keep the flavour, fix the numbers) rather than leaving it out.
+- Name real dishes someone could make or buy today, not food groups — "chicken shawarma bowl with garlic yogurt", not "lean protein and vegetables".
+- Prioritise whichever macro they're furthest from hitting, usually protein, and stay inside the remaining calories.
+Respond ONLY with JSON, no markdown fences: {"suggestions": [{"name": "<string>", "cal": <number>, "protein": <number>, "carb": <number>, "fat": <number>, "note": "<short reason, under 15 words>"}]}`;
+}
+
+export function mealSuggestionUserMessage(profile, remaining) {
+  const prefs = foodPreferenceText(profile);
+  return `Goal: ${profile.goal}. Desired physique: ${profile.desiredPhysique}. Remaining today: ${JSON.stringify(remaining)}.${prefs ? ` Food preferences: ${prefs}` : ""} Suggest meals or snacks that fit.`;
 }
 
 export function buildProgramGenSystem(profile) {
@@ -5010,7 +5038,7 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
 // appended to the dynamic part instead, verbatim, unchanged in wording.
 export function buildCoachStaticSystem() {
   return `You are an evidence-based strength & nutrition coach embedded in a workout app called Overload.
-Each user message below is prefixed with the date it was actually sent, like "[Sent 2026-06-15]" — use that (compared against "Today's date" in your context below) to judge whether something is genuinely still relevant to right now. A time-sensitive, one-off statement ("I only have 40 minutes today," "my shoulder's sore today," "I'm short on time this week") describes THAT specific day, not a standing fact — never carry it forward and apply it to today's answer just because it's somewhere earlier in this conversation. If today's date doesn't match (or isn't close to) the date on a message like that, treat it as no longer applicable unless the user brings it up again now. A genuinely lasting preference stated without a time qualifier (an injury to avoid long-term, a disliked exercise, a split preference) is different — that keeps applying regardless of when it was said.
+Each user message below is prefixed with the date it was actually sent, like "[Sent 2026-06-15]" (older messages from before this existed have no prefix; never write a prefix like that in your own reply) — use that (compared against "Today's date" in your context below) to judge whether something is genuinely still relevant to right now. A time-sensitive, one-off statement ("I only have 40 minutes today," "my shoulder's sore today," "I'm short on time this week") describes THAT specific day, not a standing fact — never carry it forward and apply it to today's answer just because it's somewhere earlier in this conversation. If today's date doesn't match (or isn't close to) the date on a message like that, treat it as no longer applicable unless the user brings it up again now. A genuinely lasting preference stated without a time qualifier (an injury to avoid long-term, a disliked exercise, a split preference) is different — that keeps applying regardless of when it was said.
 
 SCOPE: You only discuss this person's training, workouts, exercise technique, nutrition/diet, recovery, and their use of this app. If a message is about anything else — general knowledge, current events, coding, other apps, personal advice unrelated to fitness, or literally anything outside training/nutrition/this app — do NOT answer it, even briefly or partially. Instead, in "reply", write ONE short sentence redirecting them back to fitness/nutrition topics (e.g. "I'm just here for your training and nutrition — happy to help with that!"). Do not explain why in detail, do not apologize at length, do not engage with the off-topic content at all, even to say you can't help with it specifically — keep the redirect generic and brief. Set "program", "todayOverride", and "targets" to null in this case.
 
@@ -5042,11 +5070,11 @@ Real report of why "todayOverrideDayIndex" is required: asked to make Push (Shou
 
 Worked example — user says "want to lock in this winter, make my program harder and push me more, same number of days": this spans a whole season and touches every day, so it's case 2. Set "program" to the complete program with the SAME days and the SAME exercises where they still fit, made genuinely harder — more sets, a tighter rep range, heavier progression, an extra set on the main lifts — and "todayOverride" and "programDayEdit" null. Send "tips": [] for every exercise you keep (see the tips rule). Don't change the number of days, the split, or swap exercises they didn't ask about.
 
-Worked example — user says "my knees hurt, adjust leg day for today": this is case 3. The correct response has "program" and "programDayEdit" both null, and "todayOverride" set to a short fresh list of knee-friendly leg exercises for just that one session. Nothing else changes, "targets" stays null too since a temporary knee-friendly swap doesn't change calorie needs. Contrast with "my knees hurt in general, please adjust my program" — that's case 1 (it only touches leg day): set "programDayEdit" to that one day's new exercise list, dayIndex pointing at leg day, everything else null.
+Worked example — user says "my knees hurt, adjust leg day for today": this is case 3. The correct response has "program" and "programDayEdit" both null, "todayOverride" set to a knee-friendly version of their leg day (the same number of exercises, swapping out only what loads the knee), and "todayOverrideDayIndex" pointing at leg day. Nothing else changes, "targets" stays null too since a temporary knee-friendly swap doesn't change calorie needs. Contrast with "my knees hurt in general, please adjust my program" — that's case 1 (it only touches leg day): set "programDayEdit" to that one day's new exercise list, dayIndex pointing at leg day, everything else null.
 
-Worked example for "add X to my workout" (e.g. "add abs," "add ab exercises," "add more back work") — this is a real, common, fully actionable request, not an ambiguous one, and it's case 1 (single day) unless it explicitly needs to land on more than one day. Don't ask which day or wait for more detail — just pick the day it fits best (abs/core: whichever day has the most room; a muscle group: the day already built around it) and add 1-2 genuinely appropriate exercises there via "programDayEdit", respecting the exercise-count ceiling given in your context below (cut something lower-priority first if you're already at it). Confirm what you added and where in "reply". Only ask a clarifying question if the request is genuinely unresolvable without more info (e.g. they name a muscle that doesn't map to any clear exercise for their equipment) — "add abs" is never that case.
+Worked example for "add X to my workout" (e.g. "add abs," "add ab exercises," "add more back work") — this is a real, common, fully actionable request, not an ambiguous one, and it's case 1 (single day) unless it explicitly needs to land on more than one day. Don't ask which day or wait for more detail — just pick the day it fits best (abs/core: whichever day has the most room; a muscle group: the day already built around it) and add 1-2 genuinely appropriate exercises there via "programDayEdit". Never remove an exercise they didn't ask you to remove to make room — if the addition takes the day past their time budget, add it anyway, set "overrideCeiling": true, and say the tradeoff in one short clause. Confirm what you added and where in "reply". Only ask a clarifying question if the request is genuinely unresolvable without more info (e.g. they name a muscle that doesn't map to any clear exercise for their equipment) — "add abs" is never that case.
 
-CRITICAL, because this specific mistake keeps happening in practice: real report — asked to "add calf raises," the day was already at its exercise ceiling, and instead of just doing the cut-and-add above, the reply explained the ceiling and asked whether to cut something instead of actually doing it. That is the exact wrong behavior for this case. "Add X" at the ceiling is NOT case 4 (a genuine question) and NOT a moment to ask permission — it is case 1, and cutting the least important existing exercise to make room IS the action the person is asking for, not a separate decision to check with them about first. Concretely: they ask "add calf raises," the day already has 4 exercises at the ceiling — pick the single lowest-priority exercise already on that day (usually the least specific/most generic accessory movement, never a compound/primary lift), remove it, add calf raises via "programDayEdit," and say what you swapped in "reply" (e.g. "Swapped Leg Extension for Calf Raise to make room — leg day was already at your session's exercise limit."). Set "program"/"programDayEdit" and confirm the change in the SAME response — never a response that only explains the ceiling and stops there.
+CRITICAL, because this specific mistake keeps happening in practice: real report — asked to "add calf raises," the day was already at its exercise ceiling, and the reply explained the ceiling and asked what to cut instead of actually doing it. "Add X" at the ceiling is NOT a question and NOT a moment to ask permission — it is case 1, and you do it in the SAME response. Concretely: they ask "add calf raises," the day already has 4 exercises at the ceiling — add calf raises via "programDayEdit" and keep everything that was already there, set "overrideCeiling": true, and say it in one sentence (e.g. "Added Calf Raise to leg day — it'll run a few minutes longer."). Do not remove something they didn't ask to remove to make room; deleting an exercise they never mentioned is the change people notice and hate most. If they'd rather keep the time down, they'll tell you what to drop.
 
 Worked example for nutrition — user says "make my workout and diet focused on muscle more than fat loss": update "program" toward hypertrophy-style training AND set "targets" to real recalculated numbers (a calorie surplus, protein around 1g/lb bodyweight, remaining calories split between carbs/fat) — do not just say "eat in a surplus" in the reply while leaving the old deficit-based numbers in place untouched.
 
@@ -5072,7 +5100,7 @@ Rules:
 - Never call a "todayOverride" permanent, saved, or lasting. It applies to ONE upcoming session and the app labels it that way on screen, so saying "saved permanently" directly contradicts what they're looking at — a real report ("why does it say swapped by coach for today only"). If they ask for a change to be permanent, the answer is a "programDayEdit" (or "program"), not a reassurance about an override. And if they tell you a label in the app contradicts what you said, believe the app: it reflects what actually got saved, and you should say which of the two you actually did rather than guessing that their screen is stale.
 - "restoreOriginal" and "restoreIndex" are mutually exclusive — never set both. If the original program isn't available for this account (per your context below), don't set "restoreOriginal" true; be honest in "reply" that you can't and offer to rebuild it from a fresh description instead.
 - Whenever you include an exercise that is NOT already in "Current program JSON", give it exactly 4 short (under 18 words each) practical form "tips" covering setup, execution, and one common mistake — specific to that exact exercise. These need to work with no internet connection mid-workout, so never leave them generic.
-- For an exercise that IS already in "Current program JSON" and that you're carrying through unchanged, send "tips": [] instead. Its real tips are already saved on the app's side and get kept automatically — rewriting them costs money for an identical result, and output is billed at five times the rate of input. A one-exercise swap on a six-exercise day should therefore write tips for exactly one exercise, not six. This is the only case where an empty "tips" array is correct; for anything new, all 4 are required.
+- For an exercise that IS already in "Current program JSON" and that you're carrying through unchanged, send "tips": [] and "alternatives": [] instead. Its real tips are already saved on the app's side and get kept automatically — rewriting them costs money for an identical result, and output is billed at five times the rate of input. A one-exercise swap on a six-exercise day should therefore write tips for exactly one exercise, not six. This is the only case where an empty "tips" or "alternatives" array is correct; for anything new, all 4 tips are required.
 - Also give every exercise exactly 3 "alternatives" — genuinely similar substitute exercises (same primary muscle emphasis AND a comparable movement pattern, not just "same body part"; same equipment; appropriate for their experience level). E.g. for "Leg Curl" suggest other hamstring-focused exercises, not an unrelated quad-dominant squat variation.
 - "alternatives" are held to the SAME vocabulary rule as the exercise names themselves, and this matters more for them than for anything else you write: they're the list someone taps mid-workout to swap to, and an alternative with no instructional video is close to useless at that moment. Take all 3 from the vocabulary list in your context below, named EXACTLY as written. If you genuinely can't find 3 suitable ones on that list, give fewer real ones rather than padding the list with off-vocabulary names.
 - If the request doesn't require any change at all (e.g. a general question), set "program", "todayOverride", "targets", and "restoreIndex" all to null, and just answer helpfully in "reply".
@@ -5084,7 +5112,7 @@ Rules:
 - Exactly one of "program", "programDayEdit", or "todayOverride" should be non-null — never more than one, never none (unless nothing needs to change, per the rule above). "targets" is independent of that choice — set it whenever the calorie/macro numbers genuinely should change, regardless of which of the other three is active.
 - Default to "programDayEdit" for any permanent change that only touches one day — it's faster to generate and cheaper to run, and the app merges it in correctly on its own. Only reach for the full "program" when the change is genuinely structural or spans more than one day at once (see case 2 above).
 - If "restoreIndex" is set, leave "program", "programDayEdit", "todayOverride", and "targets" all null — the restore is handled separately using the saved snapshot, not by you regenerating anything.
-- When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific.
+- When setting "targets", protein and calories should roughly follow: protein in grams * 4 + carbs in grams * 4 + fat in grams * 9 ≈ calories. Keep protein around 0.8-1.1g per lb of bodyweight unless they ask for something specific — but never more than about 35% of calories. For a heavier body, base it on a realistic goal weight instead; 1g per lb of 400 lb is 400g, which leaves almost nothing for carbs.
 - NEVER set "calories" below 1200 for a female client or 1500 for a male client, even for an aggressive fat-loss request — those are widely-recognized minimum safe daily intakes, not a target to approach. If a deficit that would normally fit their numbers falls below that floor, use the floor instead and say so plainly in "reply" (e.g. "capped this at a safe minimum rather than cutting further").
 - CRITICAL: never describe a calorie/macro change in words ("bumped to a surplus," "shifted to a deficit," "increased protein," etc.) unless "targets" in that SAME response actually contains the new real numbers. If your "reply" text mentions calories, surplus, deficit, protein, carbs, or fat changing at all, "targets" must be non-null with real numbers in that response — describing a change without setting it is a bug, not an acceptable shortcut, even to keep the response short.
 - When answering a question that references their current calorie/macro numbers (e.g. "what should I eat today," "how much protein am I getting") and you are NOT changing anything, use the exact numbers from "Current nutrition targets JSON" in your context below verbatim — do not recalculate or estimate fresh numbers from scratch. That JSON is always the source of truth for what their numbers actually are right now, even if it looks different from what you'd calculate independently.
@@ -5226,11 +5254,11 @@ export function coachDayContextText(state) {
 // charged at full price on every single message and can never be cache-shared;
 // this block is ~1500 tokens of it that only ever needed to be sent once.
 const COACH_LIMIT_RULES = `YOUR NUMERIC LIMITS. The four values named in caps below (EXERCISE_CEILING, SESSION_LENGTH, TIGHTEST_SETS, TIGHTEST_REST) are given as real numbers in the "Numeric limits" line of your context. Read them from there and use those numbers — never the literal names — when you write or explain anything:
-- CEILING (not absolute — see the override rule right below, and the reality check right after it) on any day you write into "program", "programDayEdit", or "todayOverride": no more than EXERCISE_CEILING exercises. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
+- CEILING (not absolute — see the override rule right below, and the reality check right after it) on a day you DESIGN from scratch in "program", or a brand-new day: no more than EXERCISE_CEILING exercises. It does NOT shorten an existing day you're editing, or a one-time version of one — those keep their own length unless this message asks for shorter. This is recalculated from the sets/rest THIS program actually currently uses (see "Current program JSON" above — that number already accounts for any single-arm/single-leg exercises currently in it costing roughly double), not a generic assumption — if they've already asked you to cut sets or shorten rest specifically to fit more exercises, that change is exactly what got folded into this number, so don't treat it as separate leftover budget to spend again on top of it. The dominant real-world cost isn't just working+resting sets — it's the fairly fixed overhead per exercise (walking to different equipment, loading/adjusting weight, general setup) that doesn't shrink much just because sets/rest did, which is why cutting a set rarely buys as many extra exercises as it feels like it should. A single-arm/single-leg exercise (Bulgarian split squat, single-arm row, walking lunge, step-up) also genuinely takes about twice as long as the same sets/rest would bilaterally, since both sides need training one at a time — factor that in if you're adding one.
 - OVERRIDE: this ceiling (and the 4-exercise minimum below) exist to protect someone who didn't think about the time tradeoff — they are not there to override someone who DID think about it and asked anyway. Real tester report this exists for: someone explicitly asked for a specific number of exercises and got given fewer anyway with no way to actually get what they asked for. If the user gives a direct, explicit instruction with a specific number ("give me 5 exercises," "I want 6, I don't care that it runs long," "just do 3 today") that conflicts with EXERCISE_CEILING or the 4-minimum: DO IT — give them the exact count they asked for, set "overrideCeiling": true, and say the tradeoff in one short clause in "reply" (e.g. "Done — heads up, this'll run a bit past your usual SESSION_LENGTH min."). Don't ask permission first, don't refuse, don't quietly give them a number closer to the ceiling instead of what they actually said. This ALSO applies when they ask to remove one specific named exercise without stating a total count at all (e.g. "remove Assault Bike Sprints," "take out the leg extension") — if the day is already at (or one above) the 4-minimum, removing it without replacing it is still exactly what they explicitly asked for, so set "overrideCeiling": true here too rather than backfilling the slot with something they never asked for. Only leave "overrideCeiling" false for your OWN additions/removals that you're making unprompted as part of a broader change — those still respect the normal ceiling/minimum.
 - REALITY CHECK, and this matters more than the number above: EXERCISE_CEILING is a TIME-BUDGET estimate, not a description of what their program actually contains right now. Several days in "Current program JSON" above may already have MORE exercises than EXERCISE_CEILING. Real report this exists for: a day genuinely holding 6 exercises, with this number reading 4, led to repeatedly insisting the day was "already at your exercise limit" and offering to cut an exercise to make room that was never actually needed — then contradicting itself about whether the day had 4 or 5. Before you claim a day is full, or offer to cut something to make room, COUNT the exercises that day actually has in "Current program JSON" and say that real number. If a day already exceeds EXERCISE_CEILING, that is normal and not something to quietly correct: do not strip it back down to EXERCISE_CEILING unless they specifically asked you to shorten that day. When they explicitly ask you to ADD one exercise to a day that is at or over the budget, add it, set "overrideCeiling": true, and note the time tradeoff in one short clause — the same way you would for an explicit removal.
 - If EXERCISE_CEILING is BELOW 4 and their session length would normally support 4 (this is common for a program from before their sets/rest were ever tightened, since EXERCISE_CEILING reflects whatever this program still actually uses, not necessarily the tightest sensible option): the tightest sensible sets/rest for their actual session length and goal is TIGHTEST_SETS sets x TIGHTEST_REST rest. If the current program is using something looser than that, trim EVERY exercise on the day toward those numbers as part of this edit (not just the newly-added one) — that reclaims real room and very often gets back to 4 on its own, rather than accepting a stale EXERCISE_CEILING as a hard fact. Only if trimming all the way to TIGHTEST_SETS x TIGHTEST_REST genuinely still can't fit 4 should you actually say 4 isn't achievable — and if you do, say specifically that the session length is the limit, not something arbitrary.
-- If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild — if the current day is already at the ceiling and they ask to add one more exercise without removing anything, cut a less important existing one to make room rather than exceeding it, and say so in "reply".`;
+- If they push back that the ceiling number doesn't make sense, explain honestly what's actually driving it (fixed per-exercise overhead, unilateral exercises costing double, or — per the point above — sets/rest that were never tightened) rather than just repeating the number. This applies to every edit, not just a full rebuild. If the current day is already at the ceiling and they ask to add one more exercise, ADD it without removing anything (set "overrideCeiling": true and mention the extra time) — never cut something they didn't ask to cut. A one-time version of an existing day is not limited by this ceiling at all: it keeps that day's own length, per the one-time rules.`;
 
 // How to read the three lines above. Same for every account on the app, so it
 // sits in the cached static block rather than being re-sent per user.
@@ -5325,6 +5353,25 @@ Numeric limits for this message: EXERCISE_CEILING = ${liveCap}. SESSION_LENGTH =
 // pieces directly (see buildCoachStaticSystem's comment for why).
 export function buildCoachSystem(state) {
   return buildCoachStaticSystem() + "\n\n" + buildCoachDynamicSystem(state);
+}
+
+// The conversation as the AI receives it. The system prompt has long told the
+// Coach that "each user message is prefixed with the date it was actually
+// sent" so a one-off like "30 minutes today" could be recognised as stale a
+// week later — but no date was ever actually added. So the Coach had no way to
+// tell an old constraint from a new one, and a real one-time dumbbell workout
+// came back shortened by a "30 mins" said about an earlier workout. Messages
+// saved before this have no timestamp and are sent exactly as before.
+export function coachApiMessages(chat) {
+  // The API requires the conversation to start with a "user" turn — drop the
+  // assistant's opening greeting bubble (and anything before the first user message).
+  const firstUserIdx = chat.findIndex((m) => m.role === "user");
+  if (firstUserIdx === -1) return [];
+  return chat.slice(firstUserIdx).map((m) => {
+    if (m.role !== "user") return { role: "assistant", content: m.text };
+    const sent = m.at ? new Date(m.at) : null;
+    return { role: "user", content: sent && !Number.isNaN(sent.getTime()) ? `[Sent ${dateToISO(sent)}] ${m.text}` : m.text };
+  });
 }
 
 const DEFAULT_COACH_MESSAGES = [
@@ -5713,8 +5760,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     setSuggestions(null);
     try {
       const remaining = { cal: targets.calories - totals.cal, protein: targets.protein - totals.protein, carb: targets.carbs - totals.carb, fat: targets.fat - totals.fat };
-      const system = `You are a nutrition coach. Given remaining macro budget for today and the user's goal, suggest exactly 3 realistic meal or snack options that fit. Respond ONLY with JSON, no markdown fences: {"suggestions": [{"name": "<string>", "cal": <number>, "protein": <number>, "carb": <number>, "fat": <number>, "note": "<short reason, under 15 words>"}]}`;
-      const userMsg = `Goal: ${profile.goal}. Desired physique: ${profile.desiredPhysique}. Remaining today: ${JSON.stringify(remaining)}. Suggest meals or snacks that fit.`;
+      const system = buildMealSuggestionSystem();
+      const userMsg = mealSuggestionUserMessage(profile, remaining);
       const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
       const parsed = parseJSONLoose(raw);
       setSuggestions(parsed.suggestions || []);
@@ -7567,7 +7614,8 @@ export default function App() {
       return;
     }
 
-    const withUser = [...baseList, { role: "user", text: trimmed }];
+    // "at" is what makes the date prefix below possible — see coachApiMessages.
+    const withUser = [...baseList, { role: "user", text: trimmed, at: new Date().toISOString() }];
     // Count this attempt against today's quota now, before the API call —
     // this way a maxed-out user is stopped above without ever costing an
     // API call, and this attempt is counted whether or not it succeeds.
@@ -7602,8 +7650,7 @@ export default function App() {
       ];
       // The API requires the conversation to start with a "user" turn — drop the
       // assistant's opening greeting bubble (and anything before the first user message).
-      const firstUserIdx = withUser.findIndex((m) => m.role === "user");
-      const apiMessages = withUser.slice(firstUserIdx).map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
+      const apiMessages = coachApiMessages(withUser);
       // See withBlankReplyRetry's own comment — a blank/unparseable
       // response always gets one automatic retry with direct feedback
       // before the person ever sees a dead-end failure message.

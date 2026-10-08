@@ -57,6 +57,9 @@ import {
   monthKey,
   exerciseHistory,
   exercisePR,
+  coachApiMessages,
+  buildMealSuggestionSystem,
+  mealSuggestionUserMessage,
   sanitizeExercises,
   sanitizeCoachResponse,
   rejectedReplyText,
@@ -1788,6 +1791,89 @@ describe("sanitizeCoachResponse — nothing broken reaches the saved program", (
     expect(rejectedReplyText(["restoreIndex"], false)).toMatch(/couldn't find that earlier version/);
     expect(rejectedReplyText(["program"], false)).toMatch(/nothing was changed/);
     expect(rejectedReplyText(["targets"], true)).toMatch(/Part of that didn't go through/);
+  });
+});
+
+// Real report: "the AI suggestions for what to eat aren't great." The Fuel
+// tab's suggestion button never received the food preferences at all.
+describe("Fuel tab meal suggestions use what they actually eat", () => {
+  test("restrictions and likes reach the suggestion request", () => {
+    const msg = mealSuggestionUserMessage({ goal: "build", desiredPhysique: "lean", diet: ["vegetarian"], foodPrefs: "love pizza and pasta" }, { cal: 600, protein: 50 });
+    expect(msg).toContain("MUST NOT eat: vegetarian");
+    expect(msg).toContain("love pizza and pasta");
+  });
+
+  test("someone who skipped the food questions gets no empty preferences section", () => {
+    expect(mealSuggestionUserMessage({ goal: "build", desiredPhysique: "lean" }, { cal: 600 })).not.toContain("Food preferences");
+  });
+
+  test("the instructions put preferences first and ask for real dishes", () => {
+    const sys = buildMealSuggestionSystem();
+    expect(sys).toContain("hard rule");
+    expect(sys).toContain("adapt it so it does");
+    expect(sys).toContain("not food groups");
+  });
+});
+
+// Found by reading the Coach's full instructions end to end for rules that
+// contradict each other or describe something the app doesn't actually do.
+describe("the Coach's instructions agree with each other and with the app", () => {
+  const st = buildCoachStaticSystem();
+
+  test("'add X' to a full day adds it — no rule tells it to delete something else", () => {
+    // Two rules said cut an existing exercise to make room, one said add it
+    // and flag the extra time; the model flipped between them.
+    expect(st).not.toContain("cut something lower-priority first");
+    expect(st).not.toContain("cut a less important existing one to make room rather than exceeding it");
+    expect(st).toContain("Do not remove something they didn't ask to remove to make room");
+  });
+
+  test("the time-budget ceiling no longer shortens an existing day or a one-time version of one", () => {
+    expect(st).toContain("It does NOT shorten an existing day you're editing, or a one-time version of one");
+  });
+
+  test("the knee example matches the keep-the-same-length rule", () => {
+    expect(st).not.toContain("a short fresh list of knee-friendly leg exercises");
+    expect(st).toContain("the same number of exercises, swapping out only what loads the knee");
+  });
+
+  test("protein guidance matches the calculator's cap", () => {
+    expect(st).toContain("never more than about 35% of calories");
+  });
+});
+
+describe("coachApiMessages — what the AI actually receives", () => {
+  test("user messages carry the date they were sent, which the instructions rely on", () => {
+    const out = coachApiMessages([
+      { role: "assistant", text: "Hey — I'm your coach." },
+      { role: "user", text: "only 30 mins today", at: "2026-10-01T15:00:00.000Z" },
+      { role: "assistant", text: "Done." },
+    ]);
+    expect(out[0].role).toBe("user");
+    expect(out[0].content).toMatch(/^\[Sent 2026-10-0[12]\] only 30 mins today$/);
+    expect(out[1]).toEqual({ role: "assistant", content: "Done." });
+  });
+
+  test("older messages with no timestamp are sent exactly as before", () => {
+    expect(coachApiMessages([{ role: "user", text: "hi" }])).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  test("the opening greeting is dropped, since the conversation must start with the user", () => {
+    expect(coachApiMessages([{ role: "assistant", text: "Hey" }])).toEqual([]);
+  });
+});
+
+describe("withTips restores alternatives for kept exercises too", () => {
+  test("an empty alternatives list is filled back in from the program", () => {
+    const prior = [{ name: "Bench Press", tips: ["t"], alternatives: ["Dumbbell Bench Press", "Push-Up"] }];
+    const [out] = withTips([{ name: "Bench Press", tips: [], alternatives: [] }], prior);
+    expect(out.alternatives).toEqual(["Dumbbell Bench Press", "Push-Up"]);
+  });
+
+  test("alternatives the Coach did write are kept", () => {
+    const prior = [{ name: "Bench Press", tips: ["t"], alternatives: ["Push-Up"] }];
+    const [out] = withTips([{ name: "Bench Press", tips: ["x"], alternatives: ["Floor Press"] }], prior);
+    expect(out.alternatives).toEqual(["Floor Press"]);
   });
 });
 
