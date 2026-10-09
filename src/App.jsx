@@ -3595,7 +3595,7 @@ function SubscribeOverlay({ account, onClose }) {
 /* ============================================================
    ONBOARDING QUIZ
 ============================================================ */
-const QUIZ_STEPS = [
+export const QUIZ_STEPS = [
   { key: "sex", q: "What's your sex?", sub: "Used for an accurate energy-need calculation.", type: "choice", options: [["male", "Male"], ["female", "Female"]] },
   { key: "age", q: "How old are you?", type: "number", placeholder: "e.g. 28", min: 13, max: 90 },
   { key: "heightIn", q: "How tall are you?", type: "height" },
@@ -3667,7 +3667,9 @@ export function Onboarding({ onComplete }) {
   const [summary, setSummary] = useState(null);
 
   const cur = QUIZ_STEPS[step];
+  const numberProblem = cur?.type === "number" ? quizNumberProblem(cur, answers[cur.key]) : null;
   const canNext = !cur ? true
+    : numberProblem ? false
     : cur.optional ? true
     : cur.type === "height" ? true
     : cur.type === "multi" ? (answers[cur.key]?.length > 0)
@@ -3895,6 +3897,7 @@ export function Onboarding({ onComplete }) {
             style={{ width: "100%", padding: "16px 18px", fontSize: 20, borderRadius: 12, border: `2px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, boxSizing: "border-box" }}
           />
         )}
+        {cur.type === "number" && numberProblem && <p role="alert" style={{ color: T.warn, fontSize: 13, margin: "8px 0 0" }}>{numberProblem}</p>}
         {cur.type === "text" && (
           <textarea
             autoFocus placeholder={cur.placeholder} value={answers[cur.key] ?? ""}
@@ -3921,7 +3924,7 @@ export function Onboarding({ onComplete }) {
       </div>
 
       <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-        {step > 0 && <Btn variant="ghost" onClick={() => setStep((s) => s - 1)}><ChevronLeft size={18} /></Btn>}
+        {step > 0 && <Btn variant="ghost" ariaLabel="Back" onClick={() => setStep((s) => s - 1)}><ChevronLeft size={18} /></Btn>}
         <Btn variant="accent" onClick={next} disabled={!canNext} style={{ flex: 1 }}>
           {step === QUIZ_STEPS.length - 1 ? "Build my plan" : "Next"} <ChevronRight size={18} />
         </Btn>
@@ -7639,6 +7642,21 @@ export function WorkoutCompleteSheet({ summary, onClose }) {
 // toggles, which already have their own switches further down this same tab.
 const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "reviewCadence");
 
+// Found by the stress test: the quiz took an age of -5 and a weight of 25 or
+// -5 lb. Those fed straight into the calorie targets, and a negative age
+// slipped past the under-18 gentler plan. Each number question already had
+// its range; now it's enforced. Blank is left to the usual "answer this".
+export function quizNumberProblem(step, value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < step.min || n > step.max) {
+    return step.key === "age" ? `Enter an age between ${step.min} and ${step.max}.`
+      : step.key === "weightLb" ? `Enter your weight in pounds, between ${step.min} and ${step.max}.`
+      : `Enter a number between ${step.min} and ${step.max}.`;
+  }
+  return null;
+}
+
 export function QuizEditor({ profile, targets, onCancel, onSave }) {
   const [answers, setAnswers] = useState(() => ({ ...profile }));
   const [feet, setFeet] = useState(Math.floor((profile.heightIn || 68) / 12));
@@ -7810,6 +7828,7 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
                 style={{ width: "100%", padding: "12px 14px", fontSize: 17, borderRadius: 10, border: `2px solid ${T.steel}`, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, boxSizing: "border-box" }}
               />
             )}
+            {st.type === "number" && quizNumberProblem(st, answers[st.key]) && <p role="alert" style={{ color: T.warn, fontSize: 12, margin: "6px 0 0" }}>{quizNumberProblem(st, answers[st.key])}</p>}
             {st.type === "text" && (
               <textarea
                 placeholder={st.placeholder} value={answers[st.key] ?? ""}
@@ -7837,7 +7856,7 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
       </div>
       <div style={{ padding: 16, borderTop: `1px solid ${T.steel}`, display: "flex", gap: 8, flexShrink: 0 }}>
         <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
-        <Btn variant="accent" onClick={() => setReviewing(true)} disabled={impact.changedKeys.length === 0} style={{ flex: 1 }}>
+        <Btn variant="accent" onClick={() => setReviewing(true)} disabled={impact.changedKeys.length === 0 || QUIZ_STEPS.some((st) => st.type === "number" && quizNumberProblem(st, answers[st.key]))} style={{ flex: 1 }}>
           {impact.changedKeys.length === 0 ? "No changes yet" : "Review changes"}
         </Btn>
       </div>

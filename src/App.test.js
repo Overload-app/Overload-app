@@ -65,6 +65,8 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  quizNumberProblem,
+  QUIZ_STEPS,
   daysAskedFor,
   programTrimNote,
   equipmentAskedFor,
@@ -4939,5 +4941,23 @@ describe("message-aware Coach guards, randomised", () => {
       if (raw.programDayEdit) expect(parsed.programDayEdit.day.exercises.length).toBeGreaterThan(0);
       if (parsed.program) parsed.program.days.forEach((d) => expect(d.exercises.length).toBeGreaterThan(0));
     }
+  });
+});
+
+describe("quiz numbers stay in range", () => {
+  const age = QUIZ_STEPS.find((q) => q.key === "age");
+  const weight = QUIZ_STEPS.find((q) => q.key === "weightLb");
+  test("impossible answers are caught", () => {
+    expect(quizNumberProblem(age, -5)).toMatch(/age between 13 and 90/);
+    expect(quizNumberProblem(age, 7)).toBeTruthy();
+    expect(quizNumberProblem(weight, 25)).toMatch(/pounds/);
+    expect(quizNumberProblem(weight, -5)).toBeTruthy();
+    expect(quizNumberProblem(weight, 1800)).toBeTruthy();
+  });
+  test("real answers and a blank box are fine", () => {
+    expect(quizNumberProblem(age, 16)).toBeNull();
+    expect(quizNumberProblem(age, 28)).toBeNull();
+    expect(quizNumberProblem(weight, 165)).toBeNull();
+    expect(quizNumberProblem(weight, "")).toBeNull();
   });
 });

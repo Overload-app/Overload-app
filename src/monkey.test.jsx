@@ -135,4 +135,46 @@ describe("monkey test", () => {
       if (process.env.MONKEY_REPORT) (await import("node:fs")).appendFileSync(process.env.MONKEY_REPORT, `seed ${seed} visited: ` + [...new Set(log.filter((l) => l.startsWith("click")).map((l) => l.slice(7, 30)))].join(" / ") + "\n");
     }, 120000);
   }
+
+  // A brand-new account: no saved state at all, so the quiz and onboarding
+  // run with the AI unreachable.
+  for (const seed of [3, 11, 77]) {
+    test(`new account, seed ${seed}: 300 random actions through the quiz and onboarding`, async () => {
+      stored = null;
+      const rand = rng(seed);
+      const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+      const user = userEvent.setup({ delay: null });
+      render(<ErrorBoundary><App /></ErrorBoundary>);
+      await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+      const log = [];
+      for (let step = 0; step < 300; step++) {
+        const buttons = screen.queryAllByRole("button").filter((b) => !b.disabled && !DESTRUCTIVE.test(`${b.textContent} ${b.getAttribute("aria-label") || ""}`) && (rand() < 0.15 || b.getAttribute("aria-label") !== "Back"));
+        const inputs = [...document.querySelectorAll("input:not([type=file]):not([type=checkbox]), textarea")].filter((i) => !i.disabled && !i.value);
+        try {
+          if ((rand() < 0.65 || !inputs.length) && buttons.length) {
+            const b = pick(buttons);
+            log.push(`click "${(b.textContent || b.getAttribute("aria-label") || "").trim().slice(0, 40)}"`);
+            await user.click(b);
+          } else if (inputs.length) {
+            const i = pick(inputs);
+            const junk = rand() < 0.7 ? pick(["17", "16", "180", "70", "25", "150"]) : pick(JUNK);
+            log.push(`type "${junk.slice(0, 20)}" into ${i.placeholder || i.getAttribute("aria-label") || i.type}`);
+            await user.clear(i).catch(() => {});
+            if (junk) await user.type(i, junk);
+          }
+        } catch (e) {}
+        await act(async () => { await new Promise((res) => setTimeout(res, 0)); });
+        if (screen.queryByText("Something went wrong.")) throw new Error(`crash screen after: ${log.slice(-10).join(" | ")}`);
+        if (stored && stored.program && (!stored.program.days || stored.program.days.length === 0)) throw new Error(`saved a program with no days after: ${log.slice(-10).join(" | ")}`);
+        if (stored && stored.targets && !(stored.targets.calories > 0)) throw new Error(`saved bad targets after: ${log.slice(-10).join(" | ")}`);
+        if (stored?.targets && stored?.profile) {
+          const age = Number(stored.profile.age);
+          const minor = age > 0 && age < 18 && stored.profile.standardPlan !== true;
+          const floor = minor ? (stored.profile.sex === "male" ? 1800 : 1600) : (stored.profile.sex === "male" ? 1500 : 1200);
+          if (stored.targets.calories < floor) throw new Error(`calories ${stored.targets.calories} under the ${floor} floor for age ${age} ${stored.profile.sex}`);
+        }
+      }
+      if (process.env.MONKEY_REPORT) (await import("node:fs")).appendFileSync(process.env.MONKEY_REPORT, `new ${seed}: program=${!!stored?.program} days=${stored?.program?.days?.length} cal=${stored?.targets?.calories} age=${stored?.profile?.age} sex=${stored?.profile?.sex} goal=${stored?.profile?.goal} wt=${stored?.profile?.weightLb} last=${log.slice(-5).join(" | ")}\n`);
+    }, 120000);
+  }
 });
