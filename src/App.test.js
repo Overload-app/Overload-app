@@ -4883,3 +4883,12 @@ describe("a program with the wrong number of days", () => {
     expect(parsed.program.days.length).toBe(4);
   });
 });
+
+describe("a reply put in the wrong field", () => {
+  test("a question in its own field is still shown", () => {
+    expect(sanitizeCoachResponse({ reply: "", question: "Which push day — Chest/Triceps or Shoulders/Volume?" }, {}).parsed.reply).toBe("Which push day — Chest/Triceps or Shoulders/Volume?");
+  });
+  test("a real reply wins", () => {
+    expect(sanitizeCoachResponse({ reply: "Done.", message: "other" }, {}).parsed.reply).toBe("Done.");
+  });
+});

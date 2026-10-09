@@ -926,13 +926,20 @@ export async function requestCoachResponse(system, messages, onPartialReply) {
 // directly) specifically so this orchestration — the actual retry
 // decision, not just the parsing — is unit-testable with a mocked
 // two-call sequence, no live network call needed.
+// The Coach's reply text, wherever it put it ("reply" first).
+export function coachReplyField(parsed) {
+  return ["reply", "question", "clarifyingQuestion", "clarification", "message", "response", "text", "answer"]
+    .map((k) => asText(parsed?.[k])).find(Boolean) || "";
+}
+
 export async function withBlankReplyRetry(requestFn, apiMessages) {
   const first = await requestFn(apiMessages);
   // parseFailed is checked explicitly, not just "reply" — coachParseFailureFallback's
   // own reply text is deliberately non-empty (an honest failure message), so
   // checking only `!reply` would silently skip retrying the exact case this
   // exists for: a response that failed to parse at all.
-  if (!first.parseFailed && first.parsed.reply && first.parsed.reply.trim()) return first;
+  // A reply in the wrong field isn't blank — no second (paid) call for it.
+  if (!first.parseFailed && coachReplyField(first.parsed)) return first;
   try {
     const retryMessages = [
       ...apiMessages,
@@ -940,7 +947,7 @@ export async function withBlankReplyRetry(requestFn, apiMessages) {
       { role: "user", content: "Your last response left \"reply\" blank, or didn't come through completely — your instructions say to never leave it blank. Try again now: make the change I actually asked for if it's reasonably clear what I want, or if it's genuinely unclear, ask exactly what's unclear in \"reply\" instead of leaving it blank." },
     ];
     const retry = await requestFn(retryMessages);
-    if (!retry.parseFailed && retry.parsed.reply && retry.parsed.reply.trim()) return retry;
+    if (!retry.parseFailed && coachReplyField(retry.parsed)) return retry;
   } catch (retryErr) {
     // Network/timeout on the retry itself — fall through to the original.
   }
@@ -1044,6 +1051,10 @@ export function sanitizeCoachResponse(parsed, state, message = "") {
   // A non-string reply (an object, a number) used to throw inside the
   // "reply.trim()" check and surface as "couldn't reach the coach".
   out.reply = asText(out.reply);
+  // Found by the live Coach test: asked which of two push days, the Coach
+  // sometimes put its question in a field of its own, leaving "reply" empty
+  // — so the person saw "I didn't quite catch that" instead of the question.
+  if (!out.reply) out.reply = coachReplyField(parsed);
 
   if (out.todayOverride != null) {
     const clean = sanitizeExercises(out.todayOverride);
