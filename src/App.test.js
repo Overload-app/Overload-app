@@ -1988,11 +1988,11 @@ describe("workoutSummary — the numbers on the post-workout screen and share ca
   });
 });
 
-// Showing the Coach's reply as it's written — built, but switched off until
-// it's been checked against the real model and server.
+// Showing the Coach's reply as it's written — switched on after the live
+// Coach test and a live server check.
 describe("streamed Coach replies", () => {
-  test("ships switched off", () => {
-    expect(COACH_STREAMING_ENABLED).toBe(false);
+  test("ships switched on", () => {
+    expect(COACH_STREAMING_ENABLED).toBe(true);
   });
 
   test("the reply so far is read out of JSON that's still arriving", () => {
@@ -2044,6 +2044,43 @@ describe("streamed Coach replies", () => {
 
   test("an error event in the stream becomes a real error", async () => {
     await expect(readCoachStream(sseStream([{ type: "error", error: { message: "Overloaded" } }], 50))).rejects.toThrow("Overloaded");
+  });
+
+  describe("through claudeChat", () => {
+    let fetchSpy;
+    beforeEach(() => { globalThis.__OVERLOAD_FORCE_STREAMING__ = true; });
+    afterEach(() => { delete globalThis.__OVERLOAD_FORCE_STREAMING__; fetchSpy?.mockRestore(); vi.useRealTimers(); });
+
+    test("a streamed reply comes back as the same JSON, with the reply shown as it grows", async () => {
+      fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        expect(JSON.parse(init.body).stream).toBe(true);
+        return { ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body: sseStream(events, 11) };
+      });
+      const seen = [];
+      const out = await claudeChat({ system: "s", messages: [{ role: "user", content: "hi" }], onPartialReply: (r) => seen.push(r) });
+      expect(JSON.parse(out)).toEqual(input);
+      expect(seen.at(-1)).toBe("Swapped bench for dumbbell bench.");
+    });
+
+    test("a stream that stalls halfway fails as 'took too long' instead of hanging", async () => {
+      vi.useFakeTimers();
+      fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        const first = new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify(events[0])}\n\n`);
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(first);
+            init.signal.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+          },
+        });
+        return { ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body };
+      });
+      const pending = claudeChat({ system: "s", messages: [{ role: "user", content: "hi" }], onPartialReply: () => {} });
+      const caught = pending.catch((e) => e);
+      await vi.advanceTimersByTimeAsync(61000);
+      const err = await caught;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.timeout).toBe(true);
+    });
   });
 });
 

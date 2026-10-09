@@ -380,11 +380,11 @@ export function setAiUsageRecordedCallback(cb) { onAiUsageRecorded = cb; }
 // writes, so streaming the response lets its words appear within a second or
 // two while the rest is still being written.
 //
-// OFF until checked against the real model and the live server: it changes
-// the most fragile path in the app, and that can't be verified without a real
-// API call. With this false, claudeChat never asks for a stream and the server
-// behaves exactly as it always has.
-export const COACH_STREAMING_ENABLED = false;
+// ON since 2026-10-09: the live Coach test ran all 25 scenarios through the
+// real app and real model with streaming on, scoring as well as without it,
+// and a throwaway preview deployment confirmed Vercel passes the stream
+// through event by event. Set false to go back to whole replies at once.
+export const COACH_STREAMING_ENABLED = true;
 
 // The "reply" value so far, from tool-call JSON that's still arriving — e.g.
 // '{"reply": "Swapped bench for dum' -> 'Swapped bench for dum'. Handles
@@ -586,14 +586,18 @@ export async function claudeChat({ system, messages, onPartialReply }) {
       signal: controller.signal,
     });
   } catch (networkErr) {
+    clearTimeout(timeoutId);
     if (networkErr.name === "AbortError") throw timeoutError();
     // fetch() itself throws (rather than resolving with a bad status) for a
     // genuine connectivity failure — DNS, connection refused, dropped
     // mid-request — as opposed to the server responding with an HTTP error.
     throw offlineError();
-  } finally {
-    clearTimeout(timeoutId);
   }
+  const isStream = !!res.body && (res.headers?.get?.("content-type") || "").includes("text/event-stream");
+  // A streamed reply keeps the same time limit while it's being read, so a
+  // connection that stalls halfway fails with "took too long" instead of
+  // leaving the Coach spinning forever.
+  if (!isStream) clearTimeout(timeoutId);
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
@@ -608,8 +612,17 @@ export async function claudeChat({ system, messages, onPartialReply }) {
   // A streamed reply (only ever requested when COACH_STREAMING_ENABLED) is
   // read event by event; everything downstream gets exactly the same JSON
   // text the non-streamed path returns.
-  if (res.body && (res.headers?.get?.("content-type") || "").includes("text/event-stream")) {
-    const { toolJson, usage } = await readCoachStream(res.body, onPartialReply);
+  if (isStream) {
+    let streamed;
+    try {
+      streamed = await readCoachStream(res.body, onPartialReply);
+    } catch (e) {
+      if (e?.name === "AbortError" || controller.signal.aborted) throw timeoutError();
+      throw e;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    const { toolJson, usage } = streamed;
     const costCents = estimateCostCents(usage);
     console.log(`[ai-cost] ${costCents.toFixed(4)}c (streamed) | uncached in ${usage.input_tokens || 0} | cache read ${usage.cache_read_input_tokens || 0} | cache write ${usage.cache_creation_input_tokens || 0} | out ${usage.output_tokens || 0}`);
     if (onAiUsageRecorded) onAiUsageRecorded(costCents);
