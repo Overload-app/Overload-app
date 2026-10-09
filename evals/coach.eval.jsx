@@ -292,6 +292,45 @@ const SCENARIOS = [
   ["no-stale-limit", "an old '30 mins' doesn't shorten a new request", ["make my legs 30 mins for today", "now change my Pull (Back/Biceps) day to dumbbells for today"], () => baseState(), (r, s) => [
     (r.after.todayOverride || []).length < s.program.days[1].exercises.length && `pull came back shortened to ${(r.after.todayOverride || []).length}`,
   ]],
+  // Added 2026-10-09 with the message-aware guards (equipment, injuries,
+  // day counts, plain undo).
+  ["legs-dumbbells-today", "dumbbell legs for today: dumbbell-only, legs only, same length", ["only dumbbells for legs today"], () => baseState(), (r, s) => {
+    const o = r.after.todayOverride || [];
+    return [
+      r.after.todayOverrideDayIdx !== 2 && `on day ${r.after.todayOverrideDayIdx}, not Legs`,
+      names(o).filter((n) => !isDumbbellish(n) && /barbell|machine|leg press|leg curl|leg extension|cable/i.test(n)).length > 0 && `needs a gym: ${names(o).join(", ")}`,
+      o.length < s.program.days[2].exercises.length && `shortened to ${o.length}`,
+      offFocus(o, "Legs").length > 0 && `off legs: ${offFocus(o, "Legs").join(", ")}`,
+    ];
+  }],
+  ["bodyweight-travel", "bodyweight only while travelling, for one session", ["I'm at a hotel with no equipment, give me a bodyweight only version of today's workout"], () => baseState(), (r) => {
+    const o = r.after.todayOverride || [];
+    return [
+      o.length === 0 && "no one-time workout",
+      names(o).filter((n) => /dumbbell|barbell|cable|machine|kettlebell|pulldown|leg press/i.test(n)).length > 0 && `uses equipment: ${names(o).join(", ")}`,
+    ];
+  }],
+  ["shoulder-today", "sore shoulder, push for today: nothing that loads it", ["my shoulder is sore, adjust Push (Chest/Triceps/Shoulders) for today"], () => baseState(), (r, s) => {
+    const o = r.after.todayOverride || [];
+    const bad = names(o).filter((n) => INJURY_EXCLUDES.shoulders.some((t) => n.toLowerCase().includes(t.toLowerCase())));
+    return [
+      r.after.todayOverrideDayIdx !== 0 && `on day ${r.after.todayOverrideDayIdx}, not Push (Chest/Triceps/Shoulders)`,
+      bad.length > 0 && `shoulder-loading: ${bad.join(", ")}`,
+      !sameJSON(r.after.program, s.program) && "changed the permanent program",
+    ];
+  }],
+  ["knee-better", "'my knee is fine now' doesn't strip knee exercises", ["my knee doesn't hurt anymore, put squats back in my leg day"], () => baseState({ program: { ...JSON.parse(JSON.stringify(PROGRAM)), days: PROGRAM.days.map((d, i) => (i === 2 ? { ...d, exercises: [ex("Romanian Deadlift"), ex("Leg Curl"), ex("Glute Bridge")] } : d)) } }), (r) => [
+    !names(r.after.program.days[2].exercises).some((n) => /squat/i.test(n)) && "no squat on leg day",
+  ]],
+  ["vegan-food", "a vegan gets vegan food", ["what should I eat for breakfast to hit my protein?"], () => baseState({ profile: { ...baseState().profile, diet: ["vegan"], foodPrefs: "love oats and smoothies" } }), (r) => [
+    /\b(egg|eggs|whey|greek yogurt|yogurt|milk|cheese|chicken|turkey|bacon|salmon|tuna|honey)\b/i.test(r.reply.replace(/(no|without|instead of|swap(ped)? out|skip)\s+\w+/gi, "")) && "suggested an animal product to a vegan",
+  ]],
+  ["halal-food", "halal is respected", ["give me 3 dinner ideas"], () => baseState({ profile: { ...baseState().profile, diet: ["halal"], foodPrefs: "love burgers and rice" } }), (r) => [
+    /\b(pork|bacon|ham|pepperoni|prosciutto|chorizo|beer|wine)\b/i.test(r.reply) && "suggested pork or alcohol",
+  ]],
+  ["plain-undo", "a bare 'undo' after a change restores it (no AI needed)", ["swap leg press for hack squat on leg day", "undo"], () => baseState(), (r, s) => [
+    !sameJSON(r.after.program.days[2], s.program.days[2]) && "leg day not restored",
+  ]],
 ];
 
 const results = [];
