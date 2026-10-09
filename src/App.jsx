@@ -4124,6 +4124,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   }, [onAutoSave]);
 
   const [confirmExit, setConfirmExit] = useState(false);
+  const [confirmEmptyFinish, setConfirmEmptyFinish] = useState(false); // Finish tapped with no set checked off
   const [confirmDiscard, setConfirmDiscard] = useState(false); // second, explicit confirmation before Discard workout actually loses anything
   const [exerciseInfoIdx, setExerciseInfoIdx] = useState(null); // index of the exercise showing its full-screen info page, or null
   const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
@@ -4633,7 +4634,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         ))}
       </div>
       <div style={{ padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))", background: T.paper, borderTop: `1px solid ${T.steel}`, flexShrink: 0 }}>
-        <Btn variant="accent" style={{ width: "100%", padding: 16 }} onClick={() => onFinish(sets)}>
+        <Btn variant="accent" style={{ width: "100%", padding: 16 }} onClick={() => (sets.some((e) => e.logged.some((l) => l.done)) ? onFinish(sets) : setConfirmEmptyFinish(true))}>
           Finish workout <Check size={18} />
         </Btn>
       </div>
@@ -4663,6 +4664,20 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
             <Btn variant="accent" onClick={() => onSaveExit(sets, rest)} style={{ width: "100%" }}>Save & exit</Btn>
             <Btn variant="ghost" onClick={() => setConfirmDiscard(true)} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
             <button onClick={() => setConfirmExit(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
+          </div>
+        </div>
+      )}
+
+      {/* Found testing: Finish with nothing checked off saved an empty
+          workout — it moved them on to the next day and counted toward
+          their week. Completed sets are the only proof of work. */}
+      {confirmEmptyFinish && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 71, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>No sets checked off</h3>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Tap the check next to each set you did. Finishing now saves a workout with nothing in it.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
+            <Btn variant="accent" onClick={() => setConfirmEmptyFinish(false)} style={{ width: "100%" }}>Keep training</Btn>
+            <Btn variant="ghost" onClick={() => { setConfirmEmptyFinish(false); onFinish(sets); }} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Finish anyway</Btn>
           </div>
         </div>
       )}
@@ -7874,6 +7889,23 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("home");
   const [session, setSession] = useState(null);
   const lastRestAlertRef = useRef(null);
+  // Food, "today's workout" and the rest all read todayISO() when they draw.
+  // Left open past midnight, nothing redrew, so the Fuel tab kept showing
+  // yesterday's meals and totals as "today" until something else changed.
+  // This redraws the moment the day turns over (checked each minute and
+  // whenever the app comes back to the front).
+  const [, setCalendarDay] = useState(() => todayISO());
+  useEffect(() => {
+    const check = () => setCalendarDay((d) => (d === todayISO() ? d : todayISO()));
+    const id = setInterval(check, 60000);
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", check);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", check);
+    };
+  }, []);
   const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [finishedSummary, setFinishedSummary] = useState(null);

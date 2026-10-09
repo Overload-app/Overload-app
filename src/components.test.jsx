@@ -970,6 +970,44 @@ describe("<WorkoutSession /> editing weight/reps after the checkmark", () => {
   });
 });
 
+describe("<WorkoutSession /> finishing with nothing checked off", () => {
+  const day = { name: "Full Body A", exercises: [{ name: "Bench Press", sets: 2, reps: "8-12", rest: 60, tips: ["a", "b", "c", "d"] }] };
+  const setup = () => {
+    const onFinish = vi.fn();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={onFinish} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    return onFinish;
+  };
+  test("asks first, and Keep training saves nothing", async () => {
+    const onFinish = setup();
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Finish workout"));
+    expect(screen.getByText("No sets checked off")).toBeInTheDocument();
+    await user.click(screen.getByText("Keep training"));
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(screen.queryByText("No sets checked off")).not.toBeInTheDocument();
+  });
+  test("Finish anyway still finishes", async () => {
+    const onFinish = setup();
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Finish workout"));
+    await user.click(screen.getByText("Finish anyway"));
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+  test("one checked set finishes straight away", async () => {
+    const onFinish = setup();
+    const user = userEvent.setup();
+    await user.click(screen.getAllByLabelText(/Mark set 1 done/)[0]);
+    await user.click(screen.getByText("Finish workout"));
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("OnboardingSummary", () => {
   const profile = { goal: "build", daysPerWeek: 4, sessionLength: 45 };
   const program = {
