@@ -4915,3 +4915,29 @@ describe("writeLocalState when storage is full", () => {
     }
   });
 });
+
+describe("message-aware Coach guards, randomised", () => {
+  const NAMES = ["Barbell Squat", "Leg Press", "Leg Extension", "Dumbbell Row", "Lat Pulldown", "Seated Cable Row", "Hammer Curl", "Push-Up", "Overhead Press", "Lateral Raise", "Romanian Deadlift", "Barbell Curl", "Plank", "Dips", "Goblet Squat", "Cable Fly"];
+  const MESSAGES = ["my knee hurts, adjust leg day for today", "only dumbbells today", "bodyweight only, I'm traveling", "my shoulder is sore and I only have dumbbells", "4 days a week upper lower", "undo that", "make it harder", "my back hurts", "", "🤷", "change everything to dumbbells and my elbow aches", "my knee doesn't hurt anymore", "train 3 days", "nothing"];
+  let seed = 12345;
+  const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const pick = (a) => a[Math.floor(rand() * a.length)];
+  const day = () => Array.from({ length: 1 + Math.floor(rand() * 7) }, () => ({ name: pick(NAMES), sets: 3, reps: "8-12", rest: 90 }));
+  test("2000 random replies × messages: never throws, never empties a day, reply always text", () => {
+    for (let i = 0; i < 2000; i++) {
+      const raw = {
+        reply: rand() < 0.2 ? "" : rand() < 0.1 ? { odd: true } : "ok",
+        question: rand() < 0.1 ? "Which day?" : undefined,
+        todayOverride: rand() < 0.4 ? day() : null,
+        programDayEdit: rand() < 0.3 ? { dayIndex: 0, day: { name: "Legs", exercises: day() } } : null,
+        program: rand() < 0.2 ? { splitName: "x", days: Array.from({ length: 2 + Math.floor(rand() * 5) }, (_, k) => ({ name: `D${k}`, exercises: day() })) } : null,
+      };
+      const msg = pick(MESSAGES);
+      const { parsed } = sanitizeCoachResponse(raw, { program: { days: [{ name: "Legs", exercises: day() }] } }, msg);
+      expect(typeof parsed.reply).toBe("string");
+      if (raw.todayOverride) expect(parsed.todayOverride.length).toBeGreaterThan(0);
+      if (raw.programDayEdit) expect(parsed.programDayEdit.day.exercises.length).toBeGreaterThan(0);
+      if (parsed.program) parsed.program.days.forEach((d) => expect(d.exercises.length).toBeGreaterThan(0));
+    }
+  });
+});
