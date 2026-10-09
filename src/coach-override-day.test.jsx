@@ -179,4 +179,26 @@ describe("a one-time change asked for on a day that isn't next", () => {
     // All six, in the preview of what they'll actually get.
     DUMBBELL_PULL.forEach((name) => expect(within(pullCard).getByText(new RegExp(name))).toBeInTheDocument());
   }, 20000);
+
+  // Found by the live Coach test: asked to "undo that", the AI decided the
+  // change had always been there and kept it. A plain undo is now the Undo
+  // button in words — no AI call, nothing to get wrong.
+  test("'undo that' undoes the last change without asking the AI", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Coach$/ }));
+    const input = screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day");
+    await user.type(input, "make push shoulder/volume all dumbbells and 30 mins for today{enter}");
+    await screen.findByText(/Done — your next Push/, {}, { timeout: 4000 });
+    const aiCalls = () => fetchSpy.mock.calls.filter(([u]) => String(u).includes("/api/claude")).length;
+    const before = aiCalls();
+
+    await user.type(input, "actually undo that{enter}");
+    expect(await screen.findByText(/Undone — everything's back/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(aiCalls()).toBe(before);
+
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    expect(screen.queryByText("ONE-TIME CHANGE")).not.toBeInTheDocument();
+  }, 20000);
 });

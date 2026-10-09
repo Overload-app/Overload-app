@@ -152,7 +152,9 @@ const offFocus = (exs, dayName) => {
   const f = dayFocusGroups(dayName);
   return f ? names(exs).filter((n) => { const g = groupOf(n); return g && g !== "core" && !f.has(g) && !(g === "shoulders" && f.has("back") && /rear delt|reverse fly|face pull/i.test(n)); }) : [];
 };
-const isDumbbellish = (n) => /dumbbell|renegade|chest-supported|pull-?up|chin-?up|push-?up|plank|pullover|shrug|dip/i.test(n) && !/barbell|cable|machine|pulldown|smith/i.test(n);
+// Exercises done with dumbbells by default even when the name doesn't say so
+// (a "Hammer Curl" or "Rear Delt Fly" was being failed as non-dumbbell).
+const isDumbbellish = (n) => /dumbbell|db\b|renegade|chest-supported|pull-?up|chin-?up|push-?up|plank|pullover|shrug|dip|hammer curl|concentration curl|rear delt fly|reverse fly|lateral raise|arnold|goblet|farmer|kroc|y-raise|zottman|incline curl|kickback/i.test(n) && !/barbell|cable|machine|pulldown|smith|band|ez[- ]?bar/i.test(n);
 
 // [id, what it's testing, messages, state, checks(result, state) -> array of failure strings]
 const SCENARIOS = [

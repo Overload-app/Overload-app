@@ -1025,7 +1025,7 @@ export function acceptGeneratedProgram(parsed, profile, priorProgram) {
 //   - a restore to a version that doesn't exist, or to an original the
 //     account never saved — nothing happened, reply said "Done — reverted it."
 //   - targets of 999,999 calories — saved
-export function sanitizeCoachResponse(parsed, state) {
+export function sanitizeCoachResponse(parsed, state, message = "") {
   const out = { ...parsed };
   const rejected = [];
   // A non-string reply (an object, a number) used to throw inside the
@@ -1068,6 +1068,25 @@ export function sanitizeCoachResponse(parsed, state) {
     // only numbers that are present but absurd are rejected here.
     const allPresent = [t.calories, t.protein, t.carbs, t.fat].every((v) => v !== undefined && v !== null && v !== "");
     if (allPresent && !sane) { rejected.push("targets"); out.targets = null; }
+  }
+
+  // Something just started hurting: take out what loads it, even if the
+  // Coach kept it, and say so.
+  const hurting = injuriesMentioned(message);
+  if (hurting.length > 0) {
+    const removed = [];
+    if (Array.isArray(out.todayOverride)) {
+      const r = withoutInjuryLoading(out.todayOverride, hurting);
+      out.todayOverride = r.exercises; removed.push(...r.removed);
+    }
+    if (out.programDayEdit?.day?.exercises) {
+      const r = withoutInjuryLoading(out.programDayEdit.day.exercises, hurting);
+      out.programDayEdit = { ...out.programDayEdit, day: { ...out.programDayEdit.day, exercises: r.exercises } };
+      removed.push(...r.removed);
+    }
+    if (removed.length > 0) {
+      out.reply = `${out.reply}${out.reply ? " " : ""}(I also took out ${removed.join(", ")} — ${removed.length === 1 ? "it loads" : "they load"} the ${hurting.map((h) => h.replace("_", " ").replace(/s$/, "")).join(" and ")} you said is hurting.)`;
+    }
   }
 
   const restoreIdx = coerceInt(out.restoreIndex);
@@ -1457,6 +1476,36 @@ export const INJURY_EXCLUDES = {
   wrists: ["Push-Up", "Plank", "Handstand"],
   elbows: ["Curl", "Extension", "Skull Crusher", "Kickback", "Tricep"],
 };
+
+// Body parts a Coach message says are hurting right now, as INJURY_EXCLUDES
+// keys. Found by the live Coach test: "my knee hurts, adjust leg day for
+// today" came back still holding Leg Press or Leg Extension. Only counts
+// pain that's current — "my knee doesn't hurt anymore" or "my knee is
+// better" names nothing.
+const PAIN_WORDS = /\b(hurt|hurts|hurting|pain|painful|sore|injur(y|ed|ies)|tweak(ed)?|strain(ed)?|sprain(ed)?|ach(e|es|ing|y)|bad|busted|messed up|torn|tendonitis|surgery|flar(e|ed|ing))\b/i;
+const HEALED_WORDS = /\b(any ?more|no longer|better now|is better|are better|feels? (fine|good|better)|healed|recovered|(doesn'?t|does not|don'?t|do not) hurt|stopped hurting|not hurting)\b/i;
+export function injuriesMentioned(text) {
+  const t = String(text || "");
+  if (!PAIN_WORDS.test(t) || HEALED_WORDS.test(t)) return [];
+  const found = [];
+  if (/\bknees?\b/i.test(t)) found.push("knees");
+  if (/\bshoulders?\b|\brotator cuff\b/i.test(t)) found.push("shoulders");
+  if (/\blower back\b|\bback (pain|hurts|is sore|is hurting)\b|\bmy back\b/i.test(t)) found.push("lower_back");
+  if (/\bwrists?\b/i.test(t)) found.push("wrists");
+  if (/\belbows?\b/i.test(t)) found.push("elbows");
+  return found;
+}
+
+// A Coach-built day with anything that loads a body part they just said is
+// hurting taken out. Never empties a day: if every exercise would go, the
+// Coach's version stands (it has said what it did in its reply).
+export function withoutInjuryLoading(exercises, injuries) {
+  if (!Array.isArray(exercises) || !injuries?.length) return { exercises, removed: [] };
+  const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
+  const kept = exercises.filter((e) => !terms.some((t) => String(e?.name || "").toLowerCase().includes(t)));
+  if (kept.length === 0 || kept.length === exercises.length) return { exercises, removed: [] };
+  return { exercises: kept, removed: exercises.filter((e) => !kept.includes(e)).map((e) => e.name) };
+}
 
 export function filterPool(pool, injuries) {
   if (!injuries || injuries.length === 0 || injuries.includes("none")) return pool;
@@ -2199,6 +2248,16 @@ export function padToMinimum(exercises, targetCount, equipment, injuries, dayNam
 // one-time version of a day should be as long as the day it replaces unless
 // they ask otherwise; if they DO ask for shorter, the Coach sends fewer and
 // this floor never adds any back.
+// Whether a message asks for a shorter or lighter session. Found by the live
+// Coach test: "change my Pull day to only dumbbells for today" came back
+// with 4 exercises instead of 6, and stopping the trim (minCount) wasn't
+// enough because the Coach itself had sent only 4. A one-time version of a
+// day is now topped back up to the day's own length — unless they asked
+// for less, which this spots.
+export function asksForShorter(text) {
+  return /\b(short(er|en)?|quick(er|ie)?|less|fewer|cut|trim|remove|drop|skip|only \d+|\d+\s*(-\s*)?(min|mins|minutes|exercises?)|half|light(er)?|easier|tired|no time|rush(ed)?|limited time|deload|sore)\b/i.test(String(text || ""));
+}
+
 export function normalizeExerciseCount(exercises, sessionLength, experience, equipment, injuries, overrideCeiling, options = {}) {
   const budget = capForProgram({ days: [{ exercises }] }, sessionLength, experience) ?? TARGET_MIN_EXERCISES;
   const ceiling = overrideCeiling ? Infinity : Math.max(budget, options.minCount || 0);
@@ -2215,7 +2274,7 @@ export function normalizeExerciseCount(exercises, sessionLength, experience, equ
   // The minimum protects against the model choosing a lazy short list on
   // its own; it was never meant to override a user's own explicit removal
   // — same reasoning as the ceiling override, just the other direction.
-  const padTarget = overrideCeiling ? 0 : Math.min(TARGET_MIN_EXERCISES, ceiling);
+  const padTarget = overrideCeiling ? 0 : Math.max(Math.min(TARGET_MIN_EXERCISES, ceiling), Math.min(options.padTo || 0, ceiling));
   if (result.length < padTarget) {
     result = padToMinimum(result, padTarget, equipment, injuries, options.dayName);
   }
@@ -2356,11 +2415,25 @@ export function injuryDescription(profile) {
 // for anyone who skipped both food questions, so the prompt doesn't carry an
 // empty section — and so an account created before these questions existed
 // behaves exactly as it did before.
+// Each quiz diet answer as the rule it actually means. Found by the live
+// Coach test: this used to say "MUST NOT eat: vegetarian", which reads
+// backwards, and the Coach suggested chicken, steak and turkey to a
+// vegetarian. Spelling out what's off the plate leaves no room for that.
+export const DIET_RULES = {
+  vegetarian: "vegetarian — no meat, poultry, fish or seafood of any kind (eggs and dairy are fine)",
+  vegan: "vegan — no animal products at all: no meat, poultry, fish, seafood, eggs, dairy, whey or honey",
+  dairy_free: "no dairy — no milk, cheese, yogurt, butter, cream or whey",
+  gluten_free: "no gluten — no wheat, barley, rye, or regular bread, pasta, wraps or beer",
+  halal: "halal — no pork or pork products and no alcohol; any meat must be halal",
+  kosher: "kosher — no pork or shellfish, and never meat and dairy in the same meal",
+  nut_allergy: "nut allergy — no nuts or nut butters of any kind, including peanuts",
+};
+
 export function foodPreferenceText(profile) {
-  const hard = (profile?.diet || []).filter((d) => d && d !== "none").map((d) => d.replace(/_/g, " "));
-  if (profile?.otherDiet && profile.otherDiet.trim()) hard.push(profile.otherDiet.trim());
+  const hard = (profile?.diet || []).filter((d) => d && d !== "none" && d !== "other").map((d) => DIET_RULES[d] || d.replace(/_/g, " "));
+  if (profile?.otherDiet && profile.otherDiet.trim()) hard.push(`they can't or won't eat: ${profile.otherDiet.trim()}`);
   const parts = [];
-  if (hard.length > 0) parts.push(`MUST NOT eat: ${hard.join(", ")} — treat this as a hard rule, never suggest a meal or food that breaks it.`);
+  if (hard.length > 0) parts.push(`DIET RULES (hard — never suggest a meal, food or ingredient that breaks them): ${hard.join("; ")}.`);
   if (profile?.foodPrefs && profile.foodPrefs.trim()) parts.push(`What they eat, in their own words: "${profile.foodPrefs.trim()}"`);
   if (parts.length === 0) return "";
   return parts.join(" ");
@@ -5746,6 +5819,15 @@ export function withUndoSnapshot(prev, next) {
   };
 }
 
+// "undo that", "actually undo", "revert it pls", "nvm undo" — a message that
+// is only an undo of the last change, nothing more. Anything with more in it
+// ("undo that and add curls", "go back to my original program") still goes
+// to the Coach.
+export function isPlainUndoRequest(text) {
+  const t = String(text || "").toLowerCase().replace(/[.!?,]+/g, " ").replace(/\s+/g, " ").trim();
+  return /^(ok |okay |no |nah |hmm |wait |oops |actually |nvm |never ?mind |please |pls |can you |could you |just )*(undo|revert|reverse|take back|cancel)( (that|it|this|the last change|last change|the change|that change|what you (just )?did|my last change))?( (please|pls|thanks|thx))?$/.test(t);
+}
+
 // Puts everything back exactly as it was before the last Coach change. The
 // version being undone goes into history first, so "redo" is still one Coach
 // message away ("put that back").
@@ -8185,6 +8267,17 @@ export default function App() {
     const trimmed = text.trim();
     if (!trimmed || coachLoading) return;
 
+    // A plain "undo that" is the Undo button in words: done here, exactly,
+    // with no AI call. Found by the live Coach test — asked to undo an added
+    // Calf Raise, the Coach decided it had always been there and left it.
+    if (isPlainUndoRequest(trimmed) && stateRef.current?.lastCoachChange) {
+      persist((prev) => applyCoachUndo({
+        ...prev,
+        coachChat: trimCoachChat([...(prev.coachChat && prev.coachChat.length ? prev.coachChat : DEFAULT_COACH_MESSAGES), { role: "user", text: trimmed, at: new Date().toISOString() }]),
+      }));
+      return;
+    }
+
     const today = todayISO();
     const usage = stateRef.current.coachUsage;
     const usedToday = usage && usage.date === today ? usage.count : 0;
@@ -8249,7 +8342,7 @@ export default function App() {
       );
       console.log("Coach response received:", JSON.stringify(rawParsed));
       // Everything below reads the cleaned reply — see sanitizeCoachResponse.
-      const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current);
+      const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current, trimmed);
       if (rejected.length > 0) {
         logError("Coach reply had parts the app couldn't use", {
           stack: JSON.stringify(rawParsed).slice(0, 4000),
@@ -8411,9 +8504,10 @@ export default function App() {
           ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
           : null;
         const normalizedOverride = hasOverride
-          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling, {
+          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, [...(p.injuries || []), ...injuriesMentioned(trimmed)], overrideCeiling, {
               dayName: overrideTargetDay?.name,
               minCount: overrideTargetDay?.exercises?.length || 0,
+              padTo: asksForShorter(trimmed) ? 0 : overrideTargetDay?.exercises?.length || 0,
             })
           : null;
         // Applied only when the day resolved; otherwise ...prev keeps whatever

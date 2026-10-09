@@ -65,6 +65,10 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  injuriesMentioned,
+  withoutInjuryLoading,
+  isPlainUndoRequest,
+  asksForShorter,
   mealNameFromDescription,
   acceptGeneratedProgram,
   mealNumber,
@@ -1295,8 +1299,12 @@ describe("coachLogSummary — the Coach can see what they've logged", () => {
 describe("foodPreferenceText", () => {
   test("hard restrictions are stated as a rule, not a preference", () => {
     const out = foodPreferenceText({ diet: ["vegetarian", "nut_allergy"] });
-    expect(out).toContain("MUST NOT eat: vegetarian, nut allergy");
-    expect(out).toContain("hard rule");
+    expect(out).toContain("DIET RULES (hard");
+    // Spelled out, never the bare label — "MUST NOT eat: vegetarian" read
+    // backwards and the Coach suggested steak to a vegetarian.
+    expect(out).toContain("no meat, poultry, fish or seafood");
+    expect(out).toContain("no nuts");
+    expect(out).not.toMatch(/MUST NOT eat: vegetarian/);
   });
 
   test("their own words are passed through verbatim", () => {
@@ -1817,7 +1825,7 @@ describe("sanitizeCoachResponse — nothing broken reaches the saved program", (
 describe("Fuel tab meal suggestions use what they actually eat", () => {
   test("restrictions and likes reach the suggestion request", () => {
     const msg = mealSuggestionUserMessage({ goal: "build", desiredPhysique: "lean", diet: ["vegetarian"], foodPrefs: "love pizza and pasta" }, { cal: 600, protein: 50 });
-    expect(msg).toContain("MUST NOT eat: vegetarian");
+    expect(msg).toContain("vegetarian — no meat, poultry, fish or seafood");
     expect(msg).toContain("love pizza and pasta");
   });
 
@@ -4696,5 +4704,72 @@ describe("meal names", () => {
     expect(n.endsWith("…")).toBe(true);
     expect(mealNameFromDescription("(just sauce)")).toBe("(just sauce)");
     expect(mealNameFromDescription("")).toBe("");
+  });
+});
+
+describe("one-time changes keep the day's length unless they ask for less", () => {
+  test("spots a request for less", () => {
+    for (const t of ["make legs 30 mins today", "quick pull session", "shorter push day", "only 4 exercises today", "im tired, go lighter", "skip the curls", "fewer sets on legs"]) {
+      expect(asksForShorter(t), t).toBe(true);
+    }
+  });
+  test("an ordinary swap isn't one", () => {
+    for (const t of ["change my Pull (Back/Biceps) day to only dumbbells for today", "swap bench for dumbbell press", "my knee hurts, make legs knee friendly for today", "harder push day"]) {
+      expect(asksForShorter(t), t).toBe(false);
+    }
+  });
+  test("a 4-exercise dumbbell version of a 6-exercise pull day is topped back up with pull work", () => {
+    const four = ["Dumbbell Row", "Dumbbell Curl", "Hammer Curl", "Dumbbell Pullover"].map((name) => ({ name, sets: 3, reps: "8-12", rest: 90 }));
+    const out = normalizeExerciseCount(four, 60, "intermediate", "full", [], false, { dayName: "Pull (Back/Biceps)", minCount: 6, padTo: 6 });
+    expect(out.length).toBeGreaterThan(4);
+    expect(out.slice(0, 4)).toEqual(four);
+    expect(out.every((e) => !/barbell|cable|machine|pulldown/i.test(e.name))).toBe(true);
+  });
+  test("without padTo, the old behaviour stands", () => {
+    const four = ["Dumbbell Row", "Dumbbell Curl", "Hammer Curl", "Dumbbell Pullover"].map((name) => ({ name, sets: 3, reps: "8-12", rest: 90 }));
+    expect(normalizeExerciseCount(four, 60, "intermediate", "full", [], false, { dayName: "Pull (Back/Biceps)", minCount: 6 }).length).toBe(4);
+  });
+});
+
+describe("isPlainUndoRequest", () => {
+  test("a bare undo, however it's phrased", () => {
+    for (const t of ["undo that", "actually undo that", "Undo.", "revert it pls", "nvm undo that", "can you undo that?", "undo what you just did", "oops, undo", "cancel that change"]) {
+      expect(isPlainUndoRequest(t), t).toBe(true);
+    }
+  });
+  test("anything more goes to the Coach", () => {
+    for (const t of ["undo that and add curls", "go back to my original program", "undo the change from last week to legs", "how do I undo a set?", "don't undo that", "what did you change"]) {
+      expect(isPlainUndoRequest(t), t).toBe(false);
+    }
+  });
+});
+
+describe("something that hurts right now", () => {
+  test("is picked out of the message", () => {
+    expect(injuriesMentioned("my knee hurts, adjust leg day for today")).toEqual(["knees"]);
+    expect(injuriesMentioned("tweaked my shoulder yesterday")).toEqual(["shoulders"]);
+    expect(injuriesMentioned("lower back is sore")).toEqual(["lower_back"]);
+    expect(injuriesMentioned("my wrist and elbow are aching")).toEqual(["wrists", "elbows"]);
+  });
+  test("but not when it's better, or nothing hurts", () => {
+    expect(injuriesMentioned("my knee doesn't hurt anymore, add squats back")).toEqual([]);
+    expect(injuriesMentioned("knee is better now")).toEqual([]);
+    expect(injuriesMentioned("add knee raises to abs")).toEqual([]);
+    expect(injuriesMentioned("my bad, I meant push day")).toEqual([]);
+    expect(injuriesMentioned("do back day today")).toEqual([]);
+  });
+  test("what loads it is taken out of the Coach's day, and the reply says so", () => {
+    const day = ["Leg Press", "Romanian Deadlift", "Leg Curl", "Leg Extension", "Calf Raise"].map((name) => ({ name, sets: 3, reps: "10", rest: 90 }));
+    const { parsed } = sanitizeCoachResponse({ reply: "Knee-friendly legs for today.", todayOverride: day, todayOverrideDayIndex: 2 }, {}, "my knee hurts, adjust leg day for today");
+    expect(parsed.todayOverride.map((e) => e.name)).toEqual(["Romanian Deadlift", "Leg Curl", "Calf Raise"]);
+    expect(parsed.reply).toMatch(/took out Leg Press, Leg Extension .* knee/);
+  });
+  test("never empties a day", () => {
+    const day = [{ name: "Leg Press" }, { name: "Barbell Squat" }];
+    expect(withoutInjuryLoading(day, ["knees"]).exercises).toBe(day);
+  });
+  test("leaves a message with no pain alone", () => {
+    const day = [{ name: "Leg Press", sets: 3, reps: "10", rest: 90 }];
+    expect(sanitizeCoachResponse({ reply: "ok", todayOverride: day }, {}, "make legs dumbbell today").parsed.todayOverride.map((e) => e.name)).toEqual(["Leg Press"]);
   });
 });
