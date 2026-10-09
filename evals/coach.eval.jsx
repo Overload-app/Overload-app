@@ -32,7 +32,7 @@ const ONLY = (process.env.EVAL_ONLY || "").split(",").map((x) => x.trim()).filte
 const USER = { id: "eval-user", email: "eval@example.com", user_metadata: { name: "Eval" } };
 if (process.env.EVAL_STREAMING === "1") globalThis.__OVERLOAD_FORCE_STREAMING__ = true;
 if (process.env.EVAL_PROMPT) globalThis.__OVERLOAD_PROMPT__ = process.env.EVAL_PROMPT;
-const RUN_LABEL = `rulebook: ${process.env.EVAL_PROMPT || "full (shipped)"} · streaming: ${process.env.EVAL_STREAMING === "1" ? "on" : "off"}`;
+const RUN_LABEL = `rulebook: ${process.env.EVAL_PROMPT || "full (shipped)"} · streaming: ${process.env.EVAL_STREAMING === "1" ? "forced on" : "as shipped (on)"}`;
 
 const ex = (name, sets = 3, reps = "8-12", rest = 90) => ({ name, sets, reps, rest, tips: ["Brace", "Control it", "Full range", "Don't rush"], alternatives: [] });
 const PROGRAM = { splitName: "Push / Pull / Legs", days: [
