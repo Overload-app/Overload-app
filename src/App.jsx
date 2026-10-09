@@ -1261,7 +1261,7 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // rice"), so this leans on reasonable real-world default portion sizes
 // rather than refusing to estimate — same spirit as a photo estimate,
 // which is also never exact.
-const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person's own plain-text description of what they ate (no photo). Use reasonable, realistic default portion sizes for anything not specified (e.g. \"a bagel\" means one standard plain bagel, \"chicken and rice\" means a normal single-meal portion of each) rather than asking for more detail — the person deliberately chose to describe instead of measuring precisely. If the description is genuinely too vague to estimate at all (e.g. just \"food\" or a single unclear word), still give your best reasonable single-serving guess rather than refusing. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate and what portion size you assumed, under 20 words>\"}";
+const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person's own plain-text description of what they ate (no photo). Use reasonable, realistic default portion sizes for anything not specified (e.g. \"a bagel\" means one standard plain bagel, \"chicken and rice\" means a normal single-meal portion of each) rather than asking for more detail — the person deliberately chose to describe instead of measuring precisely. If the description is genuinely too vague to estimate at all (e.g. just \"food\" or a single unclear word), still give your best reasonable single-serving guess rather than refusing. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name in their own words, like a menu item, e.g. 'Hamburger wrap' — not the ingredient list>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate and what portion size you assumed, under 20 words>\"}";
 
 // One-time smart backfill for the "Find alternative" swap picker, used only
 // when an exercise doesn't already have AI-sourced alternatives baked in
@@ -5454,11 +5454,25 @@ export function asText(v) {
   return "";
 }
 
+// A meal name from the person's own description, for when the AI's answer
+// has none. Real report: "hamburger wrap(hamburger ketchup mustard)" was
+// logged as just "Meal". The bracketed ingredients are detail, not the name.
+export function mealNameFromDescription(text) {
+  const words = asText(text).replace(/\([^)]*\)?/g, " ").replace(/\s+/g, " ").trim() || asText(text);
+  const short = words.length > 40 ? `${words.slice(0, 40).replace(/\s+\S*$/, "")}…` : words;
+  return short ? short.charAt(0).toUpperCase() + short.slice(1) : "";
+}
+
 // An AI meal estimate (photo, describe, or a suggestion) in the exact shape
-// the review card and addMeal expect.
-export function cleanAiMeal(m) {
+// the review card and addMeal expect. The model sometimes nests the meal
+// ({"meal": {...}}) or calls the name something else ("food", "mealName"),
+// which used to leave it as "Meal"; fallbackName is what they typed.
+export function cleanAiMeal(raw, fallbackName = "") {
+  const m = raw?.meal && typeof raw.meal === "object" && !Array.isArray(raw.meal) ? { ...raw.meal, ...raw } : raw;
+  const named = [m?.name, m?.mealName, m?.meal_name, m?.food, m?.title, typeof m?.meal === "string" ? m.meal : null]
+    .map(asText).find(Boolean);
   return {
-    name: asText(m?.name) || "Meal",
+    name: named || asText(fallbackName) || "Meal",
     note: asText(m?.note),
     cal: Math.round(mealNumber(m?.cal)),
     protein: Math.round(mealNumber(m?.protein)),
@@ -6127,8 +6141,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
               { type: "text", text: "Identify this meal and estimate its calories and macros." },
             ] }],
           });
-          const parsed = parseJSONLoose(raw);
-          addMeal({ name: parsed.name, cal: parsed.cal, protein: parsed.protein, carb: parsed.carb, fat: parsed.fat }, item.dateISO);
+          const meal = cleanAiMeal(parseJSONLoose(raw));
+          addMeal({ name: meal.name, cal: meal.cal, protein: meal.protein, carb: meal.carb, fat: meal.fat }, item.dateISO);
         } catch (err) {
           // Offline again, or some other failure — stop this pass and leave
           // whatever's left in the queue for next time rather than dropping it.
@@ -6169,7 +6183,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         messages: [{ role: "user", content: text }],
       });
       const parsed = parseJSONLoose(raw);
-      setPhotoResult(cleanAiMeal(parsed));
+      setPhotoResult(cleanAiMeal(parsed, mealNameFromDescription(text)));
       setDescribeText("");
       setShowDescribe(false);
     } catch (err) {

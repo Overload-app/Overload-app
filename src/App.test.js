@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  mealNameFromDescription,
   acceptGeneratedProgram,
   mealNumber,
   sanitizeMeal,
@@ -4673,5 +4674,27 @@ describe("fetchSimilarExercises", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
     await expect(fetchSimilarExercises("Back Squat", "full", [])).rejects.toMatchObject({ offline: true });
+  });
+});
+
+describe("meal names", () => {
+  test("a describe with no name in the AI answer keeps what they typed, minus the bracketed ingredients", () => {
+    expect(mealNameFromDescription("hamburger wrap(hamburger ketchup mustard)")).toBe("Hamburger wrap");
+    expect(cleanAiMeal({ cal: 520, protein: 30 }, mealNameFromDescription("hamburger wrap(hamburger ketchup mustard)")).name).toBe("Hamburger wrap");
+  });
+  test("finds the name when the AI nests the meal or calls it something else", () => {
+    expect(cleanAiMeal({ meal: { name: "Burger wrap", cal: 500 } })).toMatchObject({ name: "Burger wrap", cal: 500 });
+    expect(cleanAiMeal({ food: "Burger wrap", cal: 500 }).name).toBe("Burger wrap");
+    expect(cleanAiMeal({ mealName: "Burger wrap" }).name).toBe("Burger wrap");
+  });
+  test("the AI's own name still wins when it gives one", () => {
+    expect(cleanAiMeal({ name: "Beef wrap" }, "hamburger wrap").name).toBe("Beef wrap");
+  });
+  test("long descriptions are cut at a word, and empty input stays empty", () => {
+    const n = mealNameFromDescription("two eggs, three slices of toast with butter and a big glass of orange juice");
+    expect(n.length).toBeLessThanOrEqual(41);
+    expect(n.endsWith("…")).toBe(true);
+    expect(mealNameFromDescription("(just sauce)")).toBe("(just sauce)");
+    expect(mealNameFromDescription("")).toBe("");
   });
 });
