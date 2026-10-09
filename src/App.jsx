@@ -2744,7 +2744,7 @@ export async function loadState(userId, attempt = 0) {
     const local = readLocalState(userId);
     if (local) return { state: local, fromCache: true };
   }
-  const { data, error } = await supabase.from("app_state").select("state").eq("user_id", userId).maybeSingle();
+  const { data, error } = await supabase.from("app_state").select("state, updated_at").eq("user_id", userId).maybeSingle();
   if (error) {
     // A fresh session (e.g. right after a password reset) can occasionally
     // hit an RLS/auth timing hiccup on the very first request — retry a
@@ -2758,7 +2758,42 @@ export async function loadState(userId, attempt = 0) {
   }
   const state = data ? data.state : null;
   if (state) writeLocalState(userId, state); // keep the local cache fresh whenever the server has a real answer
+  rememberServerVersion(userId, data?.updated_at);
   return { state, fromCache: false };
+}
+
+// Which saved version of the account this device last loaded or wrote. Real
+// risk found testing: the app loaded once, at sign-in. A phone that kept the
+// app paused in the background for a day, while meals were logged on
+// another device, would — on its next checkmark or meal — save its old copy
+// over the newer one, wiping what the other device added. Now, whenever the
+// app comes back to the front, it checks whether the saved version is still
+// the one it knows; if another device has saved since, it picks that up
+// first (unless this device has its own unsaved changes, which win, as
+// before).
+const serverVersions = new Map(); // userId -> ms timestamp of the version we hold
+function rememberServerVersion(userId, updatedAt) {
+  const ms = Date.parse(updatedAt || "");
+  if (Number.isFinite(ms)) serverVersions.set(userId, ms);
+}
+
+export async function fetchNewerState(userId) {
+  if (hasPendingSync(userId) || !serverVersions.has(userId)) return null;
+  const savesBefore = saveSeq.get(userId) || 0;
+  try {
+    const { data, error } = await supabase.from("app_state").select("state, updated_at").eq("user_id", userId).maybeSingle();
+    if (error || !data?.state) return null;
+    const ms = Date.parse(data.updated_at || "");
+    if (!Number.isFinite(ms) || ms === serverVersions.get(userId)) return null;
+    // This device saved something while we were asking: what came back may
+    // be older than that save, so keep what's here.
+    if (hasPendingSync(userId) || (saveSeq.get(userId) || 0) !== savesBefore) return null;
+    serverVersions.set(userId, ms);
+    writeLocalState(userId, data.state);
+    return data.state;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Serializes the actual Supabase upsert per user (not the local write,
@@ -2796,8 +2831,10 @@ export async function saveState(userId, state) {
   const tail = saveQueues.get(userId) || Promise.resolve();
   const run = tail.then(async () => {
     try {
-      const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: new Date().toISOString() });
+      const updatedAt = new Date().toISOString();
+      const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: updatedAt });
       if (error) throw error;
+      rememberServerVersion(userId, updatedAt);
       // Only clear pendingSync if no newer save has been issued since —
       // otherwise this stale success would wrongly mark a still-unconfirmed
       // newer write as synced.
@@ -7954,6 +7991,31 @@ export default function App() {
     retryPendingSync(); // covers reopening the app back online with a pending change already queued
     window.addEventListener("online", retryPendingSync);
     return () => window.removeEventListener("online", retryPendingSync);
+  }, [account]);
+
+  // Picks up anything another device saved while this one sat in the
+  // background — see fetchNewerState. Not mid-workout: the open session is
+  // this device's, and it's saving as it goes.
+  const sessionOpenRef = useRef(false);
+  useEffect(() => { sessionOpenRef.current = !!session; }, [session]);
+  useEffect(() => {
+    if (!account) return;
+    let lastCheck = 0;
+    async function refreshIfNewer() {
+      if (document.visibilityState === "hidden" || !stateRef.current || sessionOpenRef.current) return;
+      if (Date.now() - lastCheck < 15000) return;
+      lastCheck = Date.now();
+      const newer = await fetchNewerState(account.id);
+      if (newer && !sessionOpenRef.current && !hasPendingSync(account.id)) setState(newer);
+    }
+    document.addEventListener("visibilitychange", refreshIfNewer);
+    window.addEventListener("focus", refreshIfNewer);
+    window.addEventListener("pageshow", refreshIfNewer);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfNewer);
+      window.removeEventListener("focus", refreshIfNewer);
+      window.removeEventListener("pageshow", refreshIfNewer);
+    };
   }, [account]);
 
   // Checks once per state change whether a weekly/monthly review has come
