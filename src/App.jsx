@@ -2785,6 +2785,11 @@ export function writeLocalState(userId, state) {
     localStorage.setItem(localStateKey(userId), JSON.stringify(state));
   } catch (e) {
     console.error("writeLocalState failed", e);
+    // Storage full (or blocked): the copy left behind is now OLDER than what
+    // this device has, and loadState trusts it over the server while a save
+    // is pending — so a reload could bring back old data. Without it, a
+    // reload falls back to the server's copy instead.
+    try { localStorage.removeItem(localStateKey(userId)); } catch (e2) {}
   }
 }
 export function hasPendingSync(userId) {

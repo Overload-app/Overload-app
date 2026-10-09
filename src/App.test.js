@@ -4892,3 +4892,26 @@ describe("a reply put in the wrong field", () => {
     expect(sanitizeCoachResponse({ reply: "Done.", message: "other" }, {}).parsed.reply).toBe("Done.");
   });
 });
+
+describe("writeLocalState when storage is full", () => {
+  test("drops the stale copy rather than leaving an older one to be loaded later", () => {
+    const store = { "x": "1" };
+    const fake = {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { if (v.length > 20) throw new Error("QuotaExceededError"); store[k] = v; },
+      removeItem: (k) => { delete store[k]; },
+    };
+    const real = globalThis.localStorage;
+    Object.defineProperty(globalThis, "localStorage", { value: fake, configurable: true });
+    try {
+      writeLocalState("u9", { a: 1 });
+      const key = Object.keys(store).find((k) => k !== "x");
+      expect(key).toBeTruthy();
+      writeLocalState("u9", { big: "y".repeat(100) });
+      expect(store[key]).toBeUndefined();
+      expect(readLocalState("u9")).toBeNull();
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", { value: real, configurable: true });
+    }
+  });
+});
