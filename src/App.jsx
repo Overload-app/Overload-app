@@ -2177,6 +2177,18 @@ export function capForProgram(program, sessionLength, experience) {
 // generation or a Coach edit) regardless of whether the model actually
 // complied, instead of hoping better wording eventually gets there.
 
+// What the session-length limit cut from a Coach-written program, as a line
+// for the reply — or "" when nothing was cut.
+export function programTrimNote(sentDays, keptDays, sessionLength) {
+  const cuts = (sentDays || []).map((d, i) => {
+    const kept = keptDays?.[i]?.exercises || [];
+    const dropped = (d.exercises || []).filter((e) => !kept.some((k) => k.name === e.name)).map((e) => e.name);
+    return dropped.length ? `${dropped.join(", ")} from ${d.name}` : null;
+  }).filter(Boolean);
+  if (cuts.length === 0) return "";
+  return `(To fit your ~${sessionLength}-minute sessions I left out ${cuts.join("; ")}. Tell me if you'd rather have longer workouts with all of them in.)`;
+}
+
 // Keeps the first N exercises (compound/primary lifts are conventionally
 // listed first, accessories last) rather than trimming at random.
 export function enforceExerciseCeiling(exercises, ceiling) {
@@ -8748,9 +8760,16 @@ export default function App() {
               newProgram = attempted;
             }
           }
+          // Found by the live Coach test: "make my program harder" came back
+          // with extra sets, the session-length limit then quietly cut
+          // exercises to fit, and the reply still said it was harder. Say
+          // what was cut, so it's never a silent change.
+          const trimmedNote = hasNewProgram ? programTrimNote(parsed.program.days, normalizedProgramDays, p.sessionLength) : "";
           const finalWithReply = dayEditFailed
             ? trimCoachChat([...withUser, { role: "assistant", text: "Sorry — that edit didn't actually go through on my end. Mind asking again?" }])
-            : withReply;
+            : trimmedNote
+              ? withReply.map((m, i) => (i === withReply.length - 1 && m.role === "assistant" ? { ...m, text: `${m.text} ${trimmedNote}` } : m))
+              : withReply;
           // Nothing real happened at all (the only change attempted was a
           // day edit, and it failed) — don't record a history snapshot for
           // a change that never actually occurred.

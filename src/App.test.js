@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  programTrimNote,
   equipmentAskedFor,
   usesOnly,
   injuriesMentioned,
@@ -4843,5 +4844,18 @@ describe("only the equipment they asked for", () => {
     const day = ["Dumbbell Bench Press", "Cable Fly", "Tricep Pushdown"].map((name) => ({ name, sets: 3, reps: "10", rest: 90 }));
     const { parsed } = sanitizeCoachResponse({ reply: "Swapped.", programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: day } } }, {}, "swap barbell bench to dumbbells");
     expect(parsed.programDayEdit.day.exercises.map((e) => e.name)).toEqual(["Dumbbell Bench Press", "Cable Fly", "Tricep Pushdown"]);
+  });
+});
+
+describe("programTrimNote", () => {
+  const ex = (name) => ({ name, sets: 4, reps: "8", rest: 120 });
+  test("names what the time limit cut, day by day", () => {
+    const sent = [{ name: "Push", exercises: ["Bench", "Fly", "Dips"].map(ex) }, { name: "Legs", exercises: ["Squat", "Lunge"].map(ex) }];
+    const kept = [{ name: "Push", exercises: ["Bench", "Fly"].map(ex) }, { name: "Legs", exercises: ["Squat", "Lunge"].map(ex) }];
+    expect(programTrimNote(sent, kept, 45)).toBe("(To fit your ~45-minute sessions I left out Dips from Push. Tell me if you'd rather have longer workouts with all of them in.)");
+  });
+  test("says nothing when nothing was cut", () => {
+    const days = [{ name: "Push", exercises: ["Bench"].map(ex) }];
+    expect(programTrimNote(days, days, 60)).toBe("");
   });
 });

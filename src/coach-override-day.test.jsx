@@ -201,4 +201,26 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await user.click(screen.getByRole("button", { name: /^Train$/ }));
     expect(screen.queryByText("ONE-TIME CHANGE")).not.toBeInTheDocument();
   }, 20000);
+
+  test("a harder program that the session length had to trim says what was cut", async () => {
+    const big = (names) => names.map((n) => ({ name: n, sets: 5, reps: "6-8", rest: 150, tips: [], alternatives: [] }));
+    stored.profile.sessionLength = 30;
+    nextReply = () => ({
+      ok: true,
+      json: async () => ({
+        content: [{ type: "tool_use", name: "respond", input: {
+          reply: "Made everything harder.",
+          program: { splitName: "PPL", days: stored.program.days.map((d) => ({ name: d.name, exercises: big(["Barbell Bench Press", "Incline Dumbbell Press", "Cable Fly", "Overhead Press", "Lateral Raise", "Tricep Pushdown", "Dips"]) })) },
+          programDayEdit: null, todayOverride: null, targets: null, restoreIndex: null, restoreOriginal: false, overrideCeiling: false,
+        } }],
+        usage: { input_tokens: 1500, output_tokens: 400 },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Coach$/ }));
+    await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "make my program harder{enter}");
+    expect(await screen.findByText(/Made everything harder\. \(To fit your ~30-minute sessions I left out .*Dips/, {}, { timeout: 4000 })).toBeInTheDocument();
+  }, 20000);
 });
