@@ -58,6 +58,22 @@ export function requestTooLarge(body) {
   return text.length > MAX_TEXT_CHARS || imageChars > MAX_IMAGE_CHARS;
 }
 
+// A per-account speed limit. Real use is a message every few seconds at the
+// very most; a script hammering this endpoint is someone running up this
+// account's AI bill. Kept in memory, so it's per server instance — not a
+// hard global cap, but it stops a loop cold at no extra cost.
+export const RATE_LIMIT = 40;
+export const RATE_WINDOW_MS = 5 * 60 * 1000;
+const recentCalls = new Map(); // userId -> timestamps (ms)
+export function overRateLimit(userId, now = Date.now(), calls = recentCalls) {
+  const kept = (calls.get(userId) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (kept.length >= RATE_LIMIT) { calls.set(userId, kept); return true; }
+  kept.push(now);
+  calls.set(userId, kept);
+  if (calls.size > 5000) calls.delete(calls.keys().next().value);
+  return false;
+}
+
 // Same reasoning as before: a full program generation is a genuinely large
 // response, and Vercel's 10s default would kill it server-side no matter
 // what the client does.
@@ -103,6 +119,9 @@ export default async function handler(req, res) {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data || !data.user) {
       return res.status(401).json({ error: "Not signed in." });
+    }
+    if (overRateLimit(data.user.id)) {
+      return res.status(429).json({ error: "That's a lot of requests in a few minutes — give it a moment and try again." });
     }
   } catch (e) {
     return res.status(401).json({ error: "Not signed in." });

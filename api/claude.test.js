@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { bearerToken, buildUpstreamBody, MODEL, MAX_OUTPUT_TOKENS, requestTooLarge } from "./claude.js";
+import { bearerToken, buildUpstreamBody, MODEL, MAX_OUTPUT_TOKENS, requestTooLarge, overRateLimit, RATE_LIMIT, RATE_WINDOW_MS } from "./claude.js";
 
 // This endpoint's address is visible in the app's public JS bundle, so before
 // these gates anyone could have used the project's Anthropic account as a free
@@ -106,5 +106,16 @@ describe("requestTooLarge", () => {
   });
   test("nothing at all is fine", () => {
     expect(requestTooLarge(undefined)).toBe(false);
+  });
+});
+
+describe("overRateLimit", () => {
+  test("lets normal use through, stops a loop, and recovers after the window", () => {
+    const calls = new Map();
+    const t0 = 1_000_000;
+    for (let i = 0; i < RATE_LIMIT; i++) expect(overRateLimit("u", t0 + i * 1000, calls)).toBe(false);
+    expect(overRateLimit("u", t0 + RATE_LIMIT * 1000, calls)).toBe(true);
+    expect(overRateLimit("someone-else", t0, calls)).toBe(false);
+    expect(overRateLimit("u", t0 + RATE_WINDOW_MS + RATE_LIMIT * 1000, calls)).toBe(false);
   });
 });

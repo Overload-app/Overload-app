@@ -8725,7 +8725,10 @@ export default function App() {
           context: { type: "coach-request-failure", status: e?.status },
         });
       }
-      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
+      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE
+        : e.status === 429 ? "That's a lot of messages in a few minutes — give it a moment, then try again."
+        : e.status === 413 ? "That message is too long for me — try a shorter version."
+        : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";
       persist((prev) => ({ ...prev, coachChat: trimCoachChat([...withUser, { role: "assistant", text: failText }]) }));
     } finally {
       setCoachLoading(false);
