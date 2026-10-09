@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  daysAskedFor,
   programTrimNote,
   equipmentAskedFor,
   usesOnly,
@@ -4857,5 +4858,28 @@ describe("programTrimNote", () => {
   test("says nothing when nothing was cut", () => {
     const days = [{ name: "Push", exercises: ["Bench"].map(ex) }];
     expect(programTrimNote(days, days, 60)).toBe("");
+  });
+});
+
+describe("a program with the wrong number of days", () => {
+  const day = (name) => ({ name, exercises: [{ name: "Squat", sets: 3, reps: "5", rest: 120 }] });
+  test("reads the number of days asked for", () => {
+    expect(daysAskedFor("switch me to an upper/lower split, 4 days a week")).toBe(4);
+    expect(daysAskedFor("give me a 3-day split")).toBe(3);
+    expect(daysAskedFor("i can train five days now")).toBe(5);
+    expect(daysAskedFor("4x a week please")).toBe(4);
+    expect(daysAskedFor("I'm away for 5 days, make it lighter")).toBeNull();
+    expect(daysAskedFor("my knee has hurt for 3 days")).toBeNull();
+    expect(daysAskedFor("make legs harder")).toBeNull();
+    expect(daysAskedFor("rest 90 seconds")).toBeNull();
+  });
+  test("isn't saved under a reply saying it was done", () => {
+    const { parsed, rejected } = sanitizeCoachResponse({ reply: "Switched you to a 4-day Upper/Lower split.", program: { splitName: "PPL", days: ["Push", "Pull", "Legs", "Upper", "Lower"].map(day) } }, {}, "switch me to an upper/lower split, 4 days a week");
+    expect(parsed.program).toBeNull();
+    expect(rejected).toContain("program");
+  });
+  test("the right number goes through", () => {
+    const { parsed } = sanitizeCoachResponse({ reply: "Done.", program: { splitName: "UL", days: ["Upper A", "Lower A", "Upper B", "Lower B"].map(day) } }, {}, "upper/lower, 4 days a week");
+    expect(parsed.program.days.length).toBe(4);
   });
 });

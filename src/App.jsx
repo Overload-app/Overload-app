@@ -1083,6 +1083,16 @@ export function sanitizeCoachResponse(parsed, state, message = "") {
     if (allPresent && !sane) { rejected.push("targets"); out.targets = null; }
   }
 
+  // They asked for a set number of days and the new program has a different
+  // number: found by the live Coach test, a "4 days a week" upper/lower
+  // split came back as the old 5 days under a reply saying it was done.
+  // Saving that would be worse than saving nothing.
+  const daysWanted = daysAskedFor(message);
+  if (daysWanted && out.program && Array.isArray(out.program.days) && out.program.days.length !== daysWanted) {
+    rejected.push("program");
+    out.program = null;
+  }
+
   // They asked for one kind of equipment: take out anything that needs
   // something else, even if the Coach kept it, and say so. Never empties a
   // day; the one-time version is topped back up from that equipment's list.
@@ -1528,6 +1538,24 @@ export function injuriesMentioned(text) {
   if (/\bwrists?\b/i.test(t)) found.push("wrists");
   if (/\belbows?\b/i.test(t)) found.push("elbows");
   return found;
+}
+
+// "4 days a week", "a 3-day split", "five days" — how many training days a
+// Coach message asks for, or null.
+const DAY_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
+export function daysAskedFor(text) {
+  const N = "([2-7]|two|three|four|five|six|seven)";
+  const patterns = [
+    new RegExp(`\\b${N}\\s*-?\\s*days?\\s*(?:a|per|/|each)\\s*week\\b`, "i"),
+    new RegExp(`\\b${N}\\s*-?\\s*days?\\s+(?:split|program|plan|routine|schedule)\\b`, "i"),
+    new RegExp(`\\btrain(?:ing)?\\s+${N}\\s+days?\\b`, "i"),
+    new RegExp(`\\b${N}\\s*(?:x|times)\\s*(?:a|per)\\s*week\\b`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = re.exec(String(text || ""));
+    if (m) return Number(m[1]) || DAY_WORDS[m[1].toLowerCase()] || null;
+  }
+  return null;
 }
 
 // "Only dumbbells" / "bodyweight only" in a Coach message, as a POOLS key.
