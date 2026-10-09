@@ -6225,6 +6225,22 @@ function MacroBar({ label, val, max, color, icon }) {
   );
 }
 
+// "Removed X — Undo" for a few seconds after a one-tap delete. Found by the
+// stress test: a meal or weigh-in went with a single tap on a small ×, and
+// there was no way back.
+function UndoBar({ text, onUndo, onDone }) {
+  useEffect(() => {
+    const id = setTimeout(onDone, 6000);
+    return () => clearTimeout(id);
+  }, [text]);
+  return (
+    <div role="status" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: T.ink, color: "#fff", borderRadius: 10, padding: "10px 14px", fontSize: 13 }}>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+      <button onClick={() => { onUndo(); onDone(); }} style={{ background: "none", border: "none", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0, flexShrink: 0 }}>Undo</button>
+    </div>
+  );
+}
+
 function Fuel({ state, addMeal, removeMeal, userId }) {
   const { targets, logs, profile } = state;
   const today = todayISO();
@@ -6233,6 +6249,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carb: "", fat: "" });
+  const [removedMeal, setRemovedMeal] = useState(null); // { meal, date } for Undo
 
   // "Describe what you ate" — real ask: forgot to take a photo of a
   // bagel and didn't want to look up its numbers manually. Shares the
@@ -6430,13 +6447,20 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
 
       <TickRule label="Meals logged" />
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {removedMeal && (
+          <UndoBar
+            text={`Removed ${removedMeal.meal.name}`}
+            onUndo={() => addMeal(removedMeal.meal, removedMeal.date)}
+            onDone={() => setRemovedMeal(null)}
+          />
+        )}
         {todayLog.meals.map((m, i) => (
           <Card key={i} style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{m.name}</div>
               <div style={{ fontSize: 11, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{m.cal} cal · P{m.protein} C{m.carb} F{m.fat}</div>
             </div>
-            <button aria-label={`Delete ${m.name}`} onClick={() => removeMeal(i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
+            <button aria-label={`Delete ${m.name}`} onClick={() => { setRemovedMeal({ meal: m, date: today }); removeMeal(i); }} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
           </Card>
         ))}
         {todayLog.meals.length === 0 && !showForm && <p style={{ color: T.steelDark, fontSize: 13 }}>Nothing logged yet today.</p>}
@@ -7126,10 +7150,11 @@ function ReviewsSection({ reviews, onMarkSeen, onDelete }) {
   );
 }
 
-export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMarkReviewSeen, onDeleteReview }) {
+export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpenHistory, onMarkReviewSeen, onDeleteReview }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const [entryError, setEntryError] = useState("");
+  const [removedWeight, setRemovedWeight] = useState(null); // { entry, index } for Undo
   // Found testing: 0, -5 or a slipped "1800" all went straight into the log,
   // the chart and what the Coach reads. A real weigh-in is in this range.
   function logWeight() {
@@ -7239,13 +7264,20 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMark
             {/* Reversed for most-recent-first display, but keeps each entry's
                 real index into logs.bodyweight so deleting removes the right one
                 even though the list order shown here is flipped. */}
+            {removedWeight && restoreWeight && (
+              <UndoBar
+                text={`Removed ${removedWeight.entry.weight} lb (${removedWeight.entry.date})`}
+                onUndo={() => restoreWeight(removedWeight.entry, removedWeight.index)}
+                onDone={() => setRemovedWeight(null)}
+              />
+            )}
             {logs.bodyweight.map((w, i) => ({ ...w, i })).reverse().slice(0, 10).map((w) => (
               <Card key={w.i} style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, fontFamily: "'JetBrains Mono', monospace" }}>{w.weight} lb</div>
                   <div style={{ fontSize: 11, color: T.steelDark }}>{w.date}</div>
                 </div>
-                <button aria-label="Delete weigh-in" onClick={() => removeWeight(w.i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
+                <button aria-label="Delete weigh-in" onClick={() => { setRemovedWeight({ entry: { date: w.date, weight: w.weight }, index: w.i }); removeWeight(w.i); }} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
               </Card>
             ))}
           </div>
@@ -9029,6 +9061,14 @@ export default function App() {
     persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: [...prev.logs.bodyweight, { date: todayISO(), weight }] } }));
   }
 
+  function restoreWeight(entry, index) {
+    persist((prev) => {
+      const list = [...prev.logs.bodyweight];
+      list.splice(Math.min(Math.max(0, index), list.length), 0, entry);
+      return { ...prev, logs: { ...prev.logs, bodyweight: list } };
+    });
+  }
+
   function removeWeight(index) {
     persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: prev.logs.bodyweight.filter((_, i) => i !== index) } }));
   }
@@ -9326,7 +9366,7 @@ export default function App() {
           {activeTab === "fuel" && <Fuel state={state} addMeal={addMeal} removeMeal={removeMeal} userId={account.id} />}
           {activeTab === "progress" && (
             <Progress
-              state={state} addWeight={addWeight} removeWeight={removeWeight}
+              state={state} addWeight={addWeight} removeWeight={removeWeight} restoreWeight={restoreWeight}
               onOpenHistory={() => { setHistoryEditorInitialIdx(null); setHistoryEditorOpen(true); }}
               onMarkReviewSeen={markReviewSeen}
               onDeleteReview={deleteReview}
