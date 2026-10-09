@@ -2955,7 +2955,7 @@ function Card({ children, style, onClick }) {
   );
 }
 
-function Btn({ children, onClick, variant = "primary", style, disabled }) {
+function Btn({ children, onClick, variant = "primary", style, disabled, ariaLabel }) {
   // boxSizing explicit (not just relying on the global `*` rule) so every
   // variant renders the exact same height/padding regardless of whether it
   // adds a border — ghost's 1px border is subtracted from its content box
@@ -2974,6 +2974,7 @@ function Btn({ children, onClick, variant = "primary", style, disabled }) {
   };
   return (
     <button
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={onClick}
       onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.97)")}
@@ -6192,7 +6193,7 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
           placeholder="e.g. My shoulder hurts, adjust push day"
           style={{ flex: 1, padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 14, boxSizing: "border-box" }}
         />
-        <Btn variant="accent" onClick={send} disabled={loading}><Send size={16} /></Btn>
+        <Btn variant="accent" onClick={send} disabled={loading} ariaLabel="Send message"><Send size={16} /></Btn>
       </div>
       <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -6435,7 +6436,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
               <div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{m.name}</div>
               <div style={{ fontSize: 11, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>{m.cal} cal · P{m.protein} C{m.carb} F{m.fat}</div>
             </div>
-            <button onClick={() => removeMeal(i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
+            <button aria-label={`Delete ${m.name}`} onClick={() => removeMeal(i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
           </Card>
         ))}
         {todayLog.meals.length === 0 && !showForm && <p style={{ color: T.steelDark, fontSize: 13 }}>Nothing logged yet today.</p>}
@@ -7244,7 +7245,7 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMark
                   <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, fontFamily: "'JetBrains Mono', monospace" }}>{w.weight} lb</div>
                   <div style={{ fontSize: 11, color: T.steelDark }}>{w.date}</div>
                 </div>
-                <button onClick={() => removeWeight(w.i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
+                <button aria-label="Delete weigh-in" onClick={() => removeWeight(w.i)} style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer" }}><X size={16} /></button>
               </Card>
             ))}
           </div>
