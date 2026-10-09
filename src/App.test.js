@@ -65,6 +65,8 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  equipmentAskedFor,
+  usesOnly,
   injuriesMentioned,
   withoutInjuryLoading,
   isPlainUndoRequest,
@@ -4808,5 +4810,38 @@ describe("something that hurts right now", () => {
   test("leaves a message with no pain alone", () => {
     const day = [{ name: "Leg Press", sets: 3, reps: "10", rest: 90 }];
     expect(sanitizeCoachResponse({ reply: "ok", todayOverride: day }, {}, "make legs dumbbell today").parsed.todayOverride.map((e) => e.name)).toEqual(["Leg Press"]);
+  });
+});
+
+describe("only the equipment they asked for", () => {
+  test("whole-day equipment requests are recognised", () => {
+    for (const t of ["change my Pull (Back/Biceps) day to only dumbbells for today", "now change my Pull (Back/Biceps) day to dumbbells for today", "make push all dumbbells and 30 mins", "dumbbells only today", "I only have dumbbells at the hotel", "give me a db version of legs", "change my workout to dumbbells"]) {
+      expect(equipmentAskedFor(t), t).toBe("dumbbell");
+    }
+    for (const t of ["bodyweight only legs today", "no equipment today, I'm traveling", "just bodyweight for push"]) {
+      expect(equipmentAskedFor(t), t).toBe("bodyweight");
+    }
+  });
+  test("a single swap or a question isn't one", () => {
+    for (const t of ["swap barbell bench to dumbbells", "switch bench press to dumbbell bench", "how heavy should my dumbbells be", "add dumbbell curls", "harder push day"]) {
+      expect(equipmentAskedFor(t), t).toBeNull();
+    }
+  });
+  test("what counts as dumbbell-only and bodyweight-only", () => {
+    expect(["Dumbbell Row", "Hammer Curl", "Rear Delt Fly", "Pull-Up", "Dumbbell Leg Curl"].every((n) => usesOnly(n, "dumbbell"))).toBe(true);
+    expect(["Lat Pulldown", "Seated Cable Row", "Barbell Row", "Leg Press"].some((n) => usesOnly(n, "dumbbell"))).toBe(false);
+    expect(usesOnly("Push-Up", "bodyweight")).toBe(true);
+    expect(usesOnly("Dumbbell Curl", "bodyweight")).toBe(false);
+  });
+  test("non-dumbbell exercises are taken out of a dumbbell day, and the reply says so", () => {
+    const day = ["Dumbbell Row", "Lat Pulldown", "Hammer Curl", "Seated Cable Row"].map((name) => ({ name, sets: 3, reps: "10", rest: 90 }));
+    const { parsed } = sanitizeCoachResponse({ reply: "Dumbbell pull for today.", todayOverride: day }, {}, "change my Pull day to only dumbbells for today");
+    expect(parsed.todayOverride.map((e) => e.name)).toEqual(["Dumbbell Row", "Hammer Curl"]);
+    expect(parsed.reply).toMatch(/took out Lat Pulldown, Seated Cable Row — you asked for dumbbells only/);
+  });
+  test("a single swap leaves the rest of the day alone", () => {
+    const day = ["Dumbbell Bench Press", "Cable Fly", "Tricep Pushdown"].map((name) => ({ name, sets: 3, reps: "10", rest: 90 }));
+    const { parsed } = sanitizeCoachResponse({ reply: "Swapped.", programDayEdit: { dayIndex: 0, day: { name: "Push", exercises: day } } }, {}, "swap barbell bench to dumbbells");
+    expect(parsed.programDayEdit.day.exercises.map((e) => e.name)).toEqual(["Dumbbell Bench Press", "Cable Fly", "Tricep Pushdown"]);
   });
 });

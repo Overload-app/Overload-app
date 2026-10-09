@@ -1083,6 +1083,27 @@ export function sanitizeCoachResponse(parsed, state, message = "") {
     if (allPresent && !sane) { rejected.push("targets"); out.targets = null; }
   }
 
+  // They asked for one kind of equipment: take out anything that needs
+  // something else, even if the Coach kept it, and say so. Never empties a
+  // day; the one-time version is topped back up from that equipment's list.
+  const onlyEquipment = equipmentAskedFor(message);
+  if (onlyEquipment) {
+    const removed = [];
+    const keepOnly = (list) => {
+      const kept = list.filter((e) => usesOnly(e?.name, onlyEquipment));
+      if (kept.length === 0 || kept.length === list.length) return list;
+      removed.push(...list.filter((e) => !kept.includes(e)).map((e) => e.name));
+      return kept;
+    };
+    if (Array.isArray(out.todayOverride)) out.todayOverride = keepOnly(out.todayOverride);
+    if (out.programDayEdit?.day?.exercises) {
+      out.programDayEdit = { ...out.programDayEdit, day: { ...out.programDayEdit.day, exercises: keepOnly(out.programDayEdit.day.exercises) } };
+    }
+    if (removed.length > 0) {
+      out.reply = `${out.reply}${out.reply ? " " : ""}(I also took out ${removed.join(", ")} — you asked for ${onlyEquipment === "dumbbell" ? "dumbbells" : "bodyweight"} only.)`;
+    }
+  }
+
   // Something just started hurting: take out what loads it, even if the
   // Coach kept it, and say so.
   const hurting = injuriesMentioned(message);
@@ -1507,6 +1528,25 @@ export function injuriesMentioned(text) {
   if (/\bwrists?\b/i.test(t)) found.push("wrists");
   if (/\belbows?\b/i.test(t)) found.push("elbows");
   return found;
+}
+
+// "Only dumbbells" / "bodyweight only" in a Coach message, as a POOLS key.
+// Found by the live Coach test: "change my Pull day to only dumbbells for
+// today" came back holding Lat Pulldown, Seated Cable Row and Barbell Row.
+export function equipmentAskedFor(text) {
+  const t = String(text || "");
+  if (/\b(only|just|all)\s+(bodyweight|body weight|calisthenics)\b|\b(bodyweight|body weight|calisthenics)\s+only\b|\bno equipment\b|\bwithout (any )?equipment\b/i.test(t)) return "bodyweight";
+  if (/\b(only|just|all)\s+(dumb ?bells?|dbs?)\b|\b(dumb ?bells?|dbs?)\s+only\b|\b(day|days|workout|session|everything|all of it|whole thing)\s+(\([^)]*\)\s+)?(day\s+)?(to|into|with)\s+(only\s+|just\s+)?(dumb ?bells?|dbs?)\b|\bonly (have|got) (dumb ?bells?|dbs?)\b|\b(dumb ?bells?|db) (version|workout|session)\b/i.test(t)) return "dumbbell";
+  return null;
+}
+
+const NEEDS_GYM = /barbell|cable|machine|smith|pulldown|pull-down|leg press|leg extension|leg curl|ez[- ]?bar|trap bar|hack squat|pec deck|t-bar|lat pull/i;
+const NEEDS_ANY_EQUIPMENT = /dumbbell|barbell|cable|machine|kettlebell|smith|ez[- ]?bar|trap bar|pulldown|leg press|leg extension|leg curl|band|weighted|plate|bench press|press machine/i;
+export function usesOnly(name, equipment) {
+  const n = String(name || "");
+  if (equipment === "dumbbell") return /dumbbell/i.test(n) || !NEEDS_GYM.test(n);
+  if (equipment === "bodyweight") return !NEEDS_ANY_EQUIPMENT.test(n);
+  return true;
 }
 
 // A Coach-built day with anything that loads a body part they just said is
@@ -8665,7 +8705,7 @@ export default function App() {
           ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
           : null;
         const normalizedOverride = hasOverride
-          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, p.equipment, [...(p.injuries || []), ...injuriesMentioned(trimmed)], overrideCeiling, {
+          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, equipmentAskedFor(trimmed) || p.equipment, [...(p.injuries || []), ...injuriesMentioned(trimmed)], overrideCeiling, {
               dayName: overrideTargetDay?.name,
               minCount: overrideTargetDay?.exercises?.length || 0,
               padTo: asksForShorter(trimmed) ? 0 : overrideTargetDay?.exercises?.length || 0,
