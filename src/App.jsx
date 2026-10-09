@@ -7569,7 +7569,7 @@ function NotificationSettings({ push, onSetPushEnabled }) {
     <>
       <TickRule label="Notifications" />
       <Card>
-        {[["reminders", "Workout reminders", "A nudge in the evening on days you haven't trained yet."], ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."]].map(([kind, label, hint], i) => (
+        {[["reminders", "Workout reminders", "A nudge at 6pm your time on days you haven't trained yet."], ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."]].map(([kind, label, hint], i) => (
           <div key={kind} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</div>

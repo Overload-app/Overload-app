@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO } from "./push-cron.js";
+import crypto from "node:crypto";
+import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -30,6 +31,17 @@ describe("rest alerts", () => {
     expect(shouldSendRestAlert({ ...base, push: { restAlerts: true, subscriptions: [] } }, 5000)).toBe(false);
     expect(shouldSendRestAlert(null, 5000)).toBe(false);
   });
+  test("15-minute rests are accepted (waited out in legs)", () => {
+    expect(validRestAlert({ endAt: now + 10 * 60_000 }, now)).not.toBeNull();
+    expect(MAX_REST_SECONDS).toBe(900);
+  });
+  test("the next leg of a long rest needs the server secret", () => {
+    const req = (h, userId = "u1") => ({ headers: { "x-overload-internal": h }, body: { userId } });
+    expect(internalCaller(req("s"), "s")).toBe("u1");
+    expect(internalCaller(req("wrong"), "s")).toBeNull();
+    expect(internalCaller(req(undefined), undefined)).toBeNull();
+    expect(internalCaller(req("s", 5), "s")).toBeNull();
+  });
   test("one dead device doesn't stop the others", async () => {
     const sent = await sendToSubscriptions([sub, { endpoint: "gone" }], { title: "x" }, (s) => (s.endpoint === "gone" ? Promise.reject(new Error("410")) : Promise.resolve()));
     expect(sent).toBe(1);
@@ -53,7 +65,7 @@ describe("rest alerts", () => {
 });
 
 describe("workout reminders", () => {
-  const now = new Date("2026-10-08T21:00:00Z");
+  const now = new Date("2026-10-08T18:00:00Z");
   const sub = { endpoint: "https://push.example/1", keys: {} };
   const state = (over = {}) => ({
     push: { reminders: true, subscriptions: [sub], tz: "UTC" },
@@ -79,10 +91,26 @@ describe("workout reminders", () => {
     expect(reminderFor(state({ program: { days: [] } }), now)).toBeNull();
   });
   test("'today' is their day, not the server's", () => {
+    const late = new Date("2026-10-08T21:00:00Z");
     // 21:00 UTC is already the next day in Sydney.
-    expect(localDateISO("Australia/Sydney", now)).toBe("2026-10-09");
-    expect(localDateISO("America/Los_Angeles", now)).toBe("2026-10-08");
-    expect(localDateISO("Not/AZone", now)).toBe("2026-10-08");
+    expect(localDateISO("Australia/Sydney", late)).toBe("2026-10-09");
+    expect(localDateISO("America/Los_Angeles", late)).toBe("2026-10-08");
+    expect(localDateISO("Not/AZone", late)).toBe("2026-10-08");
+  });
+  test("goes out at 6pm in their own time zone, and only then", () => {
+    const ny = state({ push: { reminders: true, subscriptions: [sub], tz: "America/New_York" } });
+    expect(reminderFor(ny, new Date("2026-10-08T22:00:00Z"))).not.toBeNull(); // 6pm EDT
+    expect(reminderFor(ny, new Date("2026-10-08T18:00:00Z"))).toBeNull(); // 2pm EDT
+    expect(localHour("Asia/Kolkata", new Date("2026-10-08T12:35:00Z"))).toBe(18);
+    expect(localHour("Not/AZone", new Date("2026-10-08T07:00:00Z"))).toBe(7);
+  });
+  test("an hourly run reaches each person exactly once a day", () => {
+    for (const tz of ["UTC", "America/Los_Angeles", "Europe/London", "Asia/Kolkata", "Australia/Adelaide", "Pacific/Auckland"]) {
+      const st = state({ push: { reminders: true, subscriptions: [sub], tz } });
+      let sends = 0;
+      for (let h = 0; h < 24; h++) if (reminderFor(st, new Date(Date.UTC(2026, 9, 8, h, 7)))) sends++;
+      expect(sends, tz).toBe(1);
+    }
   });
 
   test("the daily job refuses anyone without the cron secret", async () => {
@@ -95,5 +123,31 @@ describe("workout reminders", () => {
     await cronHandler({ method: "GET", headers: {} }, res2);
     expect(res2.statusCode).toBe(401);
     process.env.CRON_SECRET = saved;
+  });
+});
+
+describe("GitHub's hourly tick", () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "k1" };
+  const nowSec = 1_800_000_000;
+  const sign = (claims, kid = "k1", key = privateKey) => {
+    const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const head = enc({ alg: "RS256", kid }), body = enc(claims);
+    return `${head}.${body}.${crypto.sign("RSA-SHA256", Buffer.from(`${head}.${body}`), key).toString("base64url")}`;
+  };
+  const good = { iss: "https://token.actions.githubusercontent.com", aud: OIDC_AUDIENCE, repository: GITHUB_REPO, exp: nowSec + 300, nbf: nowSec - 10 };
+  const keys = async () => [jwk];
+
+  test("accepts this repo's signed run token", async () => {
+    expect(await verifyGithubToken(sign(good), keys, nowSec)).toBe(true);
+  });
+  test("refuses another repo, another audience, an expired or forged token", async () => {
+    expect(await verifyGithubToken(sign({ ...good, repository: "someone/else" }), keys, nowSec)).toBe(false);
+    expect(await verifyGithubToken(sign({ ...good, aud: "other" }), keys, nowSec)).toBe(false);
+    expect(await verifyGithubToken(sign({ ...good, exp: nowSec - 1 }), keys, nowSec)).toBe(false);
+    const other = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+    expect(await verifyGithubToken(sign(good, "k1", other), keys, nowSec)).toBe(false);
+    expect(await verifyGithubToken(sign(good, "nope"), keys, nowSec)).toBe(false);
+    expect(await verifyGithubToken("garbage", keys, nowSec)).toBe(false);
   });
 });
