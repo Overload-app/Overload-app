@@ -5838,6 +5838,8 @@ export function withUndoSnapshot(prev, next) {
 // is only an undo of the last change, nothing more. Anything with more in it
 // ("undo that and add curls", "go back to my original program") still goes
 // to the Coach.
+export const COACH_MESSAGE_MAX_CHARS = 1500;
+
 export function isPlainUndoRequest(text) {
   const t = String(text || "").toLowerCase().replace(/[.!?,]+/g, " ").replace(/\s+/g, " ").trim();
   return /^(ok |okay |no |nah |hmm |wait |oops |actually |nvm |never ?mind |please |pls |can you |could you |just )*(undo|revert|reverse|take back|cancel)( (that|it|this|the last change|last change|the change|that change|what you (just )?did|my last change))?( (please|pls|thanks|thx))?$/.test(t);
@@ -6147,6 +6149,9 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
         <input
           value={input} onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
+          // Plenty for any real question; a pasted wall of text costs AI
+          // money on every later message too, since history is re-sent.
+          maxLength={COACH_MESSAGE_MAX_CHARS}
           placeholder="e.g. My shoulder hurts, adjust push day"
           style={{ flex: 1, padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 14, boxSizing: "border-box" }}
         />
@@ -7086,6 +7091,20 @@ function ReviewsSection({ reviews, onMarkSeen, onDelete }) {
 export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMarkReviewSeen, onDeleteReview }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
+  const [entryError, setEntryError] = useState("");
+  // Found testing: 0, -5 or a slipped "1800" all went straight into the log,
+  // the chart and what the Coach reads. A real weigh-in is in this range.
+  function logWeight() {
+    if (!entry) return;
+    const w = Math.round(Number(entry) * 10) / 10;
+    if (!Number.isFinite(w) || w < 60 || w > 700) {
+      setEntryError("That doesn't look right — enter your weight in pounds.");
+      return;
+    }
+    setEntryError("");
+    addWeight(w);
+    setEntry("");
+  }
   const chartData = logs.bodyweight.map((w) => ({ date: w.date.slice(5), weight: w.weight }));
   const totalWorkouts = logs.workouts.length;
   const weekStreak = (() => {
@@ -7161,16 +7180,18 @@ export function Progress({ state, addWeight, removeWeight, onOpenHistory, onMark
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <input
             placeholder={`Weight (lb) · last ${profile.weightLb}`} type="number" value={entry}
-            onChange={(e) => setEntry(e.target.value)}
+            onChange={(e) => { setEntry(e.target.value); setEntryError(""); }}
+            onKeyDown={(e) => { if (e.key === "Enter") logWeight(); }}
             // Standard UI typography, not the raw monospace/code font — this
             // is a normal text entry field, not a numeric readout like a
             // stat chip or timer.
             style={{ flex: 1, padding: 12, borderRadius: 8, border: `1.5px solid ${T.steel}`, boxSizing: "border-box", fontFamily: "'Inter', sans-serif", fontSize: 15 }}
           />
-          <Btn variant="accent" onClick={() => { if (entry) { addWeight(Number(entry)); setEntry(""); } }}>
+          <Btn variant="accent" onClick={logWeight}>
             <Scale size={16} /> Log
           </Btn>
         </div>
+        {entryError && <p role="alert" style={{ color: T.warn, fontSize: 12, margin: "8px 0 0" }}>{entryError}</p>}
       </Card>
 
       {logs.bodyweight.length > 0 && (

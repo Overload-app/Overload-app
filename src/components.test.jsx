@@ -2574,3 +2574,28 @@ describe("<App /> smoke test", () => {
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   });
 });
+
+describe("<Progress /> weigh-in entry", () => {
+  const baseState = () => ({
+    profile: { weightLb: 180, goal: "build" },
+    logs: { workouts: [], nutrition: [], bodyweight: [{ date: "2026-10-01", weight: 180 }] },
+    reviews: { weekly: [], monthly: [] }, reviewsEnabled: {},
+    program: { days: [] }, targets: { calories: 2500, protein: 180, carbs: 250, fat: 70 },
+  });
+  test("a slipped extra digit or a zero isn't logged", async () => {
+    const addWeight = vi.fn();
+    const user = userEvent.setup();
+    render(<Progress state={baseState()} addWeight={addWeight} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} onDeleteReview={vi.fn()} />);
+    const input = screen.getByPlaceholderText(/Weight \(lb\)/);
+    for (const bad of ["1800", "0", "-5"]) {
+      await user.clear(input);
+      await user.type(input, bad);
+      await user.click(screen.getByRole("button", { name: /Log/ }));
+      expect(screen.getByRole("alert")).toHaveTextContent(/doesn't look right/);
+    }
+    expect(addWeight).not.toHaveBeenCalled();
+    await user.clear(input);
+    await user.type(input, "181.46{enter}");
+    expect(addWeight).toHaveBeenCalledWith(181.5);
+  });
+});

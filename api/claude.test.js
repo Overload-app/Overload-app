@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { bearerToken, buildUpstreamBody, MODEL, MAX_OUTPUT_TOKENS } from "./claude.js";
+import { bearerToken, buildUpstreamBody, MODEL, MAX_OUTPUT_TOKENS, requestTooLarge } from "./claude.js";
 
 // This endpoint's address is visible in the app's public JS bundle, so before
 // these gates anyone could have used the project's Anthropic account as a free
@@ -90,5 +90,21 @@ describe("streaming", () => {
     expect(res.headers["Content-Type"]).toMatch(/text\/event-stream/);
     expect(written.join("")).toBe("event: a\ndata: {\"x\":1}\n\nevent: b\ndata: {\"x\":2}\n\n");
     expect(res.ended).toBe(true);
+  });
+});
+
+describe("requestTooLarge", () => {
+  test("a normal Coach request and a meal photo are fine", () => {
+    const coach = { system: "x".repeat(60000), messages: Array.from({ length: 30 }, () => ({ role: "user", content: "y".repeat(500) })) };
+    expect(requestTooLarge(coach)).toBe(false);
+    const photo = { messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "a".repeat(200000) } }, { type: "text", text: "what is this" }] }] };
+    expect(requestTooLarge(photo)).toBe(false);
+  });
+  test("a pasted wall of text or a giant image is refused", () => {
+    expect(requestTooLarge({ messages: [{ role: "user", content: "z".repeat(400000) }] })).toBe(true);
+    expect(requestTooLarge({ messages: [{ role: "user", content: [{ type: "image", source: { data: "a".repeat(2000000) } }] }] })).toBe(true);
+  });
+  test("nothing at all is fine", () => {
+    expect(requestTooLarge(undefined)).toBe(false);
   });
 });

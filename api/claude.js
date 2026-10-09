@@ -42,6 +42,22 @@ export function buildUpstreamBody(clientBody) {
   return upstream;
 }
 
+// Every real request is far below these: the Coach's whole prompt plus 30
+// messages of history is under 100k characters, and a meal photo is
+// compressed to 768px (~100 KB). Anything much bigger is a pasted essay or
+// someone using the endpoint to run up this account's AI bill, and is
+// refused before it costs anything.
+export const MAX_TEXT_CHARS = 300000;
+export const MAX_IMAGE_CHARS = 1500000;
+export function requestTooLarge(body) {
+  let imageChars = 0;
+  const text = JSON.stringify(body || {}, (key, value) => {
+    if (key === "data" && typeof value === "string") { imageChars += value.length; return ""; }
+    return value;
+  });
+  return text.length > MAX_TEXT_CHARS || imageChars > MAX_IMAGE_CHARS;
+}
+
 // Same reasoning as before: a full program generation is a genuinely large
 // response, and Vercel's 10s default would kill it server-side no matter
 // what the client does.
@@ -90,6 +106,10 @@ export default async function handler(req, res) {
     }
   } catch (e) {
     return res.status(401).json({ error: "Not signed in." });
+  }
+
+  if (requestTooLarge(req.body)) {
+    return res.status(413).json({ error: "That message is too long — try a shorter one." });
   }
 
   try {
