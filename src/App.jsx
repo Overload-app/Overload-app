@@ -3384,10 +3384,15 @@ function Paywall({ account, trialUsed, onStartTrial, onRefresh, onLogout }) {
     setLoading(true);
     setError("");
     try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token || null;
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: account.email, userId: account.id, plan }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ plan }),
       });
       const data = await res.json();
       if (data.url) {
@@ -3514,10 +3519,15 @@ function SubscribeOverlay({ account, onClose }) {
     setLoading(true);
     setError("");
     try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token || null;
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: account.email, userId: account.id, plan }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ plan }),
       });
       const data = await res.json();
       if (data.url) {
@@ -5706,6 +5716,16 @@ export function mealNameFromDescription(text) {
   return short ? short.charAt(0).toUpperCase() + short.slice(1) : "";
 }
 
+// The same photo again, with what the person says it actually is — their
+// word beats how it looks (greek yogurt and sour cream look the same).
+export function photoFixMessages(photo, what) {
+  const said = String(what || "").replace(/"/g, "'").trim().slice(0, 200);
+  return [{ role: "user", content: [
+    { type: "image", source: { type: "base64", media_type: photo.mediaType, data: photo.base64 } },
+    { type: "text", text: `Identify this meal and estimate its calories and macros. The person who ate it says: "${said}". Trust what they say about what the food is and how much over how it looks in the photo, and name the meal accordingly.` },
+  ] }];
+}
+
 // An AI meal estimate (photo, describe, or a suggestion) in the exact shape
 // the review card and addMeal expect. The model sometimes nests the meal
 // ({"meal": {...}}) or calls the name something else ("food", "mealName"),
@@ -6455,6 +6475,11 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   const [photoResult, setPhotoResult] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const [photoError, setPhotoError] = useState(null);
+  // The photo behind the current estimate, kept so it can be re-checked with
+  // what the person says it actually is. Real report: a photo of greek
+  // yogurt was logged as sour cream, with no way to say so.
+  const [lastPhoto, setLastPhoto] = useState(null); // { base64, mediaType }
+  const [photoFix, setPhotoFix] = useState("");
   const [pendingPhotos, setPendingPhotos] = useState(() => readPendingPhotos(userId));
   const [processingQueue, setProcessingQueue] = useState(false);
   const fileInputRef = useRef(null);
@@ -6521,6 +6546,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     if (!text) return;
     setPhotoError(null);
     setPhotoResult(null);
+    setLastPhoto(null);
     setDescribeLoading(true);
     try {
       const raw = await claudeChat({
@@ -6559,11 +6585,31 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     }
   }
 
+  async function fixPhotoEstimate() {
+    const what = photoFix.trim();
+    if (!what || !lastPhoto) return;
+    setPhotoError(null);
+    setPhotoLoading(true);
+    try {
+      const raw = await claudeChat({
+        system: MEAL_PHOTO_SYSTEM,
+        messages: photoFixMessages(lastPhoto, what),
+      });
+      setPhotoResult(cleanAiMeal(parseJSONLoose(raw), mealNameFromDescription(what)));
+      setPhotoFix("");
+    } catch (err) {
+      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : err.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Couldn't re-check that photo — try again, or fix the name and numbers yourself.");
+    } finally {
+      setPhotoLoading(false);
+    }
+  }
+
   async function handlePhoto(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setPhotoError(null);
     setPhotoResult(null);
+    setLastPhoto(null);
     let base64, mediaType;
     try {
       base64 = await compressImageToBase64(file);
@@ -6591,6 +6637,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       });
       const parsed = parseJSONLoose(raw);
       setPhotoResult(cleanAiMeal(parsed));
+      setLastPhoto({ base64, mediaType });
+      setPhotoFix("");
     } catch (err) {
       if (err.offline) {
         // Connectivity dropped between the check above and the request
@@ -6734,8 +6782,27 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       )}
       {photoResult && (
         <Card style={{ marginTop: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: 15, color: T.ink }}>{photoResult.name}</div>
+          <input
+            value={photoResult.name} aria-label="Meal name"
+            onChange={(e) => setPhotoResult({ ...photoResult, name: e.target.value })}
+            style={{ width: "100%", fontWeight: 700, fontSize: 15, color: T.ink, border: "none", borderBottom: `1px dashed ${T.steel}`, padding: "2px 0", background: "transparent", fontFamily: "'Inter', sans-serif", boxSizing: "border-box" }}
+          />
           {photoResult.note && <div style={{ fontSize: 12, color: T.steelDark, marginTop: 2 }}>{photoResult.note}</div>}
+          {lastPhoto && (
+            <div style={{ marginTop: 10 }}>
+              <label style={{ fontSize: 11, color: T.steelDark, fontWeight: 600 }} htmlFor="photo-fix">Not right? Tell me what it actually is</label>
+              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                <input
+                  id="photo-fix" value={photoFix} maxLength={200}
+                  placeholder="e.g. greek yogurt, not sour cream — about a cup"
+                  onChange={(e) => setPhotoFix(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") fixPhotoEstimate(); }}
+                  style={{ flex: 1, minWidth: 0, padding: 10, borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 14, boxSizing: "border-box" }}
+                />
+                <Btn variant="ghost" onClick={fixPhotoEstimate} disabled={!photoFix.trim() || photoLoading}>Fix it</Btn>
+              </div>
+            </div>
+          )}
           <div style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, padding: "8px 10px", background: T.paper, borderRadius: 8 }}>
             <Info size={13} color={T.steelDark} style={{ flexShrink: 0, marginTop: 1 }} />
             <span style={{ fontSize: 11, color: T.steelDark, lineHeight: 1.4 }}>
@@ -6755,8 +6822,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
             ))}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setPhotoResult(null)}>Discard</Btn>
-            <Btn variant="accent" style={{ flex: 1 }} onClick={() => { addMeal({ name: photoResult.name, cal: photoResult.cal, protein: photoResult.protein, carb: photoResult.carb, fat: photoResult.fat }); setPhotoResult(null); }}>
+            <Btn variant="ghost" style={{ flex: 1 }} onClick={() => { setPhotoResult(null); setLastPhoto(null); }}>Discard</Btn>
+            <Btn variant="accent" style={{ flex: 1 }} onClick={() => { addMeal({ name: photoResult.name, cal: photoResult.cal, protein: photoResult.protein, carb: photoResult.carb, fat: photoResult.fat }); setPhotoResult(null); setLastPhoto(null); }}>
               Add to log
             </Btn>
           </div>

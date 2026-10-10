@@ -229,7 +229,7 @@ describe("the Coach survives every kind of bad AI reply", () => {
     await user.click(screen.getByText("Describe"));
     await user.type(screen.getByPlaceholderText(/What did you eat/), "a bagel with cream cheese");
     await user.click(screen.getByText("Estimate"));
-    await screen.findByText("Bagel with cream cheese");
+    await screen.findByDisplayValue("Bagel with cream cheese");
     await user.clear(screen.getByLabelText("Fat (g)"));
     await user.click(screen.getByText("Add to log"));
     const today = new Date();

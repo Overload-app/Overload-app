@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  photoFixMessages,
   quizNumberProblem,
   QUIZ_STEPS,
   daysAskedFor,
@@ -4959,5 +4960,17 @@ describe("quiz numbers stay in range", () => {
     expect(quizNumberProblem(age, 28)).toBeNull();
     expect(quizNumberProblem(weight, 165)).toBeNull();
     expect(quizNumberProblem(weight, "")).toBeNull();
+  });
+});
+
+describe("re-checking a photo with what it actually is", () => {
+  test("sends the same photo plus their correction, and their word wins", () => {
+    const [msg] = photoFixMessages({ base64: "abc", mediaType: "image/jpeg" }, 'greek yogurt, not sour cream — "about a cup"');
+    expect(msg.content[0]).toEqual({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "abc" } });
+    expect(msg.content[1].text).toContain("greek yogurt, not sour cream — 'about a cup'");
+    expect(msg.content[1].text).toMatch(/Trust what they say/);
+  });
+  test("the corrected name comes from their words if the AI gives none", () => {
+    expect(cleanAiMeal({ cal: 150, protein: 20 }, mealNameFromDescription("greek yogurt (plain, 2%)")).name).toBe("Greek yogurt");
   });
 });
