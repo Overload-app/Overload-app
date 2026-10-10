@@ -598,6 +598,11 @@ export async function claudeChat({ system, messages, onPartialReply }) {
   // connection that stalls halfway fails with "took too long" instead of
   // leaving the Coach spinning forever.
   if (!isStream) clearTimeout(timeoutId);
+  if (res.status === 402) {
+    // The server's own copy of the free-trial AI cap (see api/claude.js).
+    clearTimeout(timeoutId);
+    throw budgetExceededError();
+  }
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
@@ -6155,6 +6160,50 @@ export function coachAcknowledgement(messageCount) {
   return COACH_ACKNOWLEDGEMENTS[n % COACH_ACKNOWLEDGEMENTS.length];
 }
 
+// The Coach's reply typed out letter by letter. Real report: streamed replies
+// "look glitchy" — words arrived in uneven bursts, then the whole bubble
+// jumped when the final reply replaced it. This reveals text at a steady
+// pace, speeding up only when it's far behind, and carries on from wherever
+// it got to when the final reply lands, so it reads as one smooth answer.
+// Shows the whole text at once in tests (jsdom). Not tied to "reduce
+// motion": text appearing in place isn't movement, and with it on, the reply
+// went back to arriving in jumpy chunks — the exact thing this fixes.
+const NO_TYPEWRITER = typeof window === "undefined"
+  || /jsdom/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
+export const TYPE_CHARS_PER_SECOND = 55;
+
+function TypewriterText({ text, from = 0, onProgress }) {
+  const [shown, setShown] = useState(() => (NO_TYPEWRITER ? text.length : Math.min(from, text.length)));
+  const textRef = useRef(text);
+  textRef.current = text;
+  const progressRef = useRef(onProgress);
+  progressRef.current = onProgress;
+  useEffect(() => {
+    if (NO_TYPEWRITER) return undefined;
+    let timer;
+    let last = Date.now();
+    let pos = shown;
+    const step = () => {
+      const now = Date.now();
+      const target = textRef.current.length;
+      const behind = target - pos;
+      if (behind > 0) {
+        const perSecond = Math.max(TYPE_CHARS_PER_SECOND, behind * 2.5);
+        pos = Math.min(target, pos + (perSecond * (now - last)) / 1000);
+        const whole = Math.floor(pos);
+        setShown((prev) => (prev === whole ? prev : whole));
+        progressRef.current?.(whole);
+      }
+      last = now;
+      timer = setTimeout(step, 30);
+    };
+    timer = setTimeout(step, 30);
+    return () => clearTimeout(timer);
+  }, []);
+  const visible = NO_TYPEWRITER ? text : text.slice(0, shown);
+  return <FormattedText text={visible} />;
+}
+
 export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dailyLimit, lastChangeId, onUndo, streamingReply }) {
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -6172,6 +6221,27 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, loading]);
+
+  // Which reply is still being typed out, and from where. When a send
+  // finishes, the new reply continues from however much of the streamed
+  // version was already on screen (if it starts the same way).
+  const typedRef = useRef(0);
+  const streamedRef = useRef("");
+  const wasLoading = useRef(loading);
+  const prevCount = useRef(list.length);
+  const [typing, setTyping] = useState(null); // { index, from }
+  useEffect(() => {
+    if (wasLoading.current && !loading && list.length > prevCount.current && list[list.length - 1]?.role === "assistant") {
+      const finalText = list[list.length - 1].text || "";
+      const typedSoFar = streamedRef.current.slice(0, typedRef.current);
+      setTyping({ index: list.length - 1, from: typedSoFar && finalText.startsWith(typedSoFar) ? typedSoFar.length : 0 });
+    }
+    if (loading && !wasLoading.current) { typedRef.current = 0; streamedRef.current = ""; setTyping(null); }
+    wasLoading.current = loading;
+    prevCount.current = list.length;
+  }, [loading, list.length]);
+  useEffect(() => { if (streamingReply) streamedRef.current = streamingReply; }, [streamingReply]);
+  const keepScrolled = () => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; };
 
   function send() {
     const text = input.trim();
@@ -6238,7 +6308,9 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
                 borderBottomLeftRadius: m.role === "user" ? 14 : 4,
                 fontSize: 14, lineHeight: 1.4,
               }}>
-                <FormattedText text={m.text} />
+                {typing && typing.index === i && m.role === "assistant"
+                  ? <TypewriterText key={`t${i}`} text={m.text || ""} from={typing.from} onProgress={keepScrolled} />
+                  : <FormattedText text={m.text} />}
               </div>
               {/* One tap, and only on the most recent change — older ones
                   can still be undone by asking the Coach. */}
@@ -6271,7 +6343,11 @@ export function Coach({ messages, loading, onSend, onClearChat, coachUsage, dail
               {/* The reply as it's written, once it starts arriving. Slightly
                   faded: it isn't final until the app has checked what the
                   Coach actually changed. */}
-              {streamingReply ? <span style={{ opacity: 0.85 }}>{streamingReply}</span> : coachAcknowledgement(list.length)}
+              {streamingReply
+                ? <TypewriterText text={streamingReply} onProgress={(n) => { typedRef.current = n; keepScrolled(); }} />
+                : coachAcknowledgement(list.length)}
+              {/* Still working (e.g. writing out a program change after the
+                  reply) — the dots stay until the answer is final. */}
               <div style={{ display: "flex", gap: 4, marginTop: 8 }} aria-label="Coach is typing">
                 {[0, 1, 2].map((d) => (
                   <span key={d} style={{ width: 6, height: 6, borderRadius: 3, background: T.steelDark, animation: `pulseDot 1.2s ease-in-out ${d * 0.18}s infinite` }} />

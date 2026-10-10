@@ -10,6 +10,7 @@
 // and the model and output ceiling are decided HERE rather than by whatever
 // the caller sent.
 import { createClient } from "@supabase/supabase-js";
+import { waitUntil } from "@vercel/functions";
 
 // The app's own model and output ceiling. Pinned server-side on purpose:
 // the client sends these too, but a request that asks for anything else
@@ -74,25 +75,101 @@ export function overRateLimit(userId, now = Date.now(), calls = recentCalls) {
   return false;
 }
 
+// The free-trial AI spending cap, enforced here rather than only in the app
+// (which a script calling this endpoint directly would skip). Same limits the
+// app shows: 15 cents a day, 75 cents a month, for accounts that aren't
+// subscribed. Spending is recorded per account per day in the ai_usage table
+// (supabase-migration-ai-usage.sql); until that table exists, the cap is
+// simply not enforced, so deploying this first can't lock anyone out.
+export const TRIAL_DAILY_CAP_CENTS = 15;
+export const TRIAL_MONTHLY_CAP_CENTS = 75;
+const INPUT_DOLLARS_PER_TOKEN = 2 / 1_000_000;
+const OUTPUT_DOLLARS_PER_TOKEN = 10 / 1_000_000;
+
+// The same arithmetic as estimateCostCents in the app.
+export function usageCostCents(usage) {
+  if (!usage) return 0;
+  const write1h = usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+  const write5m = usage.cache_creation?.ephemeral_5m_input_tokens || 0;
+  const unattributed = Math.max(0, (usage.cache_creation_input_tokens || 0) - write1h - write5m);
+  const dollars = (usage.input_tokens || 0) * INPUT_DOLLARS_PER_TOKEN
+    + (usage.cache_read_input_tokens || 0) * 0.1 * INPUT_DOLLARS_PER_TOKEN
+    + (write1h + unattributed) * 2 * INPUT_DOLLARS_PER_TOKEN
+    + write5m * 1.25 * INPUT_DOLLARS_PER_TOKEN
+    + (usage.output_tokens || 0) * OUTPUT_DOLLARS_PER_TOKEN;
+  return dollars * 100;
+}
+
+export function overTrialCap(rows, today) {
+  const month = today.slice(0, 7);
+  let daily = 0, monthly = 0;
+  for (const r of rows || []) {
+    const cents = Number(r.cents) || 0;
+    if (String(r.day).slice(0, 7) === month) monthly += cents;
+    if (String(r.day).slice(0, 10) === today) daily += cents;
+  }
+  return daily >= TRIAL_DAILY_CAP_CENTS || monthly >= TRIAL_MONTHLY_CAP_CENTS;
+}
+
+// null = no cap applies (subscribed, or the usage table isn't set up yet).
+async function trialSpendCheck(supabaseAdmin, userId, today) {
+  try {
+    const [{ data: profile }, usage] = await Promise.all([
+      supabaseAdmin.from("profiles").select("subscribed").eq("id", userId).maybeSingle(),
+      supabaseAdmin.from("ai_usage").select("day, cents").eq("user_id", userId).gte("day", `${today.slice(0, 7)}-01`),
+    ]);
+    if (profile?.subscribed === true) return null;
+    if (usage.error) return null;
+    return { over: overTrialCap(usage.data, today) };
+  } catch (e) {
+    return null;
+  }
+}
+
+function recordSpend(supabaseAdmin, userId, today, usage) {
+  const cents = usageCostCents(usage);
+  if (!(cents > 0)) return;
+  try {
+    waitUntil(Promise.resolve(supabaseAdmin.rpc("add_ai_usage", { p_user: userId, p_day: today, p_cents: cents })).catch(() => {}));
+  } catch (e) {}
+}
+
 // Same reasoning as before: a full program generation is a genuinely large
 // response, and Vercel's 10s default would kill it server-side no matter
 // what the client does.
 export const config = { maxDuration: 60 };
 
 // Passes Anthropic's server-sent events straight through to the browser as
-// they arrive, rather than waiting for the whole reply.
+// they arrive, rather than waiting for the whole reply. Also reads the token
+// counts out of the stream as it passes, and returns them, so a streamed
+// reply's cost can be recorded like any other.
 export async function pipeEventStream(body, res) {
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("X-Accel-Buffering", "no");
   const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const usage = {};
+  let buffer = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     res.write(Buffer.from(value));
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const data = buffer.slice(0, idx).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+      buffer = buffer.slice(idx + 2);
+      try {
+        const event = JSON.parse(data);
+        if (event.type === "message_start") Object.assign(usage, event.message?.usage || {});
+        else if (event.type === "message_delta") Object.assign(usage, event.usage || {});
+      } catch (e) {}
+    }
   }
   res.end();
+  return usage;
 }
 
 export default async function handler(req, res) {
@@ -114,12 +191,14 @@ export default async function handler(req, res) {
   if (!token) {
     return res.status(401).json({ error: "Not signed in." });
   }
+  const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+  let userId;
   try {
-    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data || !data.user) {
       return res.status(401).json({ error: "Not signed in." });
     }
+    userId = data.user.id;
     if (overRateLimit(data.user.id)) {
       return res.status(429).json({ error: "That's a lot of requests in a few minutes — give it a moment and try again." });
     }
@@ -129,6 +208,12 @@ export default async function handler(req, res) {
 
   if (requestTooLarge(req.body)) {
     return res.status(413).json({ error: "That message is too long — try a shorter one." });
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const spend = await trialSpendCheck(supabaseAdmin, userId, today);
+  if (spend?.over) {
+    return res.status(402).json({ error: "trial-ai-limit" });
   }
 
   try {
@@ -146,10 +231,12 @@ export default async function handler(req, res) {
     // App.jsx), and only for a successful response — an error from Anthropic
     // is a normal JSON body and goes through the ordinary path below.
     if (upstreamBody.stream && upstream.ok && upstream.body) {
-      await pipeEventStream(upstream.body, res);
+      const usage = await pipeEventStream(upstream.body, res);
+      if (spend) recordSpend(supabaseAdmin, userId, today, usage);
       return;
     }
     const data = await upstream.json();
+    if (spend && upstream.ok) recordSpend(supabaseAdmin, userId, today, data?.usage);
     res.status(upstream.status).json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
