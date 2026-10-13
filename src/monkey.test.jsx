@@ -93,8 +93,12 @@ describe("monkey test", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  for (const seed of [1, 7, 42, 1234, 99]) {
-    test(`seed ${seed}: 250 random actions, no crash, nothing lost`, async () => {
+  // MONKEY_EXTRA=n adds n more random seeds (and MONKEY_STEPS longer runs) for
+  // a long soak test; the normal test run keeps the fixed five.
+  const EXTRA = Array.from({ length: Number(process.env.MONKEY_EXTRA || 0) }, (_, i) => 5000 + i * 37);
+  const STEPS = Number(process.env.MONKEY_STEPS || 250);
+  for (const seed of [1, 7, 42, 1234, 99, ...EXTRA]) {
+    test(`seed ${seed}: ${STEPS} random actions, no crash, nothing lost`, async () => {
       const rand = rng(seed);
       const pick = (arr) => arr[Math.floor(rand() * arr.length)];
       const user = userEvent.setup({ delay: null });
@@ -102,7 +106,7 @@ describe("monkey test", () => {
       await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
       const start = counts(stored);
       const log = [];
-      for (let step = 0; step < 250; step++) {
+      for (let step = 0; step < STEPS; step++) {
         const buttons = screen.queryAllByRole("button").filter((b) => !b.disabled && !DESTRUCTIVE.test(`${b.textContent} ${b.getAttribute("aria-label") || ""}`));
         const inputs = [...document.querySelectorAll("input:not([type=file]):not([type=checkbox]), textarea")].filter((i) => !i.disabled);
         const r = rand();
@@ -138,7 +142,7 @@ describe("monkey test", () => {
 
   // A brand-new account: no saved state at all, so the quiz and onboarding
   // run with the AI unreachable.
-  for (const seed of [3, 11, 77]) {
+  for (const seed of [3, 11, 77, ...EXTRA.map((x) => x + 1)]) {
     test(`new account, seed ${seed}: 300 random actions through the quiz and onboarding`, async () => {
       stored = null;
       const rand = rng(seed);

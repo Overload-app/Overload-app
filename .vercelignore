@@ -7,3 +7,7 @@ api/*.test.js
 
 # Private tester password list — never upload
 tester-passwords.txt
+
+HANDOFF-FOR-CLAUDE.md
+ship.sh
+evals/
