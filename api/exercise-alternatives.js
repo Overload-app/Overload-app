@@ -48,6 +48,20 @@ export function parseAlternatives(raw) {
 // Same reasoning as api/claude.js: this calls Anthropic directly on a
 // cache miss, so it needs more than Vercel's 10s default to avoid the
 // function getting killed mid-request on a slow generation.
+// The list out of the model's answer: the structured "respond" call first,
+// then any plain text that holds the JSON. null if there's nothing usable.
+export function alternativesFromResponse(data) {
+  const tool = (data?.content || []).find((b) => b.type === "tool_use");
+  let list = tool?.input?.alternatives;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch (e) { list = null; } }
+  if (!Array.isArray(list)) {
+    const raw = (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    try { list = parseAlternatives(raw); } catch (e) { list = null; }
+  }
+  if (!Array.isArray(list)) return null;
+  return list.filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim()).slice(0, 3);
+}
+
 export const config = { maxDuration: 60 };
 
 export default async function handler(req, res) {
@@ -127,22 +141,27 @@ export default async function handler(req, res) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
+      // Found by the live test: a third of requests failed with "Couldn't
+      // parse the AI's response" — the model now thinks before answering,
+      // and with only 300 tokens and plain text it sometimes ran out or
+      // wrapped the list in prose. Same fix as the app's main AI calls: a
+      // forced structured answer, with thinking kept low.
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 300,
+        max_tokens: 1500,
         system,
         messages: [{ role: "user", content: userMsg }],
+        tools: [{ name: "respond", description: "Submit the alternatives.", input_schema: { type: "object", properties: { alternatives: { type: "array", items: { type: "string" } } }, required: ["alternatives"] } }],
+        tool_choice: { type: "tool", name: "respond" },
+        output_config: { effort: "low" },
       }),
     });
     const data = await upstream.json();
     if (!upstream.ok) {
       return res.status(upstream.status).json({ error: data?.error?.message || `Anthropic API error ${upstream.status}` });
     }
-    const raw = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-    let alternatives;
-    try {
-      alternatives = parseAlternatives(raw);
-    } catch (e) {
+    let alternatives = alternativesFromResponse(data);
+    if (!alternatives) {
       return res.status(502).json({ error: "Couldn't parse the AI's response as JSON." });
     }
 

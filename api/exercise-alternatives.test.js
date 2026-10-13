@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import handler, { cacheKey, parseAlternatives, bearerToken } from "./exercise-alternatives.js";
+import handler, { cacheKey, parseAlternatives, bearerToken, alternativesFromResponse } from "./exercise-alternatives.js";
 
 describe("cacheKey", () => {
   test("normalizes case and pairs the name with equipment", () => {
@@ -60,5 +60,19 @@ describe("requires a signed-in session", () => {
   test("bearerToken reads the Authorization header", () => {
     expect(bearerToken({ headers: { authorization: "Bearer abc" } })).toBe("abc");
     expect(bearerToken({ headers: {} })).toBe(null);
+  });
+});
+
+describe("alternativesFromResponse", () => {
+  test("reads the structured answer", () => {
+    expect(alternativesFromResponse({ content: [{ type: "thinking" }, { type: "tool_use", input: { alternatives: ["Dumbbell Row", "Pull-Up"] } }] })).toEqual(["Dumbbell Row", "Pull-Up"]);
+  });
+  test("a list written as text, or plain JSON text, still works", () => {
+    expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { alternatives: '["A","B"]' } }] })).toEqual(["A", "B"]);
+    expect(alternativesFromResponse({ content: [{ type: "text", text: 'Sure: {"alternatives": ["A"]}' }] })).toEqual(["A"]);
+  });
+  test("nothing usable is null, and the list is capped and cleaned", () => {
+    expect(alternativesFromResponse({ content: [{ type: "thinking" }] })).toBeNull();
+    expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { alternatives: ["A", "", 3, "B", "C", "D"] } }] })).toEqual(["A", "B", "C"]);
   });
 });

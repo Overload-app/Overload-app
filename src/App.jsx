@@ -627,7 +627,9 @@ export async function claudeChat({ system, messages, onPartialReply }) {
     } finally {
       clearTimeout(timeoutId);
     }
-    const { toolJson, usage } = streamed;
+    const { usage } = streamed;
+    let toolJson = streamed.toolJson;
+    try { toolJson = JSON.stringify(unwrapToolInput(JSON.parse(toolJson))); } catch (e) { /* left as written; parsed downstream */ }
     const costCents = estimateCostCents(usage);
     console.log(`[ai-cost] ${costCents.toFixed(4)}c (streamed) | uncached in ${usage.input_tokens || 0} | cache read ${usage.cache_read_input_tokens || 0} | cache write ${usage.cache_creation_input_tokens || 0} | out ${usage.output_tokens || 0}`);
     if (onAiUsageRecorded) onAiUsageRecorded(costCents);
@@ -665,7 +667,7 @@ export async function claudeChat({ system, messages, onPartialReply }) {
     // caller SOMETHING to try parsing than a hard failure.
     return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
   }
-  return JSON.stringify(toolUse.input);
+  return JSON.stringify(unwrapToolInput(toolUse.input));
 }
 
 // Finds the index of the closing brace that actually matches the object
@@ -1017,7 +1019,27 @@ export function sanitizeExercises(list) {
 // replies were already validated; a brand-new account's very first program
 // wasn't, so nameless exercises, "three" sets, an empty day, or 4 days for
 // someone who picked 3 would have been saved as their plan.
+// Asks the AI for a program, and once more if the first answer can't be used.
+export async function generateProgramWithRetry(profile, priorProgram) {
+  let raw = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    raw = await claudeChat({
+      system: buildProgramGenSystem(profile),
+      messages: [{ role: "user", content: "Design my personalized training program now." }],
+    });
+    let accepted = null;
+    try { accepted = acceptGeneratedProgram(parseJSONLoose(raw), profile, priorProgram); } catch (e) { accepted = null; }
+    if (accepted) return { raw, accepted };
+  }
+  return { raw, accepted: null };
+}
+
 export function acceptGeneratedProgram(parsed, profile, priorProgram) {
+  // Found by the live test: half of all generated programs arrived wrapped
+  // in an extra layer ({"response": {...}}, {"parameters": {...}}) and were
+  // thrown away for the generic fallback. claudeChat now unwraps those; this
+  // covers a caller that hands one over directly.
+  parsed = unwrapToolInput(parsed);
   let days = parsed?.days;
   if (typeof days === "string") { try { days = JSON.parse(days); } catch (e) { return null; } }
   if (!Array.isArray(days) || days.length === 0) return null;
@@ -1028,11 +1050,19 @@ export function acceptGeneratedProgram(parsed, profile, priorProgram) {
     const name = typeof d?.name === "string" ? d.name.trim() : "";
     const exercises = sanitizeExercises(d?.exercises);
     if (!name || exercises.length === 0) return null;
+    // Found by the live test: a "knees" profile still got Leg Press, Leg
+    // Extension and Barbell Squat, and "lower back" got Romanian Deadlifts —
+    // the quiz promises "we'll avoid exercises that stress these". Anything
+    // that loads an injury they named, or needs equipment they don't have,
+    // is taken out here and the day is topped back up from safe options.
+    const safe = exercises.filter((e) => !loadsInjury(e.name, profile.injuries)
+      && (!profile.equipment || profile.equipment === "full" || usesOnly(e.name, profile.equipment)));
     cleaned.push({
       ...d,
       name,
-      exercises: normalizeExerciseCount(exercises, profile.sessionLength, profile.experience, profile.equipment, profile.injuries, false, { dayName: name }),
+      exercises: normalizeExerciseCount(safe, profile.sessionLength, profile.experience, profile.equipment, profile.injuries, false, { dayName: name, padTo: exercises.length }),
     });
+    if (cleaned[cleaned.length - 1].exercises.length === 0) return null;
   }
   return normalizeProgramTips({ splitName: deriveSplitName(cleaned) || parsed?.splitName || "Custom", days: cleaned }, priorProgram);
 }
@@ -1390,7 +1420,7 @@ const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estima
 // rice"), so this leans on reasonable real-world default portion sizes
 // rather than refusing to estimate — same spirit as a photo estimate,
 // which is also never exact.
-const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person's own plain-text description of what they ate (no photo). Use reasonable, realistic default portion sizes for anything not specified (e.g. \"a bagel\" means one standard plain bagel, \"chicken and rice\" means a normal single-meal portion of each) rather than asking for more detail — the person deliberately chose to describe instead of measuring precisely. If the description is genuinely too vague to estimate at all (e.g. just \"food\" or a single unclear word), still give your best reasonable single-serving guess rather than refusing. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name in their own words, like a menu item, e.g. 'Hamburger wrap' — not the ingredient list>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate and what portion size you assumed, under 20 words>\"}";
+export const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person's own plain-text description of what they ate (no photo). Use reasonable, realistic default portion sizes for anything not specified (e.g. \"a bagel\" means one standard plain bagel, \"chicken and rice\" means a normal single-meal portion of each) rather than asking for more detail — the person deliberately chose to describe instead of measuring precisely. If the description is genuinely too vague to estimate at all (e.g. just \"food\" or a single unclear word), still give your best reasonable single-serving guess rather than refusing. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name in their own words, like a menu item, e.g. 'Hamburger wrap' — not the ingredient list>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate and what portion size you assumed, under 20 words>\"}";
 
 // One-time smart backfill for the "Find alternative" swap picker, used only
 // when an exercise doesn't already have AI-sourced alternatives baked in
@@ -1523,7 +1553,13 @@ export async function fetchSimilarExercises(name, equipment, injuries) {
     throw new Error(detail || `API error ${res.status}`);
   }
   const data = await res.json();
-  return Array.isArray(data.alternatives) ? data.alternatives : [];
+  // Found by the live test: Barbell Squat alternatives for someone with bad
+  // knees included Leg Press. Never offer a swap that loads an injury they
+  // told the app about, or needs equipment they don't have.
+  const safe = (Array.isArray(data.alternatives) ? data.alternatives : [])
+    .filter((n) => typeof n === "string" && !loadsInjury(n, injuries || [])
+      && (!equipment || equipment === "full" || usesOnly(n, equipment)));
+  return safe;
 }
 
 /* ============================================================
@@ -1588,7 +1624,9 @@ export function exerciseVocabularyFor(equipment) {
 export const INJURY_EXCLUDES = {
   knees: ["Squat", "Lunge", "Leg Press", "Leg Extension", "Step-Up", "Split Squat", "Wall Sit"],
   shoulders: ["Overhead Press", "Lateral Raise", "Dip", "Push-Up", "Handstand", "Pike Push-Up", "Rear Delt Fly", "Y-Raise", "Arnold Press"],
-  lower_back: ["Deadlift", "Row", "Good Morning"],
+  // Not every row: a supported or seated row barely loads the lower back.
+  // This used to list "Row", which also ruled out Chest-Supported Row.
+  lower_back: ["Deadlift", "Barbell Row", "Bent-Over Row", "Bent Over Row", "Pendlay Row", "T-Bar Row", "Good Morning", "Hyperextension", "Back Extension"],
   wrists: ["Push-Up", "Plank", "Handstand"],
   elbows: ["Curl", "Extension", "Skull Crusher", "Kickback", "Tricep"],
 };
@@ -1660,6 +1698,13 @@ export function withoutInjuryLoading(exercises, injuries) {
   return { exercises: kept, removed: exercises.filter((e) => !kept.includes(e)).map((e) => e.name) };
 }
 
+export function loadsInjury(name, injuries) {
+  if (!Array.isArray(injuries) || injuries.length === 0) return false;
+  const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
+  const n = String(name || "").toLowerCase();
+  return terms.some((t) => n.includes(t));
+}
+
 export function filterPool(pool, injuries) {
   if (!injuries || injuries.length === 0 || injuries.includes("none")) return pool;
   const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
@@ -1700,7 +1745,7 @@ export function inferMuscleGroup(name) {
   const n = name.toLowerCase();
   if (/squat|lunge|deadlift|leg press|leg curl|leg extension|calf|step-?up|glute|split squat|wall sit/.test(n)) return "legs";
   if (/curl/.test(n) && !/leg curl/.test(n)) return "biceps";
-  if (/pushdown|skull crusher|tricep|overhead.*extension|kickback|dip|diamond push-?up/.test(n)) return "triceps";
+  if (/pushdown|skull crusher|tricep|overhead.*extension|kickback|dip|diamond push-?up|close-?grip (push-?up|bench|floor press)/.test(n)) return "triceps";
   // Before the chest rule, which matches any "fly": a reverse/rear-delt fly is
   // a pull-day exercise, and calling it chest made the top-up below add Bench
   // Press to a back day that contained one.
@@ -2641,7 +2686,15 @@ export function mealSuggestionsFrom(parsed) {
 
 export function mealSuggestionUserMessage(profile, remaining) {
   const prefs = foodPreferenceText(profile);
-  return `Goal: ${profile.goal}. Desired physique: ${profile.desiredPhysique}. Remaining today: ${JSON.stringify(remaining)}.${prefs ? ` Food preferences: ${prefs}` : ""} Suggest meals or snacks that fit.`;
+  // Found by the live test: once someone was over their calories, "remaining"
+  // went negative, the AI answered with negative-calorie meals, and nothing
+  // usable came back. Never send a negative; say plainly what's wanted.
+  const left = Object.fromEntries(Object.entries(remaining || {}).map(([k, v]) => [k, Math.max(0, Math.round(Number(v) || 0))]));
+  const done = left.cal < 150;
+  const ask = done
+    ? "They've already reached today's calorie target. Suggest 3 very light options (each under 150 calories, as much protein as possible) in case they're still hungry."
+    : "Suggest meals or snacks that fit.";
+  return `Goal: ${profile.goal}. Desired physique: ${profile.desiredPhysique}. Remaining today: ${JSON.stringify(left)}.${prefs ? ` Food preferences: ${prefs}` : ""} ${ask}`;
 }
 
 export function buildProgramGenSystem(profile) {
@@ -3005,6 +3058,21 @@ const saveSeq = new Map(); // userId -> latest issued sequence number
 // Always saves locally first (instant, works with zero connectivity), then
 // tries to push to Supabase. Returns whether the server push succeeded so
 // the UI can show a "saved locally, will sync" indicator when it doesn't.
+export function isAuthError(error) {
+  const status = Number(error?.status || error?.code);
+  return status === 401 || status === 403 || /jwt|token|auth|not authorized|permission/i.test(String(error?.message || ""));
+}
+
+// One record per app session of WHY a save failed (only when the phone says
+// it's online), so a "saved on this device" banner that shows up while
+// connected leaves evidence of the real cause.
+let saveFailureReported = false;
+function reportSaveFailure(error) {
+  if (saveFailureReported || typeof navigator === "undefined" || navigator.onLine === false) return;
+  saveFailureReported = true;
+  logError("Save to account failed while online", { stack: String(error?.message || error).slice(0, 500), context: { type: "save-failed-online", status: error?.status || error?.code || null } });
+}
+
 export async function saveState(userId, state) {
   writeLocalState(userId, state);
   // Set BEFORE the upsert starts, not just on failure — the flag needs to
@@ -3022,7 +3090,16 @@ export async function saveState(userId, state) {
   const run = tail.then(async () => {
     try {
       const updatedAt = new Date().toISOString();
-      const { error } = await supabase.from("app_state").upsert({ user_id: userId, state, updated_at: updatedAt });
+      const write = () => supabase.from("app_state").upsert({ user_id: userId, state, updated_at: updatedAt });
+      let { error } = await write();
+      // Real report: "it keeps telling me I'm offline when I'm not." A save
+      // also fails when the sign-in has quietly expired (phones pause the
+      // app's background refresh), and that was shown as "Offline". Refresh
+      // the sign-in and try once more before giving up.
+      if (error && isAuthError(error)) {
+        try { await supabase.auth.refreshSession(); } catch (e) {}
+        ({ error } = await write());
+      }
       if (error) throw error;
       rememberServerVersion(userId, updatedAt);
       // Only clear pendingSync if no newer save has been issued since —
@@ -3031,7 +3108,8 @@ export async function saveState(userId, state) {
       if (saveSeq.get(userId) === mySeq) setPendingSync(userId, false);
       return true;
     } catch (e) {
-      console.error("saveState failed, will retry once back online", e);
+      console.error("saveState failed, will retry", e);
+      reportSaveFailure(e);
       return false;
     }
   });
@@ -3819,14 +3897,11 @@ export function Onboarding({ onComplete }) {
     let program = buildProgram(profile);
     try {
       setBuildNote("Analyzing your goals and building your split…");
-      const raw = await claudeChat({
-        system: buildProgramGenSystem(profile),
-        messages: [{ role: "user", content: "Design my personalized training program now." }],
-      });
-      const parsed = parseJSONLoose(raw);
       // Validated and normalized as a whole — see acceptGeneratedProgram. An
-      // unusable one keeps the rule-based program, and is logged.
-      const accepted = acceptGeneratedProgram(parsed, profile);
+      // unusable one is asked for once more (the live test caught the model
+      // occasionally answering with nothing but {"$FUNCTION_NAME":"respond"}),
+      // then keeps the rule-based program, and is logged.
+      const { raw, accepted } = await generateProgramWithRetry(profile);
       if (accepted) program = accepted;
       else logError("Onboarding AI program was unusable; used rule-based fallback", {
         stack: String(raw || "").slice(0, 4000),
@@ -5822,6 +5897,29 @@ export function photoFixMessages(photo, what) {
   ] }];
 }
 
+// Found by the live test, on every AI feature: the model often wraps its
+// whole answer in one made-up key — {"response": {...}}, {"parameters":
+// {...}}, {"$FUNCTION_NAME2": {...}}, even {"cal": {"suggestions": [...]}} —
+// so the program, the meal ideas or the review inside was never found. A
+// single key holding an object (or that object written out as text) is
+// that wrapper; a real answer always has its fields at the top.
+// Fields that ARE the answer when they're the only one (a Coach reply that's
+// just a program change), never a wrapper to peel off.
+const REAL_ANSWER_FIELDS = new Set(["program", "programDayEdit", "todayOverride", "targets", "meal", "day", "reply", "suggestions", "advice", "overview", "alternatives"]);
+export function unwrapToolInput(input) {
+  let out = input;
+  for (let i = 0; i < 3; i++) {
+    if (!out || typeof out !== "object" || Array.isArray(out)) return out;
+    const keys = Object.keys(out);
+    if (keys.length !== 1 || REAL_ANSWER_FIELDS.has(keys[0])) return out;
+    let inner = out[keys[0]];
+    if (typeof inner === "string" && /^\s*\{/.test(inner)) { try { inner = JSON.parse(inner); } catch (e) { return out; } }
+    if (!inner || typeof inner !== "object" || Array.isArray(inner)) return out;
+    out = inner;
+  }
+  return out;
+}
+
 // An AI meal estimate (photo, describe, or a suggestion) in the exact shape
 // the review card and addMeal expect. The model sometimes nests the meal
 // ({"meal": {...}}) or calls the name something else ("food", "mealName"),
@@ -7281,6 +7379,29 @@ export function isReviewDue(reviews, accountCreatedAt, cadence, now = new Date()
 // Deterministic stats for the period — computed regardless of whether the
 // AI call that turns them into prose succeeds, so there's always at least
 // real numbers behind a review, never just AI-generated vibes.
+// The review's overview and advice, however the AI packed them. Found by the
+// live test: the advice sometimes arrived as text inside the overview
+// ("...on track.</advice> <advice>[\"Aim for...\"]"), or as one string, and
+// the review then showed no advice at all.
+export function reviewFromParsed(parsed) {
+  let overview = asText(parsed?.overview);
+  let advice = parsed?.advice;
+  if (typeof advice === "string") {
+    try { advice = JSON.parse(advice); } catch (e) { advice = advice.split(/\n+|(?<=\.)\s+(?=[A-Z])/); }
+  }
+  advice = Array.isArray(advice) ? advice.map(asText).filter(Boolean) : [];
+  const tag = overview.search(/<\/?advice>/i);
+  if (tag !== -1) {
+    const tail = overview.slice(tag);
+    overview = overview.slice(0, tag).trim();
+    if (advice.length === 0) {
+      const list = tail.match(/\[[\s\S]*\]/);
+      if (list) { try { advice = JSON.parse(list[0]).map(asText).filter(Boolean); } catch (e) {} }
+    }
+  }
+  return { overview: overview || null, advice: advice.slice(0, 6) };
+}
+
 export function summarizeReviewPeriod(logs, periodStartMs, periodEndMs) {
   const inRange = (dateStr) => {
     const t = new Date(dateStr).getTime();
@@ -8393,8 +8514,19 @@ export default function App() {
       setSyncStatus(ok ? "synced" : "offline");
     }
     retryPendingSync(); // covers reopening the app back online with a pending change already queued
+    // Not only when the phone reports coming back online: a save that failed
+    // for another reason (an expired sign-in, a server hiccup) used to leave
+    // the banner up until the next change. Retry every 30 seconds and
+    // whenever the app comes back to the front.
+    const id = setInterval(retryPendingSync, 30000);
+    const onVisible = () => { if (document.visibilityState === "visible") retryPendingSync(); };
     window.addEventListener("online", retryPendingSync);
-    return () => window.removeEventListener("online", retryPendingSync);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("online", retryPendingSync);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [account]);
 
   // Picks up anything another device saved while this one sat in the
@@ -8445,9 +8577,7 @@ export default function App() {
             system: buildReviewSystem(state.profile, cadence, summary),
             messages: [{ role: "user", content: "Write my review now." }],
           });
-          const parsed = parseJSONLoose(raw);
-          overview = asText(parsed?.overview) || null;
-          advice = Array.isArray(parsed?.advice) ? parsed.advice.map(asText).filter(Boolean) : [];
+          ({ overview, advice } = reviewFromParsed(parseJSONLoose(raw)));
         } catch (e) {
           // No connection or the call failed — still record a real,
           // data-only review below rather than losing the period
@@ -9513,14 +9643,9 @@ export default function App() {
     setRebuildingProgram(true);
     let program = buildProgram(newProfile);
     try {
-      const raw = await claudeChat({
-        system: buildProgramGenSystem(newProfile),
-        messages: [{ role: "user", content: "Design my personalized training program now." }],
-      });
-      const parsed = parseJSONLoose(raw);
-      // Same validation as onboarding (acceptGeneratedProgram). priorProgram
-      // lets an exercise being carried over keep its real tips.
-      const accepted = acceptGeneratedProgram(parsed, newProfile, priorProgram);
+      // Same validation and one retry as onboarding (generateProgramWithRetry).
+      // priorProgram lets an exercise being carried over keep its real tips.
+      const { raw, accepted } = await generateProgramWithRetry(newProfile, priorProgram);
       if (accepted) program = accepted;
       else logError("Quiz-edit AI program was unusable; used rule-based fallback", {
         stack: String(raw || "").slice(0, 4000),
@@ -9725,7 +9850,9 @@ export default function App() {
           // the status bar/notch/Dynamic Island instead of below it.
           <div style={{ background: T.warn, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: "9px 16px", paddingTop: "calc(9px + env(safe-area-inset-top, 0px))", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff", flexShrink: 0, animation: "pulseDot 1.4s ease-in-out infinite" }} />
-            Offline — saved on this device, will sync automatically
+            {typeof navigator !== "undefined" && navigator.onLine === false
+              ? "Offline — saved on this device, will sync automatically"
+              : "Saved on this device — still syncing to your account…"}
           </div>
         )}
         {!subscribed && trialActive && (

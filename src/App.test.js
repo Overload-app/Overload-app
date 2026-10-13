@@ -65,6 +65,9 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  reviewFromParsed,
+  unwrapToolInput,
+  loadsInjury,
   mealSuggestionsFrom,
   daysNamedIn,
   withoutEquipmentGifs,
@@ -151,6 +154,7 @@ import {
   OFFLINE_MESSAGE,
   loadState,
   saveState,
+  isAuthError,
 } from "./App.jsx";
 import { supabase } from "./supabaseClient.js";
 
@@ -5032,5 +5036,70 @@ describe("meal suggestions, however they're packed", () => {
     expect(mealSuggestionsFrom({ suggestions: [null, "x", { cal: 0 }, meal] }).length).toBe(1);
     expect(mealSuggestionsFrom({ reply: "here are some ideas" })).toEqual([]);
     expect(mealSuggestionsFrom(null)).toEqual([]);
+  });
+});
+
+describe("an expired sign-in isn't 'offline'", () => {
+  test("auth errors are recognised", () => {
+    expect(isAuthError({ message: "JWT expired", code: "PGRST301" })).toBe(true);
+    expect(isAuthError({ status: 401 })).toBe(true);
+    expect(isAuthError({ message: "Failed to fetch" })).toBe(false);
+  });
+  test("a save that failed on an expired sign-in refreshes it and goes through", async () => {
+    const upsert = vi.fn()
+      .mockResolvedValueOnce({ error: { message: "JWT expired", code: "PGRST301" } })
+      .mockResolvedValueOnce({ error: null });
+    supabase.from.mockImplementation(() => ({ upsert }));
+    supabase.auth = { refreshSession: vi.fn(async () => ({})) };
+    const ok = await saveState("u-auth", { program: { days: [] } });
+    expect(ok).toBe(true);
+    expect(supabase.auth.refreshSession).toHaveBeenCalledTimes(1);
+    expect(upsert).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("fixes from the live AI-features test", () => {
+  test("a wrapped answer is unwrapped, a real one left alone", () => {
+    expect(unwrapToolInput({ response: { splitName: "PPL", days: [1] } })).toEqual({ splitName: "PPL", days: [1] });
+    expect(unwrapToolInput({ $FUNCTION_NAME2: { splitName: "x", days: [] } })).toEqual({ splitName: "x", days: [] });
+    expect(unwrapToolInput({ cal: { suggestions: [{ name: "x" }] } })).toEqual({ suggestions: [{ name: "x" }] });
+    expect(unwrapToolInput({ params: JSON.stringify({ days: [1] }) })).toEqual({ days: [1] });
+    expect(unwrapToolInput({ program: { days: [1] } })).toEqual({ program: { days: [1] } });
+    expect(unwrapToolInput({ suggestions: [1, 2] })).toEqual({ suggestions: [1, 2] });
+    expect(unwrapToolInput({ reply: "hi", program: null })).toEqual({ reply: "hi", program: null });
+  });
+  test("a wrapped program is accepted, not swapped for the generic one", () => {
+    const ex = (name) => ({ name, sets: 3, reps: "8-12", rest: 90 });
+    const days = [{ name: "Push", exercises: ["Barbell Bench Press", "Overhead Press", "Cable Fly", "Tricep Pushdown"].map(ex) }, { name: "Pull", exercises: ["Lat Pulldown", "Barbell Row", "Face Pull", "Barbell Curl"].map(ex) }, { name: "Legs", exercises: ["Barbell Squat", "Romanian Deadlift", "Leg Press", "Leg Curl"].map(ex) }];
+    const profile = { daysPerWeek: 3, sessionLength: 60, experience: "intermediate", equipment: "full", injuries: ["none"] };
+    expect(acceptGeneratedProgram({ parameters: { splitName: "PPL", days } }, profile)?.days.length).toBe(3);
+  });
+  test("a generated program never keeps what loads a named injury", () => {
+    const ex = (name) => ({ name, sets: 3, reps: "8-12", rest: 90 });
+    const days = [{ name: "Legs", exercises: ["Barbell Squat", "Leg Press", "Romanian Deadlift", "Leg Curl", "Leg Extension"].map(ex) }];
+    const knees = acceptGeneratedProgram({ days }, { daysPerWeek: 1, sessionLength: 60, experience: "intermediate", equipment: "full", injuries: ["knees"] });
+    expect(knees.days[0].exercises.some((e) => loadsInjury(e.name, ["knees"]))).toBe(false);
+    expect(knees.days[0].exercises.length).toBeGreaterThanOrEqual(3);
+    const back = acceptGeneratedProgram({ days }, { daysPerWeek: 1, sessionLength: 60, experience: "intermediate", equipment: "full", injuries: ["lower_back"] });
+    expect(back.days[0].exercises.map((e) => e.name)).not.toContain("Romanian Deadlift");
+  });
+  test("lower back no longer rules out every row", () => {
+    expect(loadsInjury("Chest-Supported Row", ["lower_back"])).toBe(false);
+    expect(loadsInjury("Seated Cable Row", ["lower_back"])).toBe(false);
+    expect(loadsInjury("Barbell Row", ["lower_back"])).toBe(true);
+    expect(loadsInjury("Romanian Deadlift", ["lower_back"])).toBe(true);
+  });
+  test("over today's calories, the ask is for light options and nothing negative is sent", () => {
+    const msg = mealSuggestionUserMessage({ goal: "build", desiredPhysique: "lean" }, { cal: -150, protein: 10, carb: -20, fat: -5 });
+    expect(msg).toContain('"cal":0');
+    expect(msg).not.toMatch(/-\d/);
+    expect(msg).toMatch(/already reached today's calorie target/);
+  });
+  test("advice tucked inside the overview is pulled back out", () => {
+    const r = reviewFromParsed({ overview: 'Close to on track.</advice> <advice>["Hit the 4th session", "Keep logging weight"]' });
+    expect(r.overview).toBe("Close to on track.");
+    expect(r.advice).toEqual(["Hit the 4th session", "Keep logging weight"]);
+    expect(reviewFromParsed({ overview: "Good.", advice: '["a","b"]' }).advice).toEqual(["a", "b"]);
+    expect(reviewFromParsed({ overview: "Good.", advice: ["a", 3, null] }).advice).toEqual(["a", "3"]);
   });
 });
