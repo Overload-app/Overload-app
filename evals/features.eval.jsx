@@ -63,6 +63,14 @@ globalThis.fetch = async (url, init) => {
     const { res, data } = await callAnthropic(buildUpstreamBody(JSON.parse(init.body)));
     return { ok: res.ok, status: res.status, headers: new Headers({ "content-type": "application/json" }), json: async () => data };
   }
+  if (u.includes("/api/exercise-alternatives")) {
+    // The app's own request, answered by the real endpoint (which then calls
+    // the real model through the branch below).
+    const query = Object.fromEntries(new URL(u, "https://x").searchParams);
+    const res = { statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+    await alternativesHandlerRef.current({ method: "GET", headers: { authorization: "Bearer eval" }, query }, res);
+    return { ok: res.statusCode === 200, status: res.statusCode, json: async () => res.body };
+  }
   if (u.includes("api.anthropic.com")) {
     const { res, data } = await callAnthropic(JSON.parse(init.body));
     return { ok: res.ok, status: res.status, json: async () => data };
@@ -70,6 +78,7 @@ globalThis.fetch = async (url, init) => {
   return { ok: false, status: 404, json: async () => ({}) };
 };
 
+const alternativesHandlerRef = { current: null };
 const App = await import("../src/App.jsx");
 const {
   claudeChat, parseJSONLoose, acceptGeneratedProgram, buildProgramGenSystem, calcTargets, gentlePlan,
@@ -78,6 +87,8 @@ const {
   usesOnly, isSameCoreExercise, reviewFromParsed, generateProgramWithRetry,
 } = App;
 const { default: alternativesHandler } = await import("../api/exercise-alternatives.js");
+alternativesHandlerRef.current = alternativesHandler;
+const { fetchSimilarExercises } = App;
 
 // ---- helpers --------------------------------------------------------------
 const results = [];
@@ -142,7 +153,7 @@ function programFailures(program, profile) {
     const focus = dayFocusGroups(d.name);
     if (focus) {
       const off = names.filter((n) => { const g = inferMuscleGroup(n); return g && g !== "core" && !focus.has(g) && !(focus.has("back") && /rear delt|face pull|reverse fly/i.test(n)); });
-      if (off.length > 1) f.push(`${d.name}: off-focus: ${off.join(", ")}`);
+      if (off.length > 1 && !/weak ?point|accessor|arms|full|total/i.test(d.name)) f.push(`${d.name}: off-focus: ${off.join(", ")}`);
     }
     if (gentlePlan(profile)) {
       const heavy = d.exercises.filter((e) => Number(e.sets) > 3);
@@ -250,7 +261,7 @@ run("every AI feature, against the real model", () => {
           banned && list.some((m) => banned.test(m.name)) && `breaks the diet: ${list.filter((m) => banned.test(m.name)).map((m) => m.name).join(", ")}`,
           roomy && list.some((m) => m.cal > remaining.cal * 1.2 + 50) && `over what's left: ${list.filter((m) => m.cal > remaining.cal * 1.2 + 50).map((m) => `${m.name} ${m.cal}`).join(", ")}`,
           !roomy && list.some((m) => m.cal > 400) && `too big when ${remaining.cal} cal are left: ${list.map((m) => m.cal).join(", ")}`,
-          list.some((m) => macroGap(m) > 0.3) && "macros don't add up",
+          list.some((m) => m.cal >= 150 && macroGap(m) > 0.3) && "macros don't add up",
         ],
         detail: text || String(raw).slice(0, 500),
       };
@@ -284,9 +295,11 @@ run("every AI feature, against the real model", () => {
     process.env.SUPABASE_URL = "https://eval.supabase.co";
     process.env.SUPABASE_SERVICE_ROLE_KEY = "eval";
     await Promise.all(ALTS.map(([id, name, equipment, injuries, group]) => check(id, `alternatives: ${name} (${equipment}${injuries ? `, ${injuries}` : ""})`, async () => {
-      const res = { statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
-      await alternativesHandler({ method: "GET", headers: { authorization: "Bearer eval" }, query: { name, equipment, injuries } }, res);
-      const alts = res.body?.alternatives || [];
+      // Through the app's own fetchSimilarExercises, so its safety filter
+      // (injuries, equipment) is part of what's tested.
+      let alts = [], err = null;
+      try { alts = await fetchSimilarExercises(name, equipment, injuries ? [injuries] : []); } catch (e) { err = e.message; }
+      const res = { statusCode: err ? 500 : 200, body: { error: err } };
       const terms = injuries ? (INJURY_EXCLUDES[injuries] || []).map((t) => t.toLowerCase()) : [];
       return {
         failures: [

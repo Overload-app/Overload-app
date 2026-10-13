@@ -76,3 +76,11 @@ describe("alternativesFromResponse", () => {
     expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { alternatives: ["A", "", 3, "B", "C", "D"] } }] })).toEqual(["A", "B", "C"]);
   });
 });
+
+describe("alternativesFromResponse, wrapped", () => {
+  test("a made-up wrapper around the answer is peeled off", () => {
+    expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { parameters: { alternatives: ["A", "B"] } } }] })).toEqual(["A", "B"]);
+    expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { response: '{"alternatives":["A"]}' } }] })).toEqual(["A"]);
+    expect(alternativesFromResponse({ content: [{ type: "tool_use", input: { list: ["A"] } }] })).toEqual(["A"]);
+  });
+});

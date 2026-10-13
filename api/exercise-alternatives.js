@@ -52,7 +52,16 @@ export function parseAlternatives(raw) {
 // then any plain text that holds the JSON. null if there's nothing usable.
 export function alternativesFromResponse(data) {
   const tool = (data?.content || []).find((b) => b.type === "tool_use");
-  let list = tool?.input?.alternatives;
+  // The model sometimes wraps its answer in one made-up key
+  // ({"parameters": {"alternatives": [...]}}) — peel that off.
+  let input = tool?.input;
+  for (let i = 0; i < 3 && input && typeof input === "object" && !Array.isArray(input) && !("alternatives" in input) && Object.keys(input).length === 1; i++) {
+    let inner = Object.values(input)[0];
+    if (typeof inner === "string") { try { inner = JSON.parse(inner); } catch (e) { inner = null; } }
+    if (Array.isArray(inner)) { input = { alternatives: inner }; break; }
+    input = inner;
+  }
+  let list = input?.alternatives;
   if (typeof list === "string") { try { list = JSON.parse(list); } catch (e) { list = null; } }
   if (!Array.isArray(list)) {
     const raw = (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
@@ -162,6 +171,8 @@ export default async function handler(req, res) {
     }
     let alternatives = alternativesFromResponse(data);
     if (!alternatives) {
+      // Kept in the Vercel function logs, so the next new shape is visible.
+      console.warn("Unreadable alternatives response:", JSON.stringify(data?.content || data).slice(0, 800));
       return res.status(502).json({ error: "Couldn't parse the AI's response as JSON." });
     }
 
