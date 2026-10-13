@@ -72,3 +72,15 @@ export async function requestRestAlert(endAt) {
     // Offline at the gym, etc. — nothing to do.
   }
 }
+
+// Takes any "Rest's up" alerts off the lock screen / notification list.
+export async function clearRestNotifications() {
+  try {
+    if (typeof navigator === "undefined" || !navigator.serviceWorker?.getRegistration) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    const shown = await reg?.getNotifications?.({ tag: "rest" });
+    (shown || []).forEach((n) => n.close());
+  } catch (e) {
+    // Nothing to clear, or not supported — fine either way.
+  }
+}

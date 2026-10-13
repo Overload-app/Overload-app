@@ -21,7 +21,7 @@ export const LEG_MS = 270 * 1000;
 export const SELF_URL = "https://www.overload-app.com/api/rest-alert";
 // A little after the rest ends, so an app that's open and already cleared
 // the alert has had time to save that.
-export const SEND_DELAY_MS = 1500;
+export const SEND_DELAY_MS = 3000;
 
 export const config = { maxDuration: 300 };
 
@@ -47,7 +47,9 @@ export function validRestAlert(body, nowMs) {
 export function shouldSendRestAlert(state, endAt) {
   return !!state?.push?.restAlerts
     && Array.isArray(state?.push?.subscriptions) && state.push.subscriptions.length > 0
-    && Number(state?.inProgressWorkout?.rest?.endAt) === endAt;
+    && Number(state?.inProgressWorkout?.rest?.endAt) === endAt
+    // Watched it finish in the app (the app marks it): no alert needed.
+    && !state?.inProgressWorkout?.rest?.seen;
 }
 
 export async function sendToSubscriptions(subscriptions, payload, send) {

@@ -26,7 +26,10 @@ describe("rest alerts", () => {
     expect(shouldSendRestAlert({ ...base, inProgressWorkout: { rest: null } }, 5000)).toBe(false);
     expect(shouldSendRestAlert({ ...base, inProgressWorkout: null }, 5000)).toBe(false);
   });
-  test("not when switched off or there's no device to send to", () => {
+  test("not when they watched the rest finish in the app", () => {
+    expect(shouldSendRestAlert({ ...base, inProgressWorkout: { rest: { endAt: 5000, total: 90, seen: true } } }, 5000)).toBe(false);
+  });
+    test("not when switched off or there's no device to send to", () => {
     expect(shouldSendRestAlert({ ...base, push: { ...base.push, restAlerts: false } }, 5000)).toBe(false);
     expect(shouldSendRestAlert({ ...base, push: { restAlerts: true, subscriptions: [] } }, 5000)).toBe(false);
     expect(shouldSendRestAlert(null, 5000)).toBe(false);

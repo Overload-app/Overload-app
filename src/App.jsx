@@ -12,7 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
-import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert } from "./push.js";
+import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert, clearRestNotifications } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -1242,15 +1242,65 @@ export function coachReplyText(parsed, madeChange) {
 // doesn't set it behaves exactly as before. A value that IS set but doesn't
 // point at a real day is a failure, not something to guess around: guessing
 // is precisely how a Push change kept landing on Pull.
-export function resolveOverrideTarget(parsed, state) {
-  const dayCount = state?.program?.days?.length || 0;
+// Which days a message names. A day's full name counts; so does a split word
+// in it (push, pull, legs, upper, lower, arms, full body) when only that day
+// has it. "my push day" with two push days names both.
+const DAY_WORDS_IN_NAME = ["push", "pull", "leg", "upper", "lower", "arm", "full body", "chest", "back", "shoulder"];
+export function daysNamedIn(text, days) {
+  const t = String(text || "").toLowerCase();
+  if (!t || !Array.isArray(days)) return [];
+  const full = days.map((d, i) => (d?.name && t.includes(d.name.toLowerCase()) ? i : -1)).filter((i) => i >= 0);
+  if (full.length > 0) return full;
+  const hits = new Set();
+  for (const w of DAY_WORDS_IN_NAME) {
+    if (!new RegExp(`\\b${w}s?\\b`).test(t)) continue;
+    days.forEach((d, i) => { if (new RegExp(`\\b${w}s?\\b`, "i").test(d?.name || "")) hits.add(i); });
+  }
+  return [...hits];
+}
+
+// How well a list of exercises fits a day's muscles, 0-1 (null when the day
+// has no clear focus, e.g. full body).
+function focusFit(exercises, dayName) {
+  const focus = dayFocusGroups(dayName);
+  if (!focus) return null;
+  const groups = (exercises || []).map((e) => inferMuscleGroup(e?.name)).filter((g) => g && g !== "core");
+  if (groups.length === 0) return null;
+  return groups.filter((g) => focus.has(g)).length / groups.length;
+}
+
+// Real report: a one-time dumbbell PULL workout ended up showing as "swapped
+// by Coach for today" on a PUSH day they never asked to change, and the
+// Coach then explained it in circles. A one-time change goes on the day the
+// person named, and on a day its exercises actually belong to. When the
+// Coach's chosen day contradicts both of those, the app moves it.
+export function resolveOverrideTarget(parsed, state, message = "") {
+  const days = state?.program?.days || [];
+  const dayCount = days.length;
   if (dayCount === 0) return { dayIdx: null, valid: false };
+  const named = daysNamedIn(message, days);
+  const exercises = Array.isArray(parsed?.todayOverride) ? parsed.todayOverride : [];
+  const bestByFocus = () => {
+    let best = null, bestFit = -1;
+    days.forEach((d, i) => { const f = focusFit(exercises, d.name); if (f !== null && f > bestFit) { best = i; bestFit = f; } });
+    const runnerUp = days.filter((d, i) => i !== best && focusFit(exercises, d.name) === bestFit).length;
+    return bestFit >= 0.8 && runnerUp === 0 ? best : null;
+  };
   const raw = parsed?.todayOverrideDayIndex;
   if (raw === null || raw === undefined || raw === "") {
+    if (named.length === 1) return { dayIdx: named[0], valid: true };
+    const byFocus = named.length === 0 ? bestByFocus() : null;
+    if (byFocus !== null) return { dayIdx: byFocus, valid: true };
     return { dayIdx: (state.logs?.workouts?.length || 0) % dayCount, valid: true };
   }
   const idx = coerceInt(raw);
   if (idx === null || idx < 0 || idx >= dayCount) return { dayIdx: null, valid: false };
+  if (named.length === 1 && named[0] !== idx) return { dayIdx: named[0], valid: true };
+  if (named.length === 0) {
+    const fit = focusFit(exercises, days[idx].name);
+    const byFocus = bestByFocus();
+    if (fit !== null && fit < 0.5 && byFocus !== null && byFocus !== idx) return { dayIdx: byFocus, valid: true };
+  }
   return { dayIdx: idx, valid: true };
 }
 
@@ -1372,6 +1422,12 @@ const MEAL_TEXT_SYSTEM = "You estimate nutrition for a fitness app from a person
 // most splits repeat a muscle group at least once a week) each had their
 // own independent, uncached slot. Keying by normalized name instead makes
 // it truly "ask WorkoutX for this exercise at most once, ever."
+export const GIF_CACHE_VERSION = 2;
+const EQUIPMENT_SPECIFIC = /\b(machine|lever|cable|barbell|smith|kettlebell|band|ez[- ]?bar)\b/i;
+export function withoutEquipmentGifs(gifCache) {
+  return Object.fromEntries(Object.entries(gifCache || {}).filter(([key]) => !EQUIPMENT_SPECIFIC.test(key)));
+}
+
 export function normalizeGifKey(name) {
   return (name || "").trim().toLowerCase();
 }
@@ -2561,6 +2617,26 @@ export function buildMealSuggestionSystem() {
 - Name real dishes someone could make or buy today, not food groups — "chicken shawarma bowl with garlic yogurt", not "lean protein and vegetables".
 - Prioritise whichever macro they're furthest from hitting, usually protein, and stay inside the remaining calories.
 Respond ONLY with JSON, no markdown fences: {"suggestions": [{"name": "<string>", "cal": <number>, "protein": <number>, "carb": <number>, "fat": <number>, "note": "<short reason, under 15 words>"}]}`;
+}
+
+// The suggested meals, however the AI packed them. Real report: "the AI food
+// suggestions don't work." Only a top-level "suggestions" array was ever
+// read, but the model sometimes writes that array out as a string of JSON
+// (a known habit with this app's open response format — see claudeChat),
+// or names it "meals"/"ideas", and then the list showed nothing at all.
+export function mealSuggestionsFrom(parsed) {
+  let list = null;
+  for (const key of ["suggestions", "meals", "ideas", "options", "items"]) {
+    let v = parsed?.[key];
+    if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) { v = null; } }
+    if (Array.isArray(v)) { list = v; break; }
+  }
+  if (!list && Array.isArray(parsed)) list = parsed;
+  return (list || [])
+    .filter((m) => m && typeof m === "object")
+    .map((m) => cleanAiMeal(m))
+    .filter((m) => m.name && m.name !== "Meal" && m.cal > 0)
+    .slice(0, 5);
 }
 
 export function mealSuggestionUserMessage(profile, remaining) {
@@ -4058,7 +4134,7 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
 // instead, so the exercise list underneath stays fully scrollable and
 // tappable (checking another set, opening "How to do it", swapping an
 // exercise) while the countdown keeps running alongside it.
-function RestTimer({ seconds, total, onAdd, onSkip }) {
+function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
   const pct = Math.max(0, seconds / total);
   const done = seconds <= 0;
   const [muted, setMuted] = useState(() => isRestChimeMuted());
@@ -4067,7 +4143,11 @@ function RestTimer({ seconds, total, onAdd, onSkip }) {
   // not when reopening a workout whose rest had already finished.
   const wasDone = useRef(done);
   useEffect(() => {
-    if (done && !wasDone.current) buzzRestDone();
+    if (done && !wasDone.current) {
+      buzzRestDone();
+      // They watched it finish in the app — no lock-screen alert needed.
+      if (typeof document === "undefined" || document.visibilityState === "visible") onSeenFinish?.();
+    }
     wasDone.current = done;
   }, [done]);
   return (
@@ -4807,6 +4887,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       {rest !== null && (
         <RestTimer
           seconds={restSecondsLeft} total={rest.total}
+          onSeenFinish={() => {
+            const r = restRef.current;
+            if (!r || r.seen) return;
+            const next = { ...r, seen: true };
+            setRest(next);
+            saveNow(setsRef.current, next);
+          }}
           onAdd={() => setRest((r) => {
             const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
             saveNow(setsRef.current, next);
@@ -5102,8 +5189,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
 function ExerciseDetailSheet({ name, logs, onClose }) {
   const pr = exercisePR(logs, name);
   const lastSession = exerciseLastSession(logs, name);
-  const trend = exerciseHistory(logs, name).slice(-6); // oldest -> newest, most recent 6
-  const maxWeight = trend.length > 0 ? Math.max(...trend.map((h) => h.weight)) : 0;
+  // Every session, oldest -> newest, drawn as the same line graph as the
+  // Progress tab's lift chart. Real ask: "make the history and PR in the
+  // workout a graph, same as the weight one" (it was six small bars).
+  const trend = exerciseHistory(logs, name);
+  const first = trend[0];
+  const latest = trend[trend.length - 1];
+  const delta = first && latest ? latest.weight - first.weight : 0;
 
   return (
     <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 70, display: "flex", flexDirection: "column" }}>
@@ -5146,20 +5238,24 @@ function ExerciseDetailSheet({ name, logs, onClose }) {
 
             {trend.length > 1 && (
               <>
-                <TickRule label="Trend" />
+                <TickRule label="Top set over time" />
                 <Card>
-                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 64 }}>
-                    {trend.map((h, i) => (
-                      <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-                        <span style={{ fontSize: 9, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", marginBottom: 3 }}>{h.weight}</span>
-                        <div style={{ width: "100%", maxWidth: 22, borderRadius: 4, background: i === trend.length - 1 ? T.charge : T.steel, height: `${Math.max(14, (h.weight / maxWeight) * 100)}%` }} />
-                      </div>
-                    ))}
+                  <div aria-label={`Top set over time for ${name}`} role="img">
+                    <ResponsiveContainer width="100%" height={180}>
+                      <LineChart data={trend}>
+                        <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="dateLabel" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
+                        <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} width={36} />
+                        <Tooltip contentStyle={{ fontFamily: "Inter", fontSize: 12, borderRadius: 8 }} formatter={(v, k, p) => [`${v} lb × ${p.payload.reps}`, "Top set"]} />
+                        <Line type="monotone" dataKey="weight" stroke={T.charge} strokeWidth={3} dot={{ r: 3, fill: T.charge }} />
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                    {trend.map((h, i) => (
-                      <span key={i} style={{ flex: 1, fontSize: 9, color: T.steelDark, textAlign: "center" }}>{h.dateLabel}</span>
-                    ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark }}>
+                    <span>First: {first.weight}lb × {first.reps}</span>
+                    <span style={{ color: delta > 0 ? T.good : delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
+                      {delta > 0 ? "+" : ""}{delta}lb since first log
+                    </span>
                   </div>
                 </Card>
               </>
@@ -5565,7 +5661,7 @@ RULES:
 
 THEIR LOGS: you can see a summary of every logged workout, their most-trained lifts (best and latest sets), their bodyweight history with the current weight, and recent daily calories/protein vs target. Never say you can't see them — answer from the real numbers. You only run when they message you, so you can't watch for a target and alert them later — say so, but if the number already meets what they described, tell them now. An unlogged day is missing data, not a zero.
 
-FOOD: if a "Food preferences" line exists, anything under "MUST NOT eat" is a hard rule — never suggest it or a dish containing it. Build suggestions from what they like and never from what they dislike. Work WITH foods they love, even "unhealthy" ones: first, can it simply fit their numbers (often yes — say how)? If not, keep what they like about it and fix only what breaks the numbers, naming ONE specific dish (pizza -> a high-protein flatbread pizza; ice cream -> a protein-and-frozen-banana shake). Never moralize. Name real dishes, not food groups ("chicken shawarma bowl with garlic yogurt", not "chicken, rice and vegetables"). Respect how they eat (eating out, budget, no time). No preferences line -> don't invent tastes; give a short answer and ask what they like.
+FOOD: if a "Food preferences" line exists, anything under "DIET RULES" is a hard rule — never suggest it or a dish containing it. Build suggestions from what they like and never from what they dislike. Work WITH foods they love, even "unhealthy" ones: first, can it simply fit their numbers (often yes — say how)? If not, keep what they like about it and fix only what breaks the numbers, naming ONE specific dish (pizza -> a high-protein flatbread pizza; ice cream -> a protein-and-frozen-banana shake). Never moralize. Name real dishes, not food groups ("chicken shawarma bowl with garlic yogurt", not "chicken, rice and vegetables"). Respect how they eat (eating out, budget, no time). No preferences line -> don't invent tastes; give a short answer and ask what they like.
 
 NUMERIC LIMITS — EXERCISE_CEILING, SESSION_LENGTH, TIGHTEST_SETS and TIGHTEST_REST are given as real numbers on the "Numeric limits" line of your context; always use the real numbers, never the names:
 - A day you design from scratch gets at most EXERCISE_CEILING exercises (a time-budget estimate from sets, rest and per-exercise setup time; a single-arm/single-leg exercise costs about double). It never shortens an existing day you're editing or a one-time version of one.
@@ -5882,7 +5978,7 @@ const COACH_LIMIT_RULES = `YOUR NUMERIC LIMITS. The four values named in caps be
 // How to read the three lines above. Same for every account on the app, so it
 // sits in the cached static block rather than being re-sent per user.
 const COACH_FOOD_RULES = `FOOD ADVICE. Real report: "the AI suggestions for what to eat aren't great." They weren't, because nothing in the app knew anything about what the person eats, so the only answer available was a generic chicken-rice-and-broccoli list. If a "Food preferences" line appears in your context, it's what they told the app themselves:
-- Anything under "MUST NOT eat" is a hard rule, not a preference. Never suggest it, never suggest a dish that contains it, and don't offer it as a "if you can tolerate it" aside. Several of those are allergies.
+- Anything under "DIET RULES" is a hard rule, not a preference. Never suggest it, never suggest a dish that contains it, and don't offer it as a "if you can tolerate it" aside. Several of those are allergies.
 - Build every food suggestion out of things they actually said they like, and never suggest something they said they can't stand. Advice built around meals they'd never eat is advice they'll ignore, which is the whole problem this is fixing.
 - WORK WITH what they like, including the food that isn't obviously "healthy" — that is the single most useful thing you do here. Someone who says they like pizza, burgers, or ice cream has told you something valuable, not confessed to a problem. Never answer that with "avoid it", never moralize about it, and never just ignore it and list chicken and rice instead. Two moves, in this order:
   1. CAN IT JUST FIT? Most of the time it can. A couple of slices of pizza inside their calorie and protein numbers is a perfectly good day, and saying so plainly is better coaching than replacing it with something sad. Say how it fits (e.g. "two slices is about 600 — build the rest of the day around protein and you're fine").
@@ -6576,10 +6672,14 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       const system = buildMealSuggestionSystem();
       const userMsg = mealSuggestionUserMessage(profile, remaining);
       const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
-      const parsed = parseJSONLoose(raw);
-      setSuggestions((Array.isArray(parsed?.suggestions) ? parsed.suggestions : []).map(cleanAiMeal));
+      const list = mealSuggestionsFrom(parseJSONLoose(raw));
+      if (list.length === 0) {
+        logError("Meal suggestions came back empty", { stack: String(raw).slice(0, 3000), context: { type: "meal-suggestions-empty" } });
+        throw new Error("empty");
+      }
+      setSuggestions(list);
     } catch (e) {
-      setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : "Couldn't get suggestions — try again.");
+      setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Couldn't get suggestions — try again.");
     } finally {
       setSuggestLoading(false);
     }
@@ -8549,6 +8649,16 @@ export default function App() {
       saveState(user.id, finalState);
     }
 
+    // One-time: forget saved demo videos for machine/cable/barbell/etc.
+    // exercises, so each is looked up again under the stricter equipment
+    // check (see api/exercise-gif.js). Real reports: "Machine Lateral Raise"
+    // showed a cable lateral raise, and "Machine Tricep Extension" a barbell
+    // one. Most come straight back from the shared server cache.
+    if (finalState && finalState.gifCache && finalState.gifCacheVersion !== GIF_CACHE_VERSION) {
+      finalState = { ...finalState, gifCache: withoutEquipmentGifs(finalState.gifCache), gifCacheVersion: GIF_CACHE_VERSION };
+      saveState(user.id, finalState);
+    }
+
     setState(finalState);
     setSyncStatus(fromCache || hasPendingSync(user.id) ? "offline" : "synced");
   }
@@ -8788,7 +8898,7 @@ export default function App() {
         });
       }
       const flags = { hasOverride, hasValidTargets, hasNewProgram, hasDayEdit, restoreIdx, restoreOriginal, madeChange, intendedButInvalid };
-      const overrideTarget = hasOverride ? resolveOverrideTarget(parsed, stateRef.current) : null;
+      const overrideTarget = hasOverride ? resolveOverrideTarget(parsed, stateRef.current, trimmed) : null;
       const overrideTargetInvalid = !!overrideTarget && !overrideTarget.valid;
       const overrideTargetDay = overrideTarget?.valid ? stateRef.current.program?.days?.[overrideTarget.dayIdx] : null;
       if (overrideTargetInvalid) {
@@ -9255,9 +9365,14 @@ export default function App() {
     // A new rest just started (or got +15s): ask the server to buzz the
     // phone when it ends, in case the app is closed by then. It checks the
     // saved rest again before sending, so Skip / the next set cancel it.
-    if (rest?.endAt && rest.endAt !== lastRestAlertRef.current && state?.push?.restAlerts) {
-      lastRestAlertRef.current = rest.endAt;
-      requestRestAlert(rest.endAt);
+    if (rest?.endAt && rest.endAt !== lastRestAlertRef.current) {
+      // A new rest: the last one's lock-screen alert is old news. Real
+      // report: 25+ "Rest's up" alerts piled up by the end of a workout.
+      clearRestNotifications();
+      if (state?.push?.restAlerts) {
+        lastRestAlertRef.current = rest.endAt;
+        requestRestAlert(rest.endAt);
+      }
     }
     const activeSeconds = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
     persist((prev) => ({ ...prev, inProgressWorkout: { dayIdx, sets, rest: rest || null, savedAt: new Date().toISOString(), activeSeconds, runningSince: session.resumedAt, runningBaseline: session.baselineActiveSeconds } }));
@@ -9294,6 +9409,7 @@ export default function App() {
     const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
     // Judged against the workouts logged BEFORE this one, for its PRs.
     setFinishedSummary(workoutSummary(entry, state.logs));
+    clearRestNotifications();
     // See overrideUsedUpBy: only the workout a one-time change was for uses it up.
     const finishedDayIdx = session.dayIdx;
     persist((prev) => {

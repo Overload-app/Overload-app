@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import handler, { searchCandidates, bestFuzzyMatch, bearerToken } from "./exercise-gif.js";
+import handler, { searchCandidates, bestFuzzyMatch, bearerToken, equipmentOf, equipmentCompatible } from "./exercise-gif.js";
 
 describe("searchCandidates", () => {
   test("a plain name with no qualifiers or equipment prefix has just itself as a candidate", () => {
@@ -123,5 +123,35 @@ describe("requires a signed-in session", () => {
 
   test("bearerToken reads the Authorization header", () => {
     expect(bearerToken({ headers: { authorization: "Bearer xyz" } })).toBe("xyz");
+  });
+});
+
+describe("equipment has to match", () => {
+  test("reads the equipment out of a name", () => {
+    expect(equipmentOf("Machine Lateral Raise")).toBe("machine");
+    expect(equipmentOf("lever lateral raise")).toBe("machine");
+    expect(equipmentOf("Cable Lateral Raise")).toBe("cable");
+    expect(equipmentOf("Smith Machine Squat")).toBe("smith");
+    expect(equipmentOf("EZ-Bar Curl")).toBe("ezbar");
+    expect(equipmentOf("Lateral Raise")).toBeNull();
+  });
+  test("the two real reports are refused", () => {
+    expect(equipmentCompatible("Machine Lateral Raise", "cable lateral raise")).toBe(false);
+    expect(equipmentCompatible("Machine Tricep Extension", "barbell lying triceps extension")).toBe(false);
+    expect(equipmentCompatible("Machine Tricep Extension", "triceps extension")).toBe(false);
+  });
+  test("same equipment, or an unlabelled name for dumbbell/bodyweight work, is fine", () => {
+    expect(equipmentCompatible("Machine Lateral Raise", "lever lateral raise")).toBe(true);
+    expect(equipmentCompatible("Dumbbell Lateral Raise", "lateral raise")).toBe(true);
+    expect(equipmentCompatible("Lateral Raise", "cable lateral raise")).toBe(true);
+  });
+  test("the local fuzzy match never crosses equipment", () => {
+    const catalog = [
+      { name_key: "cable lateral raise", gif_url: "c.gif" },
+      { name_key: "barbell lying triceps extension", gif_url: "b.gif" },
+      { name_key: "lever lateral raise", gif_url: "m.gif" },
+    ];
+    expect(bestFuzzyMatch("Machine Lateral Raise", catalog)?.gif_url).toBe("m.gif");
+    expect(bestFuzzyMatch("Machine Tricep Extension", catalog)).toBeNull();
   });
 });

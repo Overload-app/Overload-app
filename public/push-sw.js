@@ -6,14 +6,17 @@ self.addEventListener("push", (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) { data = {}; }
   const title = data.title || "Overload";
-  event.waitUntil(self.registration.showNotification(title, {
+  const tag = data.tag || "overload";
+  // One alert per kind at a time: the previous rest alert is replaced, not
+  // stacked (real report: 25+ of them by the end of a workout).
+  event.waitUntil(self.registration.getNotifications({ tag }).then((old) => old.forEach((n) => n.close())).catch(() => {}).then(() => self.registration.showNotification(title, {
     body: data.body || "",
-    tag: data.tag || "overload",
+    tag,
     renotify: true,
     icon: "/icon-192.png",
     badge: "/icon-192.png",
     data: { url: data.url || "/" },
-  }));
+  })));
 });
 
 self.addEventListener("notificationclick", (event) => {

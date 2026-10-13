@@ -57,6 +57,8 @@ function tokenize(name) {
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((w) => w && !STOPWORDS.has(w))
+    // The catalog calls machines "lever" ("lever lateral raise").
+    .map((w) => (w === "lever" ? "machine" : w))
     .map(stem);
 }
 
@@ -95,6 +97,40 @@ function distinguishingTermsConflict(aTerms, bTerms) {
   return true;
 }
 
+// The equipment an exercise name says it uses, or null. Real reports:
+// "Machine Lateral Raise" showed a cable lateral raise, and "Machine Tricep
+// Extension" showed a man on a bench with a barbell. The live search drops a
+// leading equipment word as a fallback ("Lateral Raise") and took the first
+// result, whatever it was done with, then cached that for everyone.
+export function equipmentOf(name) {
+  const n = String(name || "").toLowerCase();
+  if (/\bsmith\b/.test(n)) return "smith";
+  if (/\bez[- ]?bar\b|\bezbar\b/.test(n)) return "ezbar";
+  if (/\bbarbell\b/.test(n)) return "barbell";
+  if (/\bdumbbells?\b/.test(n)) return "dumbbell";
+  if (/\bcables?\b/.test(n)) return "cable";
+  if (/\bkettlebells?\b/.test(n)) return "kettlebell";
+  if (/\bbands?\b|\bresistance band\b/.test(n)) return "band";
+  if (/\bmachine\b|\blever\b|\bselectorized\b|\bplate[- ]loaded\b/.test(n)) return "machine";
+  if (/\bbody ?weight\b/.test(n)) return "bodyweight";
+  return null;
+}
+
+// Whether a video found under `candidate` can stand in for `query`. Names
+// that say different equipment never match. When the query names a machine,
+// cable, barbell, smith, kettlebell, band or EZ-bar, the video's name has to
+// say the same — showing a different exercise's video is worse than none.
+// Dumbbell and bodyweight queries may use an unlabelled name ("Lateral
+// Raise"), which is how catalogs usually list those.
+const MUST_SAY_EQUIPMENT = new Set(["machine", "cable", "barbell", "smith", "kettlebell", "band", "ezbar"]);
+export function equipmentCompatible(query, candidate) {
+  const q = equipmentOf(query);
+  const c = equipmentOf(candidate);
+  if (!q) return true;
+  if (c) return q === c;
+  return !MUST_SAY_EQUIPMENT.has(q);
+}
+
 // candidates: [{ name_key, gif_url }]. Jaccard token overlap — deliberately
 // conservative (>0.5 = MORE than half the combined vocabulary between the
 // two names actually matches, not just a tie) because showing the WRONG
@@ -113,6 +149,7 @@ export function bestFuzzyMatch(query, candidates) {
     if (distinguishingTermsConflict(qDistinguishing, cDistinguishing)) {
       continue; // both name a body part/muscle group, and it's not the same one
     }
+    if (!equipmentCompatible(query, c.name_key)) continue;
     let intersection = 0;
     for (const t of qTokens) if (cTokens.has(t)) intersection++;
     const union = new Set([...qTokens, ...cTokens]).size;
@@ -195,8 +232,18 @@ export default async function handler(req, res) {
     // forever, never getting a chance to check the now-much-fuller local
     // catalog. So a null cache hit still falls through to the fuzzy check
     // below (a local read, zero WorkoutX cost) instead of returning early.
+    let cachedIsWrong = false;
     if (cached && cached.gif_url) {
-      return res.status(200).json({ gifUrl: cached.gif_url, matchCount: 1, source: "cache" });
+      // An earlier lookup may have saved a different piece of equipment's
+      // video under this name (see equipmentOf). If every catalog name that
+      // video belongs to says other equipment, don't trust it.
+      if (equipmentOf(name)) {
+        const { data: owners } = await supabaseAdmin.from("exercise_gifs").select("name_key").eq("gif_url", cached.gif_url).neq("name_key", key);
+        cachedIsWrong = Array.isArray(owners) && owners.length > 0 && owners.every((o) => !equipmentCompatible(name, o.name_key));
+      }
+      if (!cachedIsWrong) {
+        return res.status(200).json({ gifUrl: cached.gif_url, matchCount: 1, source: "cache" });
+      }
     }
 
     // No confirmed exact match, but the bulk-synced catalog may still have
@@ -215,7 +262,7 @@ export default async function handler(req, res) {
     // Genuinely still nothing, and there was already a cached null for
     // this exact name — no point spending a live WorkoutX request to
     // re-confirm the same negative answer.
-    if (cached) {
+    if (cached && !cachedIsWrong) {
       return res.status(200).json({ gifUrl: null, matchCount: 0, source: "cache" });
     }
   }
@@ -241,7 +288,8 @@ export default async function handler(req, res) {
       } catch (e) {
         return res.status(502).json({ error: "WorkoutX returned a non-JSON response", detail: bodyText.slice(0, 300) });
       }
-      items = extractItems(parsed);
+      // Only results done with the equipment asked for (see equipmentOf).
+      items = extractItems(parsed).filter((it) => equipmentCompatible(name, it?.name || ""));
       if (items.length > 0) break;
     }
 

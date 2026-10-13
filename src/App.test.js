@@ -65,6 +65,9 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  mealSuggestionsFrom,
+  daysNamedIn,
+  withoutEquipmentGifs,
   photoFixMessages,
   quizNumberProblem,
   QUIZ_STEPS,
@@ -1371,7 +1374,7 @@ describe("foodPreferenceText", () => {
     expect(withFood).toContain("Food preferences:");
     expect(withFood).toContain("love paneer and lentils");
     const staticBlock = buildCoachStaticSystem();
-    expect(staticBlock).toContain("Anything under \"MUST NOT eat\" is a hard rule");
+    expect(staticBlock).toContain("Anything under \"DIET RULES\" is a hard rule");
     expect(staticBlock).toContain("they skipped those questions");
   });
 
@@ -2181,7 +2184,7 @@ describe("compact Coach rulebook", () => {
     const c = compact();
     ["\"reply\"", "\"program\"", "\"programDayEdit\"", "\"todayOverride\"", "\"todayOverrideDayIndex\"", "\"targets\"", "\"restoreIndex\"", "\"restoreOriginal\"", "\"overrideCeiling\"",
       "Their days, by dayIndex", "Open right now", "Next scheduled", "One-time change already set", "Current program JSON", "Current nutrition targets JSON",
-      "Food preferences", "MUST NOT eat", "EXERCISE_CEILING", "SESSION_LENGTH", "TIGHTEST_SETS", "TIGHTEST_REST", "[Sent YYYY-MM-DD]"]
+      "Food preferences", "DIET RULES", "EXERCISE_CEILING", "SESSION_LENGTH", "TIGHTEST_SETS", "TIGHTEST_REST", "[Sent YYYY-MM-DD]"]
       .forEach((needle) => expect(c).toContain(needle));
   });
 
@@ -4972,5 +4975,62 @@ describe("re-checking a photo with what it actually is", () => {
   });
   test("the corrected name comes from their words if the AI gives none", () => {
     expect(cleanAiMeal({ cal: 150, protein: 20 }, mealNameFromDescription("greek yogurt (plain, 2%)")).name).toBe("Greek yogurt");
+  });
+});
+
+describe("saved demo videos for equipment exercises are looked up again once", () => {
+  test("machine/cable/barbell entries go, plain ones stay", () => {
+    const out = withoutEquipmentGifs({ "machine lateral raise": "c.gif", "machine tricep extension": "b.gif", "lateral raise": "l.gif", "pull-up": "p.gif", "barbell squat": "s.gif" });
+    expect(out).toEqual({ "lateral raise": "l.gif", "pull-up": "p.gif" });
+  });
+});
+
+describe("a one-time change lands on the day it's for", () => {
+  const ex = (name) => ({ name, sets: 3, reps: "10", rest: 90 });
+  const program = { days: [
+    { name: "Push (Chest/Triceps/Shoulders)", exercises: [] },
+    { name: "Pull (Back/Biceps)", exercises: [] },
+    { name: "Legs", exercises: [] },
+    { name: "Push (Shoulders/Chest Volume)", exercises: [] },
+  ] };
+  const logs = { workouts: [{}, {}, {}] }; // next scheduled: index 3, a push day
+  const dumbbellPull = ["Dumbbell Row", "Chest-Supported Row", "Dumbbell Curl", "Hammer Curl"].map(ex);
+  test("reads which days a message names", () => {
+    expect(daysNamedIn("make my pull day dumbbells today", program.days)).toEqual([1]);
+    expect(daysNamedIn("make my push day dumbbells", program.days)).toEqual([0, 3]);
+    expect(daysNamedIn("Push (Shoulders/Chest Volume) but lighter", program.days)).toEqual([3]);
+    expect(daysNamedIn("legs please", program.days)).toEqual([2]);
+    expect(daysNamedIn("only dumbbells today", program.days)).toEqual([]);
+  });
+  test("the real report: a dumbbell pull workout the Coach put on a push day goes to Pull", () => {
+    expect(resolveOverrideTarget({ todayOverride: dumbbellPull, todayOverrideDayIndex: 3 }, { program, logs }, "change my pull day to only dumbbells for today")).toEqual({ dayIdx: 1, valid: true });
+  });
+  test("even without the day named, pull exercises don't land on a push day", () => {
+    expect(resolveOverrideTarget({ todayOverride: dumbbellPull, todayOverrideDayIndex: 3 }, { program, logs }, "only dumbbells today")).toEqual({ dayIdx: 1, valid: true });
+    expect(resolveOverrideTarget({ todayOverride: dumbbellPull }, { program, logs }, "only dumbbells today")).toEqual({ dayIdx: 1, valid: true });
+  });
+  test("a sensible choice by the Coach is left alone", () => {
+    const pushWork = ["Dumbbell Bench Press", "Dumbbell Shoulder Press", "Dumbbell Fly"].map(ex);
+    expect(resolveOverrideTarget({ todayOverride: pushWork, todayOverrideDayIndex: 3 }, { program, logs }, "make my push day dumbbells")).toEqual({ dayIdx: 3, valid: true });
+    expect(resolveOverrideTarget({ todayOverride: pushWork, todayOverrideDayIndex: 0 }, { program, logs }, "make my push day dumbbells")).toEqual({ dayIdx: 0, valid: true });
+  });
+});
+
+describe("meal suggestions, however they're packed", () => {
+  const meal = { name: "Chicken burrito bowl", cal: 650, protein: 45, carb: 70, fat: 18, note: "fits" };
+  test("the normal shape", () => {
+    expect(mealSuggestionsFrom({ suggestions: [meal] }).map((m) => m.name)).toEqual(["Chicken burrito bowl"]);
+  });
+  test("an array written out as a string of JSON", () => {
+    expect(mealSuggestionsFrom({ suggestions: JSON.stringify([meal, meal]) }).length).toBe(2);
+  });
+  test("a different name for the list, or a bare list", () => {
+    expect(mealSuggestionsFrom({ meals: [meal] }).length).toBe(1);
+    expect(mealSuggestionsFrom([meal]).length).toBe(1);
+  });
+  test("junk entries are dropped, and nothing usable is an empty list", () => {
+    expect(mealSuggestionsFrom({ suggestions: [null, "x", { cal: 0 }, meal] }).length).toBe(1);
+    expect(mealSuggestionsFrom({ reply: "here are some ideas" })).toEqual([]);
+    expect(mealSuggestionsFrom(null)).toEqual([]);
   });
 });

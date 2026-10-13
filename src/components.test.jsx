@@ -2599,3 +2599,45 @@ describe("<Progress /> weigh-in entry", () => {
     expect(addWeight).toHaveBeenCalledWith(181.5);
   });
 });
+
+describe("<WorkoutSession /> rest watched to the end in the app", () => {
+  test("is marked seen, so no lock-screen alert is sent for it", async () => {
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    const day = { name: "Push", exercises: [{ name: "Bench Press", sets: 2, reps: "8", rest: 1, tips: ["a", "b", "c", "d"] }] };
+    const onAutoSave = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()} onAutoSave={onAutoSave}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getAllByLabelText(/Mark set 1 done/)[0]);
+    const started = onAutoSave.mock.calls.at(-1)[1];
+    expect(started.seen).toBeFalsy();
+    await waitFor(() => expect(onAutoSave.mock.calls.at(-1)[1]).toMatchObject({ endAt: started.endAt, seen: true }), { timeout: 8000 });
+  }, 15000);
+});
+
+describe("<WorkoutSession /> History & PR", () => {
+  test("shows the top set over time as a graph, with the change since the first log", async () => {
+    globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} };
+    const day = { name: "Push", exercises: [{ name: "Bench Press", sets: 3, reps: "8", rest: 90, tips: ["a", "b", "c", "d"] }] };
+    const logged = (w) => [{ name: "Bench Press", logged: [{ weight: String(w), reps: "8", done: true }] }];
+    const logs = { workouts: [{ date: "2026-09-01", dayName: "Push", exercises: logged(135) }, { date: "2026-09-08", dayName: "Push", exercises: logged(145) }, { date: "2026-09-15", dayName: "Push", exercises: logged(155) }] };
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={logs.workouts[2]} logs={logs} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByText(/History & PR/));
+    expect(screen.getByText("Top set over time")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Top set over time for Bench Press/ })).toBeInTheDocument();
+    expect(screen.getByText("+20lb since first log")).toBeInTheDocument();
+    expect(screen.getByText("First: 135lb × 8")).toBeInTheDocument();
+  });
+});
