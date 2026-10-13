@@ -2701,11 +2701,28 @@ Respond ONLY with JSON, no markdown fences: {"suggestions": [{"name": "<string>"
 // read, but the model sometimes writes that array out as a string of JSON
 // (a known habit with this app's open response format — see claudeChat),
 // or names it "meals"/"ideas", and then the list showed nothing at all.
+// A list the model wrote out as text. When that text isn't quite valid JSON
+// (seen in the live test: cut short, or a stray character), each complete
+// {...} item in it is still read on its own.
+export function parseLooseList(text) {
+  try {
+    const v = JSON.parse(text);
+    if (Array.isArray(v)) return v;
+  } catch (e) { /* fall through to item-by-item */ }
+  const items = [];
+  for (const m of String(text).match(/\{[^{}]*\}/g) || []) {
+    try { items.push(JSON.parse(m)); } catch (e) {
+      try { items.push(JSON.parse(escapeRawControlCharsInStrings(m))); } catch (e2) { /* skip this one */ }
+    }
+  }
+  return items.length ? items : null;
+}
+
 export function mealSuggestionsFrom(parsed) {
   let list = null;
   for (const key of ["suggestions", "meals", "ideas", "options", "items"]) {
     let v = parsed?.[key];
-    if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) { v = null; } }
+    if (typeof v === "string") v = parseLooseList(v);
     if (Array.isArray(v)) { list = v; break; }
   }
   if (!list && Array.isArray(parsed)) list = parsed;

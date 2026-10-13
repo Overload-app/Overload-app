@@ -153,7 +153,7 @@ function programFailures(program, profile) {
     const focus = dayFocusGroups(d.name);
     if (focus) {
       const off = names.filter((n) => { const g = inferMuscleGroup(n); return g && g !== "core" && !focus.has(g) && !(focus.has("back") && /rear delt|face pull|reverse fly/i.test(n)); });
-      if (off.length > 1 && !/weak ?point|accessor|arms|full|total/i.test(d.name)) f.push(`${d.name}: off-focus: ${off.join(", ")}`);
+      if (off.length > 1 && !/weak[- ]?point|accessor|arms|full|total/i.test(d.name)) f.push(`${d.name}: off-focus: ${off.join(", ")}`);
     }
     if (gentlePlan(profile)) {
       const heavy = d.exercises.filter((e) => Number(e.sets) > 3);
@@ -217,7 +217,7 @@ const REVIEWS = [
 
 // ---- 5. exercise alternatives -------------------------------------------------------
 const ALTS = [
-  ["alt-bench-full", "Barbell Bench Press", "full", "", "chest"],
+  ["alt-bench-full", "Barbell Bench Press", "full", "", "chest"], // a weighted dip is a fair chest swap; checked by name below
   ["alt-pulldown-dumbbell", "Lat Pulldown", "dumbbell", "", "back"],
   ["alt-squat-knees", "Barbell Squat", "full", "knees", "legs"],
   ["alt-machine-lateral", "Machine Lateral Raise", "full", "", "shoulders"],
@@ -306,7 +306,7 @@ run("every AI feature, against the real model", () => {
           res.statusCode !== 200 && `HTTP ${res.statusCode}: ${res.body?.error}`,
           res.statusCode === 200 && alts.length === 0 && "no alternatives",
           alts.some((a) => isSameCoreExercise(a, name)) && "suggested the same exercise",
-          alts.filter((a) => inferMuscleGroup(a) && inferMuscleGroup(a) !== group).length > 0 && `different muscle: ${alts.filter((a) => inferMuscleGroup(a) && inferMuscleGroup(a) !== group).join(", ")}`,
+          alts.filter((a) => inferMuscleGroup(a) && inferMuscleGroup(a) !== group && !(group === "chest" && /dip/i.test(a))).length > 0 && `different muscle: ${alts.filter((a) => inferMuscleGroup(a) && inferMuscleGroup(a) !== group).join(", ")}`,
           (equipment === "dumbbell" || equipment === "bodyweight") && alts.some((a) => !usesOnly(a, equipment)) && `needs other equipment: ${alts.filter((a) => !usesOnly(a, equipment)).join(", ")}`,
           terms.length && alts.some((a) => terms.some((t) => a.toLowerCase().includes(t))) && `loads the injury: ${alts.join(", ")}`,
         ],

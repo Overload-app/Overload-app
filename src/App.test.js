@@ -5135,3 +5135,14 @@ describe("more fixes from the live Coach test", () => {
     expect(optedOut.todayOverride[0].sets).toBe(5);
   });
 });
+
+describe("meal suggestions written as slightly broken text", () => {
+  test("each complete item is still read", () => {
+    const text = '[{"name":"Dairy-free pizza","cal":480,"protein":28,"carb":50,"fat":16},{"name":"Chicken and potatoes","cal":320,"protein":35,"carb":28,"fat":8},{"name":"Shrimp flatbread","cal';
+    expect(mealSuggestionsFrom({ suggestions: text }).map((m) => m.name)).toEqual(["Dairy-free pizza", "Chicken and potatoes"]);
+  });
+  test("a raw line break inside a value doesn't lose the item", () => {
+    const text = '[{"name":"Tofu\nbowl","cal":500,"protein":30,"carb":50,"fat":15}';
+    expect(mealSuggestionsFrom({ suggestions: text }).length).toBe(1);
+  });
+});
