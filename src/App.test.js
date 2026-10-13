@@ -5118,7 +5118,8 @@ describe("more fixes from the live Coach test", () => {
     expect(guardTextFor("the volume one", chat)).toBe("make my push day all dumbbells for today the volume one");
     expect(equipmentAskedFor(guardTextFor("the volume one", chat))).toBe("dumbbell");
     expect(guardTextFor("make legs harder for this whole winter please", chat)).toBe("make legs harder for this whole winter please");
-    expect(guardTextFor("ok", [{ role: "user", text: "x" }, { role: "assistant", text: "Done." }])).toBe("ok");
+    expect(guardTextFor("the volume one", [{ role: "user", text: "only dumbbells for push today" }, { role: "assistant", text: "Which push day do you mean — Chest/Triceps or Shoulders/Volume." }])).toBe("only dumbbells for push today the volume one");
+    expect(guardTextFor("ok", [])).toBe("ok");
   });
   test("Spanish 'only dumbbells' / 'bodyweight' are understood", () => {
     expect(equipmentAskedFor("cambia mi día de piernas a solo mancuernas para hoy")).toBe("dumbbell");

@@ -6247,7 +6247,9 @@ export function guardTextFor(message, chat) {
   const text = String(message || "").trim();
   if (text.split(/\s+/).length > 6) return text;
   const last = [...(chat || [])].reverse();
-  const askedBack = last[0]?.role === "assistant" && /\?/.test(last[0]?.text || "");
+  // Any reply in between counts — the Coach's "which one" doesn't always end
+  // in a question mark (seen in the live test).
+  const askedBack = last[0]?.role === "assistant";
   const previous = last.find((m) => m.role === "user");
   return askedBack && previous ? `${previous.text} ${text}` : text;
 }
