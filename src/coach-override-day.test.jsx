@@ -53,7 +53,7 @@ vi.mock("./supabaseClient.js", () => ({
         return { data: null, error: null };
       }),
       insert: vi.fn(async () => ({ data: null, error: null })),
-      upsert: vi.fn(async () => ({ data: null, error: null })),
+      upsert: vi.fn(async (row) => { if (row && "state" in row) stored = row.state; return { data: null, error: null }; }),
       update: vi.fn().mockReturnThis(),
     })),
   },
@@ -222,5 +222,29 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await user.click(screen.getByRole("button", { name: /^Coach$/ }));
     await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "make my program harder{enter}");
     expect(await screen.findByText(/Made everything harder\. \(To fit your ~30-minute sessions I left out .*Dips/, {}, { timeout: 4000 })).toBeInTheDocument();
+  }, 20000);
+
+  test("a full-program change never cuts what they just asked to add, or days nobody mentioned", async () => {
+    stored.profile.sessionLength = 30;
+    const before = JSON.parse(JSON.stringify(stored.program.days));
+    const days = before.map((d) => (d.name === "Legs" ? { ...d, exercises: [...d.exercises, ex("Calf Raise")] } : d));
+    nextReply = () => ({
+      ok: true,
+      json: async () => ({
+        content: [{ type: "tool_use", name: "respond", input: { reply: "Added Calf Raise to Legs.", program: { splitName: "PPL", days }, programDayEdit: null, todayOverride: null, targets: null, restoreIndex: null, restoreOriginal: false, overrideCeiling: false } }],
+        usage: { input_tokens: 1500, output_tokens: 400 },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Coach$/ }));
+    await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "add calf raises to legs{enter}");
+    await screen.findByText(/Added Calf Raise to Legs/, {}, { timeout: 4000 });
+    const legs = stored.program.days.find((d) => d.name === "Legs");
+    expect(legs.exercises.map((e) => e.name)).toContain("Calf Raise");
+    stored.program.days.filter((d) => d.name !== "Legs").forEach((d) => {
+      expect(d.exercises.length).toBe(before.find((b) => b.name === d.name).exercises.length);
+    });
   }, 20000);
 });

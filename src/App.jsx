@@ -2344,6 +2344,18 @@ export function capForProgram(program, sessionLength, experience) {
 
 // What the session-length limit cut from a Coach-written program, as a line
 // for the reply — or "" when nothing was cut.
+// The same exercise twice on one day (a swap to something the day already
+// had) is kept once.
+export function dedupeExercises(exercises) {
+  const seen = new Set();
+  return (exercises || []).filter((e) => {
+    const key = String(e?.name || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function programTrimNote(sentDays, keptDays, sessionLength) {
   const cuts = (sentDays || []).map((d, i) => {
     const kept = keptDays?.[i]?.exercises || [];
@@ -9164,10 +9176,20 @@ export default function App() {
         // guessing on its own — see coachResponseFlags/buildCoachSystem.
         const overrideCeiling = parsed.overrideCeiling === true;
         const normalizedProgramDays = hasNewProgram
-          ? parsed.program.days.map((d) => ({
-              ...d,
-              exercises: normalizeExerciseCount(d.exercises || [], p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling, { dayName: d.name }),
-            }))
+          ? parsed.program.days.map((d, i) => {
+              // Never cut a day below what it already has, or below what they
+              // just asked to add. Found by the live Coach test: "swap curls
+              // on pull and add calf raises to legs" added the Calf Raise,
+              // then this trim cut it straight back out (and five exercises
+              // on other days nobody mentioned).
+              const before = prev.program?.days?.find((o) => o.name === d.name) || prev.program?.days?.[i];
+              const asksToAdd = /\b(add|more|extra|another|include|put)\b/i.test(guardText);
+              const minCount = Math.max(before?.exercises?.length || 0, asksToAdd ? (d.exercises || []).length : 0);
+              return {
+                ...d,
+                exercises: normalizeExerciseCount(dedupeExercises(d.exercises || []), p.sessionLength, p.experience, p.equipment, p.injuries, overrideCeiling, { dayName: d.name, minCount }),
+              };
+            })
           : null;
         // A programDayEdit is ALWAYS a direct response to something the
         // person just asked for, so it is applied exactly as sent — no
@@ -9197,7 +9219,7 @@ export default function App() {
         // filled back in from the program they're already in — see withTips.
         const tipPool = allProgramExercises(prev.program);
         const normalizedDayEdit = hasDayEdit
-          ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
+          ? withTips(dedupeExercises(parsed.programDayEdit.day.exercises || []), tipPool)
           : null;
         const normalizedOverride = hasOverride
           ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, equipmentAskedFor(guardText) || p.equipment, [...(p.injuries || []), ...injuriesMentioned(guardText)], overrideCeiling, {
