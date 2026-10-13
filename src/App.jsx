@@ -1139,6 +1139,20 @@ export function sanitizeCoachResponse(parsed, state, message = "") {
     out.program = null;
   }
 
+  // Under 18 on the gentle plan: never more than 3 sets, and no very heavy
+  // (1-5 rep) work, whatever the Coach wrote. Found by the live Coach test:
+  // a 15-year-old asking for "1 rep maxes" got a program with 4-set lifts.
+  if (gentlePlan(state?.profile) && parsed?.standardPlan !== true) {
+    const gentle = (list) => (Array.isArray(list) ? list.map((e) => ({
+      ...e,
+      sets: Math.min(3, Number(e.sets) || 3),
+      reps: /^\s*[1-5]\s*(-\s*[1-5])?\s*$/.test(String(e.reps)) ? "6-8" : e.reps,
+    })) : list);
+    if (Array.isArray(out.todayOverride)) out.todayOverride = gentle(out.todayOverride);
+    if (out.programDayEdit?.day?.exercises) out.programDayEdit = { ...out.programDayEdit, day: { ...out.programDayEdit.day, exercises: gentle(out.programDayEdit.day.exercises) } };
+    if (Array.isArray(out.program?.days)) out.program = { ...out.program, days: out.program.days.map((d) => ({ ...d, exercises: gentle(d.exercises) })) };
+  }
+
   // They asked for one kind of equipment: take out anything that needs
   // something else, even if the Coach kept it, and say so. Never empties a
   // day; the one-time version is topped back up from that equipment's list.
@@ -1673,6 +1687,8 @@ export function daysAskedFor(text) {
 // today" came back holding Lat Pulldown, Seated Cable Row and Barbell Row.
 export function equipmentAskedFor(text) {
   const t = String(text || "");
+  if (/\bsolo (con )?peso corporal\b|\bsin equipo\b/i.test(t)) return "bodyweight";
+  if (/\bsolo (con )?mancuernas\b|\bmancuernas solamente\b|\bsolamente mancuernas\b/i.test(t)) return "dumbbell";
   if (/\b(only|just|all)\s+(bodyweight|body weight|calisthenics)\b|\b(bodyweight|body weight|calisthenics)\s+only\b|\bno equipment\b|\bwithout (any )?equipment\b/i.test(t)) return "bodyweight";
   if (/\b(only|just|all)\s+(dumb ?bells?|dbs?)\b|\b(dumb ?bells?|dbs?)\s+only\b|\b(day|days|workout|session|everything|all of it|whole thing)\s+(\([^)]*\)\s+)?(day\s+)?(to|into|with)\s+(only\s+|just\s+)?(dumb ?bells?|dbs?)\b|\bonly (have|got) (dumb ?bells?|dbs?)\b|\b(dumb ?bells?|db) (version|workout|session)\b/i.test(t)) return "dumbbell";
   return null;
@@ -6109,6 +6125,8 @@ const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their
 - "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
 - If that open workout has sets already logged, be careful: sets they've done are kept either way, but rewriting the whole day mid-session is disruptive and almost never wanted. Prefer "todayOverride", touch as few exercises as possible, and if what they asked for would replace the entire day, say what that does to their current session and ask first.
 - "Next scheduled" is what "today's workout" / "my next session" means when they don't name a day. A one-time change can go on ANY day, though: name it with "todayOverrideDayIndex". If they name a day ("my push day", "push shoulder/volume"), use THAT day's index even when it isn't next.
+- One message that changes TWO OR MORE days (e.g. "swap curls on pull and add calf raises to legs") needs "program" with every day — "programDayEdit" can only carry one day, so the other change would silently not happen.
+- Making the program "harder" within the same session length: progress intensity (heavier rep ranges on compounds, harder exercise variations, shorter rest) rather than piling on sets that won't fit their minutes — added sets past EXERCISE_CEILING just get cut back out.
 - "One-time change already set" tells you whether one exists and which day it's on. There is only ever one: setting a new "todayOverride" REPLACES it. Never tell them nothing has been applied when that line shows one, and never claim a change is on a day other than the one that line names. If what's set is on the wrong day, say which day it's actually on, then put it on the right one.`;
 
 // The program as the Coach needs to READ it. Every exercise's 4 form tips are
@@ -6212,6 +6230,15 @@ export function withUndoSnapshot(prev, next) {
 // ("undo that and add curls", "go back to my original program") still goes
 // to the Coach.
 export const COACH_MESSAGE_MAX_CHARS = 1500;
+
+export function guardTextFor(message, chat) {
+  const text = String(message || "").trim();
+  if (text.split(/\s+/).length > 6) return text;
+  const last = [...(chat || [])].reverse();
+  const askedBack = last[0]?.role === "assistant" && /\?/.test(last[0]?.text || "");
+  const previous = last.find((m) => m.role === "user");
+  return askedBack && previous ? `${previous.text} ${text}` : text;
+}
 
 export function isPlainUndoRequest(text) {
   const t = String(text || "").toLowerCase().replace(/[.!?,]+/g, " ").replace(/\s+/g, " ").trim();
@@ -8945,6 +8972,12 @@ export default function App() {
     const usage = stateRef.current.coachUsage;
     const usedToday = usage && usage.date === today ? usage.count : 0;
     const baseList = trimCoachChat(stateRef.current.coachChat && stateRef.current.coachChat.length ? stateRef.current.coachChat : DEFAULT_COACH_MESSAGES);
+    // What the app's own checks (equipment, injuries, "shorter") read. A short
+    // answer to the Coach's question ("the volume one") carries the request
+    // it answers. Found by the live Coach test: "make my push day all
+    // dumbbells for today" -> "which one?" -> "the volume one" lost the
+    // dumbbells-only, and Overhead Press stayed in.
+    const guardText = guardTextFor(trimmed, baseList);
 
     // Real ask: remove the daily message cap for actually-paying accounts —
     // trial accounts still get it (it's meant to bound free-trial cost),
@@ -9005,7 +9038,7 @@ export default function App() {
       );
       console.log("Coach response received:", JSON.stringify(rawParsed));
       // Everything below reads the cleaned reply — see sanitizeCoachResponse.
-      const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current, trimmed);
+      const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current, guardText);
       if (rejected.length > 0) {
         logError("Coach reply had parts the app couldn't use", {
           stack: JSON.stringify(rawParsed).slice(0, 4000),
@@ -9167,10 +9200,10 @@ export default function App() {
           ? withTips(parsed.programDayEdit.day.exercises || [], tipPool)
           : null;
         const normalizedOverride = hasOverride
-          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, equipmentAskedFor(trimmed) || p.equipment, [...(p.injuries || []), ...injuriesMentioned(trimmed)], overrideCeiling, {
+          ? normalizeExerciseCount(withTips(parsed.todayOverride, tipPool), p.sessionLength, p.experience, equipmentAskedFor(guardText) || p.equipment, [...(p.injuries || []), ...injuriesMentioned(guardText)], overrideCeiling, {
               dayName: overrideTargetDay?.name,
               minCount: overrideTargetDay?.exercises?.length || 0,
-              padTo: asksForShorter(trimmed) ? 0 : overrideTargetDay?.exercises?.length || 0,
+              padTo: asksForShorter(guardText) ? 0 : overrideTargetDay?.exercises?.length || 0,
             })
           : null;
         // Applied only when the day resolved; otherwise ...prev keeps whatever

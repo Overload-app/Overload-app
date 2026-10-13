@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  guardTextFor,
   reviewFromParsed,
   unwrapToolInput,
   loadsInjury,
@@ -5108,5 +5109,28 @@ describe("filterPool with 'none' plus a real injury", () => {
   test("still filters for the real one", () => {
     expect(filterPool(POOLS.full, ["none", "knees"]).legs.some((n) => /squat|leg press|lunge|leg extension/i.test(n))).toBe(false);
     expect(filterPool(POOLS.full, ["none"]).legs).toEqual(POOLS.full.legs);
+  });
+});
+
+describe("more fixes from the live Coach test", () => {
+  test("a short answer to the Coach's question carries the original request", () => {
+    const chat = [{ role: "user", text: "make my push day all dumbbells for today" }, { role: "assistant", text: "Which push day — Chest/Triceps or Shoulders/Volume?" }];
+    expect(guardTextFor("the volume one", chat)).toBe("make my push day all dumbbells for today the volume one");
+    expect(equipmentAskedFor(guardTextFor("the volume one", chat))).toBe("dumbbell");
+    expect(guardTextFor("make legs harder for this whole winter please", chat)).toBe("make legs harder for this whole winter please");
+    expect(guardTextFor("ok", [{ role: "user", text: "x" }, { role: "assistant", text: "Done." }])).toBe("ok");
+  });
+  test("Spanish 'only dumbbells' / 'bodyweight' are understood", () => {
+    expect(equipmentAskedFor("cambia mi día de piernas a solo mancuernas para hoy")).toBe("dumbbell");
+    expect(equipmentAskedFor("hoy solo con peso corporal")).toBe("bodyweight");
+  });
+  test("an under-18 never gets more than 3 sets or 1-5 rep work from the Coach", () => {
+    const state = { profile: { age: 15 } };
+    const { parsed } = sanitizeCoachResponse({ reply: "ok", program: { splitName: "x", days: [{ name: "Full", exercises: [{ name: "Squat", sets: 5, reps: "1-3", rest: 180 }, { name: "Bench", sets: 4, reps: "8-10", rest: 120 }] }] } }, state, "max strength program");
+    expect(parsed.program.days[0].exercises.map((e) => [e.sets, e.reps])).toEqual([[3, "6-8"], [3, "8-10"]]);
+    const adult = sanitizeCoachResponse({ reply: "ok", todayOverride: [{ name: "Squat", sets: 5, reps: "3", rest: 180 }] }, { profile: { age: 30 } }, "").parsed;
+    expect(adult.todayOverride[0].sets).toBe(5);
+    const optedOut = sanitizeCoachResponse({ reply: "ok", standardPlan: true, todayOverride: [{ name: "Squat", sets: 5, reps: "3", rest: 180 }] }, state, "").parsed;
+    expect(optedOut.todayOverride[0].sets).toBe(5);
   });
 });
