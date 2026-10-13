@@ -1706,7 +1706,11 @@ export function loadsInjury(name, injuries) {
 }
 
 export function filterPool(pool, injuries) {
-  if (!injuries || injuries.length === 0 || injuries.includes("none")) return pool;
+  // "none" alongside a real injury (a profile with no injuries, plus a knee
+  // that hurts today) used to switch filtering off entirely — found by the
+  // live Coach test, where Barbell Squat was added back to a sore-knee day.
+  injuries = (injuries || []).filter((i) => i && i !== "none");
+  if (injuries.length === 0) return pool;
   const terms = injuries.flatMap((i) => INJURY_EXCLUDES[i] || []).map((t) => t.toLowerCase());
   const out = {};
   Object.keys(pool).forEach((group) => {

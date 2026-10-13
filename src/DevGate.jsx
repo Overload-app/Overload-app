@@ -17,6 +17,25 @@ export const DEV_GATE_ENABLED = true;
 export const TESTER_PASSWORD_HASH = "d105c31c847ee5f1c7e419134babbdbe2673ea09eb4823f1ff806b35d144473f";
 
 const UNLOCK_KEY = "overload_tester_unlocked";
+const DEVICE_KEY = "overload_device_id";
+
+// Real ask: 15 testers from Instagram, each with their own password that only
+// works on the device(s) they first use it on. Names can be changed here; the
+// passwords are checked (and locked to a device) by api/tester-unlock.js.
+export const TESTERS = Array.from({ length: 15 }, (_, i) => ({ id: i + 1, label: `Tester ${i + 1}` }));
+
+function deviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_KEY);
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      localStorage.setItem(DEVICE_KEY, id);
+    }
+    return id;
+  } catch (e) {
+    return `nostore-${Date.now()}`;
+  }
+}
 
 export async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(text);
@@ -31,6 +50,7 @@ function readUnlocked() {
 export function DevGate({ children, enabled = DEV_GATE_ENABLED, passwordHash = TESTER_PASSWORD_HASH }) {
   const [unlocked, setUnlocked] = useState(() => !enabled || readUnlocked());
   const [value, setValue] = useState("");
+  const [tester, setTester] = useState("");
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
 
@@ -42,15 +62,29 @@ export function DevGate({ children, enabled = DEV_GATE_ENABLED, passwordHash = T
     setChecking(true);
     setError("");
     // Trimmed because a phone keyboard can tack on a trailing space; case is
-    // left alone.
+    // left alone. The owner's own password still works on its own.
+    const unlock = () => { try { localStorage.setItem(UNLOCK_KEY, "1"); } catch (err) {} setUnlocked(true); };
     const hash = await sha256Hex(value.trim());
-    setChecking(false);
-    if (hash === passwordHash) {
-      try { localStorage.setItem(UNLOCK_KEY, "1"); } catch (err) {}
-      setUnlocked(true);
-    } else {
-      setError("That's not the right password.");
+    if (hash === passwordHash) { setChecking(false); unlock(); return; }
+    if (!tester) {
+      setChecking(false);
+      setError("Pick which tester you are first.");
+      return;
+    }
+    try {
+      const res = await fetch("/api/tester-unlock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tester: Number(tester), password: value.trim(), deviceId: deviceId() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setChecking(false);
+      if (res.ok && data.ok) { unlock(); return; }
+      setError(data.error || "That's not the right password.");
       setValue("");
+    } catch (err) {
+      setChecking(false);
+      setError("Couldn't check that right now — check your connection and try again.");
     }
   }
 
@@ -65,8 +99,20 @@ export function DevGate({ children, enabled = DEV_GATE_ENABLED, passwordHash = T
           This site is under development and will be available soon.
         </p>
         <form onSubmit={submit} style={{ textAlign: "left" }}>
+          <label htmlFor="tester-who" style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#0D0E15", marginBottom: 6 }}>
+            Testers: who are you?
+          </label>
+          <select
+            id="tester-who"
+            value={tester}
+            onChange={(e) => { setTester(e.target.value); setError(""); }}
+            style={{ width: "100%", padding: "13px 14px", fontSize: 16, borderRadius: 12, border: "2px solid #DADFE0", boxSizing: "border-box", background: "#fff", marginBottom: 14, color: tester ? "#0D0E15" : "#5B6470" }}
+          >
+            <option value="">Choose your tester number</option>
+            {TESTERS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
           <label htmlFor="tester-password" style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#0D0E15", marginBottom: 6 }}>
-            If you're a tester, enter the password
+            Your tester password
           </label>
           <input
             id="tester-password"

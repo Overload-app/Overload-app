@@ -9,3 +9,6 @@ dev-dist
 
 # Coach eval reports (may contain real AI replies)
 evals/results/
+
+# Tester passwords (private — never commit)
+tester-passwords.txt

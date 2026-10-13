@@ -5103,3 +5103,10 @@ describe("fixes from the live AI-features test", () => {
     expect(reviewFromParsed({ overview: "Good.", advice: ["a", 3, null] }).advice).toEqual(["a", "3"]);
   });
 });
+
+describe("filterPool with 'none' plus a real injury", () => {
+  test("still filters for the real one", () => {
+    expect(filterPool(POOLS.full, ["none", "knees"]).legs.some((n) => /squat|leg press|lunge|leg extension/i.test(n))).toBe(false);
+    expect(filterPool(POOLS.full, ["none"]).legs).toEqual(POOLS.full.legs);
+  });
+});

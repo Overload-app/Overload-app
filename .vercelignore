@@ -4,3 +4,6 @@
 # project over it and broke a deploy outright). They are only ever run locally
 # by vitest and have no business shipping.
 api/*.test.js
+
+# Private tester password list — never upload
+tester-passwords.txt

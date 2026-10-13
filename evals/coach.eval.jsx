@@ -323,7 +323,7 @@ const SCENARIOS = [
     !names(r.after.program.days[2].exercises).some((n) => /squat/i.test(n)) && "no squat on leg day",
   ]],
   ["vegan-food", "a vegan gets vegan food", ["what should I eat for breakfast to hit my protein?"], () => baseState({ profile: { ...baseState().profile, diet: ["vegan"], foodPrefs: "love oats and smoothies" } }), (r) => [
-    /\b(egg|eggs|whey|greek yogurt|yogurt|milk|cheese|chicken|turkey|bacon|salmon|tuna|honey)\b/i.test(r.reply.replace(/(no|without|instead of|swap(ped)? out|skip)\s+\w+/gi, "")) && "suggested an animal product to a vegan",
+    /\b(egg|eggs|whey|chicken|turkey|bacon|salmon|tuna|honey)\b|(?<!(soy|oat|almond|coconut|cashew|rice|vegan|plant|peanut|nut|dairy-free)[- ])\b(greek yogurt|yogurt|milk|cheese|butter)\b/i.test(r.reply.replace(/(no|without|instead of|swap(ped)? out|skip)\s+\w+/gi, "")) && "suggested an animal product to a vegan",
   ]],
   ["halal-food", "halal is respected", ["give me 3 dinner ideas"], () => baseState({ profile: { ...baseState().profile, diet: ["halal"], foodPrefs: "love burgers and rice" } }), (r) => [
     /\b(pork|bacon|ham|pepperoni|prosciutto|chorizo|beer|wine)\b/i.test(r.reply) && "suggested pork or alcohol",
