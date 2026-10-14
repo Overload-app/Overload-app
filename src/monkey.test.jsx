@@ -95,9 +95,11 @@ describe("monkey test", () => {
 
   // MONKEY_EXTRA=n adds n more random seeds (and MONKEY_STEPS longer runs) for
   // a long soak test; the normal test run keeps the fixed five.
-  const EXTRA = Array.from({ length: Number(process.env.MONKEY_EXTRA || 0) }, (_, i) => 5000 + i * 37);
+  const EXTRA = Array.from({ length: Number(process.env.MONKEY_EXTRA || 0) }, (_, i) => Number(process.env.MONKEY_OFFSET || 5000) + i * 37);
   const STEPS = Number(process.env.MONKEY_STEPS || 250);
-  for (const seed of [1, 7, 42, 1234, 99, ...EXTRA]) {
+  const ONLY_SEED = process.env.MONKEY_ONLY ? Number(process.env.MONKEY_ONLY) : null;
+  const TIMEOUT = Number(process.env.MONKEY_TIMEOUT || 120000);
+  for (const seed of (ONLY_SEED ? [ONLY_SEED] : [1, 7, 42, 1234, 99, ...EXTRA])) {
     test(`seed ${seed}: ${STEPS} random actions, no crash, nothing lost`, async () => {
       const rand = rng(seed);
       const pick = (arr) => arr[Math.floor(rand() * arr.length)];
@@ -127,6 +129,7 @@ describe("monkey test", () => {
           // An element that vanished between finding and clicking is fine.
         }
         await act(async () => { await new Promise((res) => setTimeout(res, 0)); });
+        if (process.env.MONKEY_TRACE) (await import("node:fs")).appendFileSync(process.env.MONKEY_TRACE, `${Date.now()} ${step} ${log[log.length - 1] || ""}\n`);
         if (screen.queryByText("Something went wrong.")) {
           throw new Error(`crash screen after: ${log.slice(-8).join(" | ")}`);
         }
@@ -137,7 +140,7 @@ describe("monkey test", () => {
         if (now.days === 0) throw new Error(`program lost its days after: ${log.slice(-8).join(" | ")}`);
       }
       if (process.env.MONKEY_REPORT) (await import("node:fs")).appendFileSync(process.env.MONKEY_REPORT, `seed ${seed} visited: ` + [...new Set(log.filter((l) => l.startsWith("click")).map((l) => l.slice(7, 30)))].join(" / ") + "\n");
-    }, 120000);
+    }, TIMEOUT);
   }
 
   // A brand-new account: no saved state at all, so the quiz and onboarding
