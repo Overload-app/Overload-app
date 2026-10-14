@@ -83,7 +83,7 @@ function coachReply() {
 // Real report: "change my pull day to only dumbbells for today" came back with
 // fewer exercises than their real pull day — "I never told it to shorten this
 // one." The AI's full dumbbell version was trimmed against the session length.
-const DUMBBELL_PULL = ["Dumbbell Row", "Chest-Supported Row", "Dumbbell Pullover", "Renegade Row", "Dumbbell Curl", "Dumbbell Hammer Curl"];
+const DUMBBELL_PULL = ["Dumbbell Row", "Dumbbell Shrug", "Dumbbell Pullover", "Renegade Row", "Dumbbell Curl", "Dumbbell Hammer Curl"];
 function dumbbellPullReply() {
   return {
     ok: true,
@@ -221,7 +221,7 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
     await user.click(screen.getByRole("button", { name: /^Coach$/ }));
     await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "make my program harder{enter}");
-    expect(await screen.findByText(/Made everything harder\. \(To fit your ~30-minute sessions I left out .*Dips/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(await screen.findByText(/Made everything harder\..*\(To fit your ~30-minute sessions I left out /, {}, { timeout: 4000 })).toBeInTheDocument();
   }, 20000);
 
   test("a full-program change never cuts what they just asked to add, or days nobody mentioned", async () => {

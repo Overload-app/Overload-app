@@ -1174,6 +1174,28 @@ export function sanitizeCoachResponse(parsed, state, message = "") {
     }
   }
 
+  // Every exercise the Coach brings in should have a demo video (see
+  // ensureVideoExercises). Runs after the equipment check above.
+  {
+    const programNames = (state?.program?.days || []).flatMap((d) => (d.exercises || []).map((e) => e.name));
+    const hurting = injuriesMentioned(message);
+    const injuries = [...(state?.profile?.injuries || []), ...hurting];
+    const swapped = [];
+    const fix = (list) => {
+      if (!Array.isArray(list)) return list;
+      const equipment = equipmentAskedFor(message) || impliedEquipment(list, state?.profile?.equipment || "full");
+      const r = ensureVideoExercises(list, { message, gifCache: state?.gifCache || {}, equipment, injuries, keep: programNames });
+      swapped.push(...r.swapped);
+      return r.exercises;
+    };
+    if (Array.isArray(out.todayOverride)) out.todayOverride = fix(out.todayOverride);
+    if (out.programDayEdit?.day?.exercises) out.programDayEdit = { ...out.programDayEdit, day: { ...out.programDayEdit.day, exercises: fix(out.programDayEdit.day.exercises) } };
+    if (Array.isArray(out.program?.days)) out.program = { ...out.program, days: out.program.days.map((d) => ({ ...d, exercises: fix(d.exercises) })) };
+    if (swapped.length > 0) {
+      out.reply = `${out.reply}${out.reply ? " " : ""}(I used ${swapped.map(([, to]) => to).join(", ")} instead of ${swapped.map(([from]) => from).join(", ")} — ${swapped.length === 1 ? "it has" : "they have"} no demo video.)`;
+    }
+  }
+
   // Something just started hurting: take out what loads it, even if the
   // Coach kept it, and say so.
   const hurting = injuriesMentioned(message);
@@ -1606,7 +1628,10 @@ export const POOLS = {
   },
   dumbbell: {
     chest: ["Dumbbell Bench Press", "Dumbbell Incline Press", "Dumbbell Fly", "Dumbbell Floor Press"],
-    back: ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Chest-Supported Row"],
+    // "Chest-Supported Row" used to be here. Real report: it had no demo
+    // video, and it's the same movement as Dumbbell Row — so a dumbbell pull
+    // day got the same exercise twice, one of them unwatchable.
+    back: ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Dumbbell Shrug"],
     shoulders: ["Dumbbell Shoulder Press", "Dumbbell Lateral Raise", "Dumbbell Rear Delt Fly", "Arnold Press"],
     legs: ["Dumbbell Goblet Squat", "Dumbbell Romanian Deadlift", "Dumbbell Walking Lunge", "Bulgarian Split Squat", "Dumbbell Step-Up", "Dumbbell Calf Raise"],
     biceps: ["Dumbbell Curl", "Dumbbell Hammer Curl", "Incline Dumbbell Curl"],
@@ -1829,6 +1854,45 @@ export function isSameCoreExercise(a, b) {
 // Applies to every alternatives source (baked-in, live AI lookup, offline
 // pool fallback) alike — none of them knew about the rest of the day on
 // their own.
+// Every exercise the Coach adds should have a demo video. Real report: a
+// dumbbell day got "Chest-Supported Row", which had no video and turned out to
+// be the same movement as the Dumbbell Row already in the day. An exercise
+// the Coach brings in is kept only if it's on the video-confirmed list (every
+// name in POOLS), has a video already found for this account, is already in
+// their program, or they asked for it by name. Anything else is swapped for a
+// confirmed exercise for the same muscle, with the right equipment, that
+// isn't already in the day.
+const VIDEO_VOCABULARY = new Set(Object.values(POOLS).flatMap((pool) => Object.values(pool).flat()).map((n) => n.toLowerCase()));
+export function ensureVideoExercises(exercises, { message = "", gifCache = {}, equipment = "full", injuries = [], keep = [] } = {}) {
+  if (!Array.isArray(exercises)) return { exercises, swapped: [] };
+  const said = String(message || "").toLowerCase();
+  const kept = new Set((keep || []).map((n) => String(n).toLowerCase()));
+  const pool = filterPool(POOLS[equipment] || POOLS.full, injuries);
+  const swapped = [];
+  const out = exercises.map((e) => e);
+  out.forEach((e, i) => {
+    const name = String(e?.name || "");
+    const key = normalizeGifKey(name);
+    const cached = gifCache?.[key];
+    if (typeof cached === "string" && cached) return;
+    if (said && said.includes(key)) return;
+    if (kept.has(key) && cached !== null) return;
+    if (VIDEO_VOCABULARY.has(key) && cached !== null) return;
+    const group = EXERCISE_TO_GROUP[name] || inferMuscleGroup(name);
+    // Prefer a different movement from what the day already has (another
+    // row next to Dumbbell Row is the very thing reported).
+    const movement = (n) => String(n || "").toLowerCase().trim().split(/\s+/).pop();
+    const dayMoves = new Set(out.filter((_, j) => j !== i).map((o) => movement(o?.name)));
+    const candidates = (pool[group] || []).filter((cand) => gifCache?.[normalizeGifKey(cand)] !== null
+      && !out.some((other, j) => j !== i && isSameCoreExercise(other?.name, cand)));
+    const choice = candidates.find((c) => !dayMoves.has(movement(c))) || candidates[0];
+    if (!choice) return;
+    swapped.push([name, choice]);
+    out[i] = { ...e, name: choice, tips: tipsForExercise(choice), alternatives: [] };
+  });
+  return { exercises: out, swapped };
+}
+
 export function excludeAlreadyInDay(alternatives, daySets, swapIdx) {
   const usedNames = daySets.filter((_, i) => i !== swapIdx).map((e) => e.name || "");
   return alternatives.filter((name) => !usedNames.some((used) => isSameCoreExercise(name, used)));
@@ -4545,9 +4609,14 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     const current = sets[swapPickerIdx];
     // Both filters, every time, whichever source the list came from —
     // baked-in, offline pool, or the live AI lookup.
-    const usable = (list) => excludeKnownNoVideo(excludeAlreadyInDay(list, sets, swapPickerIdx), gifCache);
-    if (Array.isArray(current.alternatives) && current.alternatives.length > 0) {
-      setPickerAlts(usable(current.alternatives));
+    // Also only what this workout's equipment allows: a day switched to all
+    // dumbbells kept offering the machine alternatives saved with the
+    // original exercises (real report).
+    const usable = (list) => excludeKnownNoVideo(excludeAlreadyInDay(list, sets, swapPickerIdx), gifCache)
+      .filter((n) => !equipment || equipment === "full" || usesOnly(n, equipment));
+    const baked = Array.isArray(current.alternatives) ? usable(current.alternatives) : [];
+    if (baked.length > 0) {
+      setPickerAlts(baked);
       setPickerUpgrading(false);
       return;
     }
@@ -4828,7 +4897,12 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         const reps = Number(justLogged.reps);
         if (logs && weight > 0 && reps > 0) {
           const priorPR = exercisePR(logs, copy[exIdx].name);
-          if (priorPR && (weight > priorPR.weight || (weight === priorPR.weight && reps > priorPR.reps))) {
+          // Also has to beat the sets already done in THIS workout. Real
+          // report: 40x10 then 40x7 both showed "new PR" — the 7 was beaten
+          // by the 10 a minute earlier.
+          const earlierToday = bestDoneSet(copy[exIdx].logged.filter((l, i) => i !== setIdx));
+          const beats = (b) => !b || weight > b.weight || (weight === b.weight && reps > b.reps);
+          if (priorPR && beats(priorPR) && beats(earlierToday)) {
             setPrCelebration({ name: copy[exIdx].name, weight, reps });
           }
         }
@@ -4859,7 +4933,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     if (withWeight.length === 0) return null;
     // Show the heaviest set from last time — that's the real benchmark to
     // beat for progressive overload, not just whichever set was logged last.
-    const best = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) ? l : max), withWeight[0]);
+    const best = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) || (Number(l.weight) === Number(max.weight) && Number(l.reps) > Number(max.reps)) ? l : max), withWeight[0]);
     return `${best.weight}lb x ${best.reps}`;
   }
 
@@ -5208,7 +5282,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         );
       })()}
 
-      {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} onClose={() => setDetailFor(null)} />}
+      {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} todayLogged={(sets.find((e) => e.name === detailFor) || {}).logged} onClose={() => setDetailFor(null)} />}
 
       {exerciseInfoIdx !== null && sets[exerciseInfoIdx] && (() => {
         const ex = sets[exerciseInfoIdx];
@@ -5310,13 +5384,18 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
 // long scrollable session-by-session log like most lifting-tracker apps'
 // exercise history — the goal here is "what do I need to beat today," at a
 // glance, mid-set, not a full log to read.
-function ExerciseDetailSheet({ name, logs, onClose }) {
+function ExerciseDetailSheet({ name, logs, todayLogged, onClose }) {
   const pr = exercisePR(logs, name);
   const lastSession = exerciseLastSession(logs, name);
   // Every session, oldest -> newest, drawn as the same line graph as the
   // Progress tab's lift chart. Real ask: "make the history and PR in the
   // workout a graph, same as the weight one" (it was six small bars).
-  const trend = exerciseHistory(logs, name);
+  // Today's sets so far count too — real report: "that is not a graph like I
+  // said." With one past session there was nothing to draw, so the screen
+  // showed no graph at all. Now it always draws, and today's best checked-off
+  // set is the newest point.
+  const today = bestDoneSet(todayLogged);
+  const trend = [...exerciseHistory(logs, name), ...(today ? [{ date: todayISO(), dateLabel: "Today", weight: today.weight, reps: today.reps }] : [])];
   const first = trend[0];
   const latest = trend[trend.length - 1];
   const delta = first && latest ? latest.weight - first.weight : 0;
@@ -5360,7 +5439,7 @@ function ExerciseDetailSheet({ name, logs, onClose }) {
               </>
             )}
 
-            {trend.length > 1 && (
+            {trend.length >= 1 && (
               <>
                 <TickRule label="Top set over time" />
                 <Card>
@@ -5375,12 +5454,16 @@ function ExerciseDetailSheet({ name, logs, onClose }) {
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark }}>
-                    <span>First: {first.weight}lb × {first.reps}</span>
-                    <span style={{ color: delta > 0 ? T.good : delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
-                      {delta > 0 ? "+" : ""}{delta}lb since first log
-                    </span>
-                  </div>
+                  {trend.length > 1 ? (
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark }}>
+                      <span>First: {first.weight}lb × {first.reps}</span>
+                      <span style={{ color: delta > 0 ? T.good : delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
+                        {delta > 0 ? "+" : ""}{delta}lb since first log
+                      </span>
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 8, fontSize: 12, color: T.steelDark }}>Check off a set today and the line starts building.</div>
+                  )}
                 </Card>
               </>
             )}
@@ -5757,7 +5840,7 @@ THREE KINDS OF CHANGE — use exactly one of "programDayEdit", "program", "today
 3. One-time change for exactly ONE workout ("today", "this session", a reason that only affects one day) -> "todayOverride" (that session's exercises) AND "todayOverrideDayIndex" (which day — any day, not just the next). Used once, then removed.
 Anything lasting longer than one session ("this week", "this winter", "until my knee heals", "for my cut") is case 1 or 2, never case 3. They can always undo it.
 
-A ONE-TIME VERSION OF A DAY is that day, changed only as asked: keep the same number of exercises and the same sets/reps unless THIS message asks for shorter/longer; stay on that day's muscles (pull = back + biceps, rear delts count; push = chest, shoulders, triceps; legs = legs) — never add another day's exercise as filler. Equipment limits always have options (dumbbell back: rows, chest-supported rows, pullovers, renegade rows, reverse flyes, shrugs). E.g. "my knees hurt, adjust leg day for today" -> a knee-friendly version of leg day, same length, swapping only what loads the knee.
+A ONE-TIME VERSION OF A DAY is that day, changed only as asked: keep the same number of exercises and the same sets/reps unless THIS message asks for shorter/longer; stay on that day's muscles (pull = back + biceps, rear delts count; push = chest, shoulders, triceps; legs = legs) — never add another day's exercise as filler. Equipment limits always have options (dumbbell back: dumbbell rows, pullovers, renegade rows, reverse flyes, shrugs — only ONE kind of row). E.g. "my knees hurt, adjust leg day for today" -> a knee-friendly version of leg day, same length, swapping only what loads the knee.
 
 ADDING AND REMOVING: "add X" is a direct request — add it to the day it fits best (abs: whichever day has room; a muscle: the day built around it) in the same response. Never remove an exercise they didn't ask to remove to make room; if it pushes past their time budget, set "overrideCeiling": true and mention the extra time in a short clause. When removing or banning something, check the returned day really no longer contains it; if honoring it would leave too few exercises, say so instead of quietly leaving it in.
 
@@ -5826,7 +5909,7 @@ There are THREE different kinds of training requests — telling them apart matt
 A one-time version of a day is THAT day, changed only in the way they asked. Real report, all in one workout: "change my pull day to only dumbbells for today" came back with a shoulder exercise in it and fewer exercises and sets than their normal pull day, and when asked why, the Coach invented a reason ("dumbbells don't let us hit back as hard"). So:
 - Keep the same number of exercises, and the same sets and reps, as the day it replaces — unless THIS message asks for shorter, longer, or fewer. Don't shorten it on your own.
 - A constraint from an earlier request applies to that request only. "30 minutes" said about a previous workout does not carry over to a new one.
-- Stay on that day's muscles. A pull day is back and biceps (rear delts count); a push day is chest, shoulders and triceps; a leg day is legs. Never add another day's exercise as filler. Every equipment limit has real options: with only dumbbells, back is dumbbell rows, chest-supported rows, pullovers, renegade rows, reverse flyes and shrugs.
+- Stay on that day's muscles. A pull day is back and biceps (rear delts count); a push day is chest, shoulders and triceps; a leg day is legs. Never add another day's exercise as filler. Every equipment limit has real options: with only dumbbells, back is dumbbell rows, pullovers, renegade rows, reverse flyes and shrugs (one row variation per day — a chest-supported row is the same movement as a dumbbell row).
 - If they ask why something is in their workout and it doesn't belong there, say so plainly and offer to swap it. Never invent a training reason to defend a mistake — they can tell, and that is exactly how an app gets bad reviews.
 
 Real report of why "todayOverrideDayIndex" is required: asked to make Push (Shoulders/Chest Volume) all-dumbbell for one session while Pull was next in the rotation, the change kept landing on Pull — and the reply said "Push" five times while the workout sat on Pull. Name the day by index, every time, and only say in "reply" the day you actually put in that field.
@@ -7190,9 +7273,15 @@ export function exerciseHistory(logs, name) {
     .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
     .map((w) => {
       const ex = findLoggedExercise(w, name);
-      const withWeight = ex.logged.filter((l) => l.weight && l.reps);
+      // Only sets actually checked off (numbers get pre-filled from last
+      // time, so a typed-in but undone set proves nothing). Logs from before
+      // the checkmark existed have no "done" at all, so those count as is.
+      const counted = ex.logged.some((l) => "done" in l) ? ex.logged.filter((l) => l.done) : ex.logged;
+      const withWeight = counted.filter((l) => l.weight && l.reps);
       if (withWeight.length === 0) return null;
-      const top = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) ? l : max), withWeight[0]);
+      // Heaviest set; on a tie, the one with more reps. Real report: 30x10,
+      // 30x10, 30x10, 30x12 showed the record as 30lb x 10.
+      const top = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) || (Number(l.weight) === Number(max.weight) && Number(l.reps) > Number(max.reps)) ? l : max), withWeight[0]);
       return { date: w.date, dateLabel: w.date.slice(5), weight: Number(top.weight), reps: Number(top.reps) };
     })
     .filter(Boolean)
@@ -7219,6 +7308,14 @@ export function exerciseLastSession(logs, name) {
 
 // The heaviest set ever logged for this exercise — ties broken by more reps
 // at that weight, since that's still the harder set to have actually beaten.
+// The heaviest done set in a list (more reps breaks a tie), or null.
+export function bestDoneSet(logged) {
+  return (logged || [])
+    .filter((l) => l.done && Number(l.weight) > 0 && Number(l.reps) > 0)
+    .map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) }))
+    .reduce((best, l) => (!best || l.weight > best.weight || (l.weight === best.weight && l.reps > best.reps) ? l : best), null);
+}
+
 export function exercisePR(logs, name) {
   const history = exerciseHistory(logs, name);
   if (history.length === 0) return null;
@@ -10170,7 +10267,13 @@ export default function App() {
           onSaveExit={(sets, rest) => saveWorkoutProgress(session.dayIdx, sets, rest)}
           onAutoSave={(sets, rest) => autoSaveWorkoutProgress(session.dayIdx, sets, rest)}
           onGoToCoach={goToCoachFromWorkout}
-          equipment={state.profile.equipment}
+          // What THIS workout is done with, not just the profile. Real report:
+          // a day the Coach switched to all dumbbells offered only machine
+          // swaps, because a full-gym profile was all this looked at.
+          equipment={impliedEquipment(
+            overrideAppliesTo(state, session.dayIdx) ? state.todayOverride : state.program.days[session.dayIdx].exercises,
+            state.profile.equipment,
+          )}
           injuries={state.profile.injuries}
           onSwapExercise={(exIdx, newName, scope, skipVideoLookup) => swapExercise(session.dayIdx, exIdx, newName, scope, skipVideoLookup)}
           onCacheAlternatives={(exIdx, alts) => cacheAlternatives(session.dayIdx, exIdx, alts)}

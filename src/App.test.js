@@ -65,6 +65,8 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  ensureVideoExercises,
+  bestDoneSet,
   isStaleWorkout,
   whenLabel,
   guardTextFor,
@@ -1754,7 +1756,7 @@ describe("one-time workouts keep the day's length and stay on its muscles", () =
   });
 
   test("when nothing fitting is left, it adds nothing rather than something wrong", () => {
-    const allDumbbellBack = ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Chest-Supported Row"];
+    const allDumbbellBack = ["Dumbbell Row", "Renegade Row", "Dumbbell Pullover", "Dumbbell Shrug"];
     const padded = padToMinimum(allDumbbellBack.map((n) => ex(n)), 9, "dumbbell", ["none"], "Back");
     expect(padded.length).toBe(4);
   });
@@ -1808,9 +1810,9 @@ describe("sanitizeCoachResponse — nothing broken reaches the saved program", (
   });
 
   test("a good program comes through cleaned, not rejected", () => {
-    const r = sanitizeCoachResponse({ program: { days: [{ name: " A ", exercises: [ex("Row", { sets: "4" })] }] } }, state);
+    const r = sanitizeCoachResponse({ program: { days: [{ name: " A ", exercises: [ex("Barbell Row", { sets: "4" })] }] } }, state);
     expect(r.rejected).toEqual([]);
-    expect(r.parsed.program.days[0]).toMatchObject({ name: "A", exercises: [{ name: "Row", sets: 4 }] });
+    expect(r.parsed.program.days[0]).toMatchObject({ name: "A", exercises: [{ name: "Barbell Row", sets: 4 }] });
   });
 
   test("an empty day edit and a non-list one-time change are rejected", () => {
@@ -5161,5 +5163,30 @@ describe("a workout left open for hours", () => {
     expect(whenLabel(new Date(2026, 9, 13, 18, 12).toISOString(), now)).toMatch(/^yesterday at /);
     expect(whenLabel(new Date(2026, 9, 10, 18, 12).toISOString(), now)).toMatch(/Oct 10 at /);
     expect(whenLabel("nonsense", now)).toBe("a while ago");
+  });
+});
+
+describe("every exercise the Coach adds has a video", () => {
+  const ex = (name) => ({ name, sets: 3, reps: "10", rest: 90 });
+  test("the real report: Chest-Supported Row on a dumbbell day with Dumbbell Row becomes a different back exercise", () => {
+    const { exercises, swapped } = ensureVideoExercises(["Dumbbell Row", "Chest-Supported Row", "Dumbbell Curl"].map(ex), { equipment: "dumbbell" });
+    expect(exercises.map((e) => e.name)).not.toContain("Chest-Supported Row");
+    expect(exercises.filter((e) => /row/i.test(e.name)).length).toBe(1);
+    expect(swapped[0][0]).toBe("Chest-Supported Row");
+  });
+  test("something they asked for by name stays, even without a known video", () => {
+    const { exercises } = ensureVideoExercises([ex("Chest-Supported Row")], { equipment: "dumbbell", message: "add chest-supported row to my pull day" });
+    expect(exercises[0].name).toBe("Chest-Supported Row");
+  });
+  test("a confirmed 'no video' is swapped even if it's on the list; a found video is kept", () => {
+    expect(ensureVideoExercises([ex("Dumbbell Pullover")], { equipment: "dumbbell", gifCache: { "dumbbell pullover": null } }).exercises[0].name).not.toBe("Dumbbell Pullover");
+    expect(ensureVideoExercises([ex("Seal Row")], { equipment: "full", gifCache: { "seal row": "https://x/1.gif" } }).exercises[0].name).toBe("Seal Row");
+  });
+  test("exercises already in their program aren't touched", () => {
+    expect(ensureVideoExercises([ex("Assault Bike Sprints")], { keep: ["Assault Bike Sprints"] }).exercises[0].name).toBe("Assault Bike Sprints");
+  });
+  test("bestDoneSet: heaviest checked-off set, more reps breaks a tie", () => {
+    expect(bestDoneSet([{ weight: "30", reps: "10", done: true }, { weight: "30", reps: "12", done: true }, { weight: "50", reps: "5", done: false }])).toEqual({ weight: 30, reps: 12 });
+    expect(bestDoneSet([])).toBeNull();
   });
 });

@@ -894,6 +894,29 @@ describe("<WorkoutSession /> PR celebration", () => {
     expect(screen.getByText("Back Squat · 205lb × 5")).toBeInTheDocument();
   });
 
+  test("a set already beaten earlier in the same workout isn't a PR", async () => {
+    const twoSets = { ...day, exercises: [{ ...day.exercises[0], sets: 2 }] };
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "35", reps: "8", done: true }] }] }] };
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={twoSets} isOverride={false} lastLog={null} logs={logs} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    const [w1, w2] = screen.getAllByPlaceholderText("lb");
+    const [r1, r2] = screen.getAllByPlaceholderText("reps");
+    await user.clear(w1); await user.type(w1, "40");
+    await user.clear(r1); await user.type(r1, "10");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.getByText("Back Squat · 40lb × 10")).toBeInTheDocument();
+    await user.clear(w2); await user.type(w2, "40");
+    await user.clear(r2); await user.type(r2, "7");
+    await user.click(screen.getByLabelText("Mark set 2 done and start rest timer"));
+    expect(screen.queryByText("Back Squat · 40lb × 7")).not.toBeInTheDocument();
+  });
+
   test("logging a set that does NOT beat the existing PR shows no toast", async () => {
     const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "225", reps: "5", done: true }] }] }] };
     const user = setup(logs);
@@ -2639,5 +2662,32 @@ describe("<WorkoutSession /> History & PR", () => {
     expect(screen.getByRole("img", { name: /Top set over time for Bench Press/ })).toBeInTheDocument();
     expect(screen.getByText("+20lb since first log")).toBeInTheDocument();
     expect(screen.getByText("First: 135lb × 8")).toBeInTheDocument();
+  });
+});
+
+describe("History & PR with one past session", () => {
+  test("still shows the graph, today's set joins it, and a rep tie goes to the bigger set", async () => {
+    globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} };
+    const day = { name: "Pull", exercises: [{ name: "Dumbbell Row", sets: 1, reps: "10", rest: 60, tips: ["a", "b", "c", "d"] }] };
+    const logged = [10, 10, 10, 12].map((r) => ({ weight: "30", reps: String(r), done: true }));
+    const logs = { workouts: [{ date: "2026-10-07", dayName: "Pull", exercises: [{ name: "Dumbbell Row", logged }] }] };
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={logs.workouts[0]} logs={logs} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="full" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getByText(/History & PR/));
+    expect(screen.getByText("30lb × 12", { selector: "div" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Top set over time for Dumbbell Row/ })).toBeInTheDocument();
+    expect(screen.getByText(/Check off a set today/)).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Close exercise history"));
+    const w = screen.getByPlaceholderText("lb"); const r = screen.getByPlaceholderText("reps");
+    await user.clear(w); await user.type(w, "35"); await user.clear(r); await user.type(r, "10");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    await user.click(screen.getByText(/History & PR/));
+    expect(screen.getByText("+5lb since first log")).toBeInTheDocument();
   });
 });
