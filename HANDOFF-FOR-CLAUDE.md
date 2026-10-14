@@ -27,7 +27,8 @@ You're picking up as the developer on **Overload**, my AI fitness-coach web app,
 4. For a brand-new file, give the full contents.
 5. If you need to see the current code first, ask me to paste a function by name (I'll Cmd+F it). Don't guess at code you haven't seen.
 6. If a change needs a test, include it (tests live in `src/*.test.js(x)` and `api/*.test.js`, using Vitest + Testing Library).
-7. End with: `bash ship.sh "short description"`, and anything else I have to do by hand (e.g. a Supabase SQL step).
+7. Also give me one line to add to the "What happened in the last session" list at the bottom of `HANDOFF-FOR-CLAUDE.md` (and say if the "Where things are" list needs updating), so this file stays current for the next chat.
+8. End with: `bash ship.sh "short description"`, and anything else I have to do by hand (e.g. a Supabase SQL step).
 
 `ship.sh` (in the project folder) runs all the tests, builds, saves to GitHub, deploys to Vercel (with retries) and checks the live site. If tests fail, nothing deploys, and I'll paste you the failing lines.
 
