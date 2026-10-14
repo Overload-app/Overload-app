@@ -1,5 +1,7 @@
 # Overload — handoff prompt for Claude
 
+> **Don't upload the zip or the whole `src/App.jsx` to Claude** — App.jsx is ~170,000 tokens, too big for one chat. Upload just this file; paste parts of App.jsx when Claude asks for them. The zip is your backup copy of everything.
+>
 > **How to use this:** start a new chat (ideally a claude.ai Project so these files stay attached), paste everything below the line as your first message, and attach the files listed under "Files to attach". After that, talk to Claude exactly like before: "fix X", "add Y". Claude will give you the exact changes; you paste them in and run `bash ship.sh "what changed"`.
 
 ---
@@ -97,7 +99,7 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
   - `Fuel` component, `MEAL_TEXT_SYSTEM` / `MEAL_PHOTO_SYSTEM`, `cleanAiMeal`, `mealNameFromDescription`, `photoFixMessages`.
   - Suggestions: `buildMealSuggestionSystem`, `mealSuggestionUserMessage` (clamps negatives; "light options" once over target), `mealSuggestionsFrom` + `parseLooseList`.
   - `sanitizeMeal`, `mealNumber`, `UndoBar`.
-- **Workout:** `WorkoutSession`, `RestTimer` (marks a rest "seen" when it finishes on screen), `ExerciseDetailSheet` (History & PR graph), `exerciseHistory`, `exercisePR`, `fetchExerciseGif`, `fetchSimilarExercises` (filters by injury and equipment), `GIF_CACHE_VERSION` / `withoutEquipmentGifs`.
+- **Workout:** `startWorkout` (inside `App`; a saved workout untouched for 2+ hours asks "Did you forget to finish this one?" — `isStaleWorkout`, `finishStaleWorkout` saves it dated the day it was done), `resumeTiming` (the clock stops at the last action after 2 hours away), `WorkoutSession`, `RestTimer` (marks a rest "seen" when it finishes on screen), `ExerciseDetailSheet` (History & PR graph), `exerciseHistory`, `exercisePR`, `fetchExerciseGif`, `fetchSimilarExercises` (filters by injury and equipment), `GIF_CACHE_VERSION` / `withoutEquipmentGifs`.
 - **Reviews:** `buildReviewSystem`, `summarizeReviewPeriod`, `reviewFromParsed`, `ReviewCard`.
 - **Saving and sync:**
   - `persist` (inside `App`; logs any shrink of meals, weigh-ins or workouts to `error_logs`), `saveState` (queued writes; refreshes an expired sign-in and retries), `loadState`, `fetchNewerState` (picks up another device's saves when the app returns to the front, never over unsaved local changes).
@@ -107,6 +109,8 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 - **Other:** `ProfileTab`, `NotificationSettings`, `Progress` (weigh-in validation 60–700 lb), `WorkoutHistoryEditor`, `ErrorBoundary`.
 
 ## Things I (the owner) still have to do
+
+(Steps 1–3 were done on 2026-10-14; step 4 too — the reminders file is in GitHub and a manual run succeeded.)
 
 1. **Supabase SQL Editor:** run `supabase-migration-ai-usage.sql` (turns on the server-side trial AI cap; make sure my own account has `subscribed = true` in `profiles`, or I'll hit the cap while testing).
 2. **Supabase SQL Editor:** run `supabase-migration-tester-devices.sql` (turns on the tester device lock). To free a tester's devices: `delete from public.tester_devices where tester = 3;`.
@@ -124,6 +128,8 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- A workout left open for hours now asks: finish & save it (with its real time, dated the day it was done), keep going, or discard (two taps). Real report: left open a whole day, showed 45 min, and would have been filed under the wrong day.
+- The 6pm reminders GitHub file is added and verified (manual run: Success). Owner steps 1–4 below are done except deleting the pasted API key.
 - **Live AI test marathon** (about $5 of API credit). Found and fixed:
   - Half of AI-built programs were being thrown away for the generic fallback, because the AI wrapped them in an extra key (now unwrapped everywhere).
   - Programs ignored injuries.
