@@ -99,7 +99,7 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
   - `Fuel` component, `MEAL_TEXT_SYSTEM` / `MEAL_PHOTO_SYSTEM`, `cleanAiMeal`, `mealNameFromDescription`, `photoFixMessages`.
   - Suggestions: `buildMealSuggestionSystem`, `mealSuggestionUserMessage` (clamps negatives; "light options" once over target), `mealSuggestionsFrom` + `parseLooseList`.
   - `sanitizeMeal`, `mealNumber`, `UndoBar`.
-- **Workout:** `startWorkout` (inside `App`; a saved workout untouched for 2+ hours asks "Did you forget to finish this one?" — `isStaleWorkout`, `finishStaleWorkout` saves it dated the day it was done), `resumeTiming` (the clock stops at the last action after 2 hours away), `WorkoutSession`, `RestTimer` (marks a rest "seen" when it finishes on screen), `ExerciseDetailSheet` (History & PR graph), `exerciseHistory`, `exercisePR`, `fetchExerciseGif`, `fetchSimilarExercises` (filters by injury and equipment), `GIF_CACHE_VERSION` / `withoutEquipmentGifs`.
+- **Workout:** PR toast logic is in `toggleDone` inside `WorkoutSession` (uses `exercisePR` + `bestDoneSet`); `ExerciseDetailSheet` takes `todayLogged`. `startWorkout` (inside `App`; a saved workout untouched for 2+ hours asks "Did you forget to finish this one?" — `isStaleWorkout`, `finishStaleWorkout` saves it dated the day it was done), `resumeTiming` (the clock stops at the last action after 2 hours away), `WorkoutSession`, `RestTimer` (marks a rest "seen" when it finishes on screen), `ExerciseDetailSheet` (History & PR graph), `exerciseHistory`, `exercisePR`, `fetchExerciseGif`, `fetchSimilarExercises` (filters by injury and equipment), `GIF_CACHE_VERSION` / `withoutEquipmentGifs`.
 - **Reviews:** `buildReviewSystem`, `summarizeReviewPeriod`, `reviewFromParsed`, `ReviewCard`.
 - **Saving and sync:**
   - `persist` (inside `App`; logs any shrink of meals, weigh-ins or workouts to `error_logs`), `saveState` (queued writes; refreshes an expired sign-in and retries), `loadState`, `fetchNewerState` (picks up another device's saves when the app returns to the front, never over unsaved local changes).
@@ -128,6 +128,12 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- In-workout PR toast now also has to beat sets done earlier in the same workout (40x10 then 40x7 both said "new PR"). `bestDoneSet`.
+- History & PR: the graph always shows (it needed 2+ past sessions before), today's best checked-off set is added as "Today", and a rep tie goes to the bigger set (30x10/30x12 showed PR 30x10). History only counts checked-off sets.
+- Every exercise the Coach adds must have a demo video: `ensureVideoExercises` (in `sanitizeCoachResponse`) swaps any new exercise that isn't on the video-confirmed list (`POOLS`), hasn't got a found video in `gifCache`, isn't already in their program, and wasn't asked for by name — for a same-muscle, right-equipment exercise, preferring a different movement than the day already has. The reply says what was swapped.
+- "Chest-Supported Row" removed from the dumbbell pool (no video; same movement as Dumbbell Row) → "Dumbbell Shrug"; Coach rules now say one row variation per day.
+- The swap picker uses the equipment the WORKOUT uses (`impliedEquipment`), not just the profile — a day switched to dumbbells no longer offers machine swaps; saved alternatives are filtered the same way.
+- SETUP-GUIDE.md added (owner's plain-English setup and workflow).
 - A workout left open for hours now asks: finish & save it (with its real time, dated the day it was done), keep going, or discard (two taps). Real report: left open a whole day, showed 45 min, and would have been filed under the wrong day.
 - The 6pm reminders GitHub file is added and verified (manual run: Success). Owner steps 1–4 below are done except deleting the pasted API key.
 - **Live AI test marathon** (about $5 of API credit). Found and fixed:
