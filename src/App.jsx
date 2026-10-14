@@ -7294,6 +7294,28 @@ export function resumeTiming(inProgress, nowMs) {
   return { resumedAt: inProgress.runningSince, baselineActiveSeconds: inProgress.runningBaseline || 0 };
 }
 
+// Real report: "I forgot to end my workout for a whole day, and when I went
+// back in it said it had only been going 45 minutes." The 45 was right — the
+// clock stops at the last thing they did — but the app just reopened it as if
+// nothing had happened, and finishing it then would have filed it under the
+// wrong day. A saved workout nobody has touched for this long gets asked
+// about first: finish it (dated the day it was done), keep going, or discard.
+export function isStaleWorkout(inProgress, nowMs = Date.now()) {
+  const last = new Date(inProgress?.savedAt || "").getTime();
+  return Number.isFinite(last) && nowMs - last > MAX_UNATTENDED_MS;
+}
+
+// "today at 6:12 PM", "yesterday at 9:05 AM", "Mon, Oct 12 at 7:40 PM".
+export function whenLabel(iso, nowMs = Date.now()) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "a while ago";
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const day = dateToISO(d);
+  if (day === dateToISO(new Date(nowMs))) return `today at ${time}`;
+  if (day === dateToISO(new Date(nowMs - 86400000))) return `yesterday at ${time}`;
+  return `${d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} at ${time}`;
+}
+
 export function accumulateActiveSeconds(priorActiveSeconds, resumedAtMs, nowMs) {
   const thisStretch = Math.max(0, Math.round((nowMs - resumedAtMs) / 1000));
   return (priorActiveSeconds || 0) + thisStretch;
@@ -8551,7 +8573,9 @@ export default function App() {
       window.removeEventListener("focus", check);
     };
   }, []);
-  const [conflictStartIdx, setConflictStartIdx] = useState(null); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
+  const [conflictStartIdx, setConflictStartIdx] = useState(null);
+  const [staleWorkoutIdx, setStaleWorkoutIdx] = useState(null); // a saved workout left untouched for hours — ask before reopening
+  const [confirmStaleDiscard, setConfirmStaleDiscard] = useState(false); // dayIdx the user is trying to start while a DIFFERENT day is already paused, or null
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [finishedSummary, setFinishedSummary] = useState(null);
   const [streamingReply, setStreamingReply] = useState("");
@@ -9459,9 +9483,13 @@ export default function App() {
   // Skipped for a same-day resume (state.inProgressWorkout.dayIdx ===
   // dayIdx) and for the resume button itself (resume === true) — neither
   // of those can actually lose anything.
-  function startWorkout(dayIdx, resume) {
+  function startWorkout(dayIdx, resume, { skipStaleCheck = false } = {}) {
     if (!resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx !== dayIdx) {
       setConflictStartIdx(dayIdx);
+      return;
+    }
+    if (!skipStaleCheck && state.inProgressWorkout && state.inProgressWorkout.dayIdx === dayIdx && isStaleWorkout(state.inProgressWorkout)) {
+      setStaleWorkoutIdx(dayIdx);
       return;
     }
     // resumedAt marks the start of THIS active stretch — whether that's a
@@ -9630,6 +9658,28 @@ export default function App() {
       };
     });
     setSession(null);
+    setActiveTab("train");
+  }
+
+  // Saves a forgotten workout exactly as it was left: its own time, dated the
+  // day it was actually done.
+  function finishStaleWorkout() {
+    const saved = state.inProgressWorkout;
+    const day = saved ? state.program.days[saved.dayIdx] : null;
+    if (!saved || !day) { setStaleWorkoutIdx(null); return; }
+    const entry = { date: dateToISO(new Date(saved.savedAt)), dayName: day.name, exercises: saved.sets, durationSec: saved.activeSeconds || 0 };
+    setFinishedSummary(workoutSummary(entry, state.logs));
+    clearRestNotifications();
+    persist((prev) => {
+      const usedUp = overrideUsedUpBy(prev, saved.dayIdx);
+      return {
+        ...prev,
+        logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0)) },
+        inProgressWorkout: null,
+        ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null, lastCoachChange: null } : {}),
+      };
+    });
+    setStaleWorkoutIdx(null);
     setActiveTab("train");
   }
 
@@ -10022,6 +10072,44 @@ export default function App() {
         </button>
       )}
 
+      {staleWorkoutIdx !== null && state.inProgressWorkout && state.program.days[state.inProgressWorkout.dayIdx] && (() => {
+        const saved = state.inProgressWorkout;
+        const doneSets = (saved.sets || []).reduce((n, e) => n + (e.logged || []).filter((l) => l.done).length, 0);
+        const close = () => { setStaleWorkoutIdx(null); setConfirmStaleDiscard(false); };
+        return (
+          <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 71, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+            <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Did you forget to finish this one?</h3>
+            <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, margin: "0 0 6px" }}>
+              "{state.program.days[saved.dayIdx].name}" was left open — last touched {whenLabel(saved.savedAt)}.
+            </p>
+            <p style={{ color: "#B9BEC6", fontSize: 13, maxWidth: 320, marginBottom: 24 }}>
+              {formatDuration(saved.activeSeconds || 0)} of training, {doneSets} set{doneSets === 1 ? "" : "s"} checked off.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
+              {doneSets > 0 && (
+                <Btn variant="accent" onClick={() => { setConfirmStaleDiscard(false); finishStaleWorkout(); }} style={{ width: "100%" }}>
+                  Finish & save it ({formatDuration(saved.activeSeconds || 0)})
+                </Btn>
+              )}
+              <Btn variant="ghost" onClick={() => { const idx = saved.dayIdx; close(); startWorkout(idx, true, { skipStaleCheck: true }); }} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>
+                Keep going with it
+              </Btn>
+              <button
+                onClick={() => {
+                  if (!confirmStaleDiscard) { setConfirmStaleDiscard(true); return; }
+                  persist((prev) => ({ ...prev, inProgressWorkout: null }));
+                  close();
+                }}
+                style={{ background: "none", border: "none", color: confirmStaleDiscard ? "#E0483E" : "#B9BEC6", fontSize: 13, fontWeight: confirmStaleDiscard ? 700 : 400, cursor: "pointer", padding: "8px 0" }}
+              >
+                {confirmStaleDiscard ? "Tap again to discard it for good" : "Discard it"}
+              </button>
+              <button onClick={close} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "4px 0" }}>Not now</button>
+            </div>
+          </div>
+        );
+      })()}
+
       {conflictStartIdx !== null && state.inProgressWorkout && (
         <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
           <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>You have an unfinished workout</h3>
@@ -10046,6 +10134,7 @@ export default function App() {
               onClick={() => {
                 const idx = state.inProgressWorkout.dayIdx;
                 setConflictStartIdx(null);
+                if (isStaleWorkout(state.inProgressWorkout)) { setStaleWorkoutIdx(idx); return; }
                 // Carries over the time already spent before the pause, the
                 // same way startWorkout's own resume does — without it, the
                 // first checkmark's autosave overwrote the saved total with

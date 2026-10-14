@@ -65,6 +65,8 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  isStaleWorkout,
+  whenLabel,
   guardTextFor,
   reviewFromParsed,
   unwrapToolInput,
@@ -5144,5 +5146,20 @@ describe("meal suggestions written as slightly broken text", () => {
   test("a raw line break inside a value doesn't lose the item", () => {
     const text = '[{"name":"Tofu\nbowl","cal":500,"protein":30,"carb":50,"fat":15}';
     expect(mealSuggestionsFrom({ suggestions: text }).length).toBe(1);
+  });
+});
+
+describe("a workout left open for hours", () => {
+  const now = new Date(2026, 9, 14, 9, 0).getTime();
+  test("counts as forgotten after 2 hours untouched, not before", () => {
+    expect(isStaleWorkout({ savedAt: new Date(now - 30 * 60000).toISOString() }, now)).toBe(false);
+    expect(isStaleWorkout({ savedAt: new Date(now - 3 * 3600000).toISOString() }, now)).toBe(true);
+    expect(isStaleWorkout({}, now)).toBe(false);
+  });
+  test("says when it was last touched in plain words", () => {
+    expect(whenLabel(new Date(2026, 9, 14, 7, 5).toISOString(), now)).toMatch(/^today at /);
+    expect(whenLabel(new Date(2026, 9, 13, 18, 12).toISOString(), now)).toMatch(/^yesterday at /);
+    expect(whenLabel(new Date(2026, 9, 10, 18, 12).toISOString(), now)).toMatch(/Oct 10 at /);
+    expect(whenLabel("nonsense", now)).toBe("a while ago");
   });
 });

@@ -106,6 +106,9 @@ describe("an account saved before the pre-launch changes", () => {
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(await screen.findByText("RESUME"));
+    // Saved days ago: the app asks first (see isStaleWorkout).
+    expect(await screen.findByText("Did you forget to finish this one?")).toBeInTheDocument();
+    await user.click(screen.getByText("Keep going with it"));
     expect(await screen.findByText("Barbell Bench Press")).toBeInTheDocument();
     noCrash();
     await user.click(screen.getByText(/Finish workout/));
@@ -155,6 +158,33 @@ describe("an account saved before the pre-launch changes", () => {
     await user.click(tab("Coach"));
     await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "hi{enter}");
     await waitFor(() => expect(screen.queryByLabelText("Coach is typing")).not.toBeInTheDocument(), { timeout: 8000 });
+    noCrash();
+  }, 30000);
+
+  test("a workout left open for days can be saved as it was, dated the day it was done", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(await screen.findByText("RESUME"));
+    expect(await screen.findByText(/15 min of training, 1 set checked off/)).toBeInTheDocument();
+    await user.click(screen.getByText(/Finish & save it/));
+    expect(await screen.findByText("WORKOUT COMPLETE")).toBeInTheDocument();
+    const saved = stored.logs.workouts.find((w) => w.durationSec === 900);
+    expect(saved).toBeTruthy();
+    expect(saved.date).toBe("2026-09-29");
+    expect(stored.inProgressWorkout).toBeNull();
+    noCrash();
+  }, 30000);
+
+  test("discarding a forgotten workout takes two taps", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(await screen.findByText("RESUME"));
+    await user.click(await screen.findByText("Discard it"));
+    expect(stored.inProgressWorkout).not.toBeNull();
+    await user.click(screen.getByText("Tap again to discard it for good"));
+    expect(stored.inProgressWorkout).toBeNull();
     noCrash();
   }, 30000);
 });
