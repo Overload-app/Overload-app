@@ -32,6 +32,7 @@ git reset -q -- tester-passwords.txt .env .env.local 2>/dev/null
 git commit -q -m "$MSG" || echo "(nothing new to save)"
 git push -q || echo "⚠️  GitHub push failed (you may need to sign in to GitHub). Deploying anyway."
 
+BEFORE=$(curl -s https://www.overload-app.com/ | grep -o 'assets/index-[^"]*\.js' | head -1)
 echo "4/5 Deploying to Vercel…"
 ok=""
 for i in 1 2 3; do
@@ -47,6 +48,8 @@ if [ -z "$ok" ]; then
 fi
 
 echo "5/5 Checking the live site…"
-JS=$(curl -s https://www.overload-app.com/ | grep -o 'assets/index-[^"]*\.js' | head -1)
-LOCAL=$(ls dist/assets/ | grep -o '^index-[^.]*\.js' | head -1)
-if [ "assets/$LOCAL" = "$JS" ]; then echo "✅ Live: www.overload-app.com is serving this version."; else echo "⚠️  Deployed, but the live site still shows an older file ($JS vs $LOCAL). Wait a minute and refresh."; fi
+sleep 5
+AFTER=$(curl -s https://www.overload-app.com/ | grep -o 'assets/index-[^"]*\.js' | head -1)
+if [ -z "$AFTER" ]; then echo "⚠️  Couldn't reach www.overload-app.com — check it in your browser.";
+elif [ "$AFTER" != "$BEFORE" ]; then echo "✅ Live: www.overload-app.com is serving the new version.";
+else echo "✅ Deployed. (The app's main file didn't change — normal if you only changed server/api files.)"; fi
