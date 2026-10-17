@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  exerciseGroupsByDay,
   ensureVideoExercises,
   bestDoneSet,
   isStaleWorkout,
@@ -5188,5 +5189,20 @@ describe("every exercise the Coach adds has a video", () => {
   test("bestDoneSet: heaviest checked-off set, more reps breaks a tie", () => {
     expect(bestDoneSet([{ weight: "30", reps: "10", done: true }, { weight: "30", reps: "12", done: true }, { weight: "50", reps: "5", done: false }])).toEqual({ weight: 30, reps: 12 });
     expect(bestDoneSet([])).toBeNull();
+  });
+});
+
+describe("lift progress grouped by workout day", () => {
+  const set = (w, r, done = true) => ({ weight: String(w), reps: String(r), done });
+  const logs = { workouts: [
+    { date: "2026-10-01", dayName: "Pull", exercises: [{ name: "Lat Pulldown", logged: [set(100, 10)] }, { name: "Barbell Curl", logged: [set(50, 10)] }] },
+    { date: "2026-10-03", dayName: "Push", exercises: [{ name: "Barbell Bench Press", logged: [set(135, 8)] }, { name: "Cable Fly", logged: [set(0, 0, false)] }] },
+    { date: "2026-10-08", dayName: "Pull", exercises: [{ name: "Cable Lat Pulldown", logged: [set(110, 10)] }] },
+  ] };
+  test("days in program order, each with its exercises, same exercise merged once", () => {
+    const groups = exerciseGroupsByDay(logs, { days: [{ name: "Push" }, { name: "Pull" }] });
+    expect(groups.map((g) => g.day)).toEqual(["Push", "Pull"]);
+    expect(groups[1].exercises).toEqual(["Cable Lat Pulldown", "Barbell Curl"]);
+    expect(groups[0].exercises).toEqual(["Barbell Bench Press"]); // nothing checked off for Cable Fly
   });
 });

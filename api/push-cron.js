@@ -92,6 +92,44 @@ export function reminderFor(state, now = new Date()) {
   return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
 }
 
+// Real ask: "add a weigh-in notification where you can set the time."
+// Sent at the hour they picked (their time), unless they've already weighed
+// in today.
+export const DEFAULT_WEIGH_IN_HOUR = 8;
+export function weighInFor(state, now = new Date()) {
+  const push = state?.push;
+  if (!push?.weighIn || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
+  const hour = Number.isInteger(push.weighInHour) ? push.weighInHour : DEFAULT_WEIGH_IN_HOUR;
+  if (localHour(push.tz, now) !== hour) return null;
+  const today = localDateISO(push.tz, now);
+  if ((state?.logs?.bodyweight || []).some((w) => w.date === today)) return null;
+  return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/" };
+}
+
+// Real ask: "a notification if numbers haven't been logged in a while,
+// asking if you're done with your workout." A workout left open with nothing
+// logged for 40-100 minutes gets one nudge. The job runs hourly, so exactly
+// one run lands in that 60-minute window — no double nudges, and nothing
+// needs to be written back to their account to remember it.
+export const IDLE_FROM_MIN = 40;
+export const IDLE_TO_MIN = 100;
+export function idleWorkoutFor(state, now = new Date()) {
+  const push = state?.push;
+  const open = state?.inProgressWorkout;
+  if (!push?.idleWorkout || !open || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
+  const last = new Date(open.savedAt || "").getTime();
+  if (!Number.isFinite(last)) return null;
+  const idleMin = (now.getTime() - last) / 60000;
+  if (idleMin < IDLE_FROM_MIN || idleMin >= IDLE_TO_MIN) return null;
+  const day = state?.program?.days?.[open.dayIdx]?.name || "your workout";
+  return { kind: "idle", title: "Still working out?", body: `Nothing's been logged on ${day} for a while — tap to finish it or keep going.`, tag: "idle", url: "/" };
+}
+
+// Everything due for this person this hour.
+export function notificationsFor(state, now = new Date()) {
+  return [reminderFor(state, now), weighInFor(state, now), idleWorkoutFor(state, now)].filter(Boolean);
+}
+
 export default async function handler(req, res) {
   const auth = req.headers?.authorization || "";
   const secret = process.env.CRON_SECRET;
@@ -108,14 +146,18 @@ export default async function handler(req, res) {
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
   let sent = 0, people = 0;
   for (let from = 0; ; from += 500) {
-    const { data, error } = await supabaseAdmin.from("app_state").select("user_id, state").eq("state->push->>reminders", "true").range(from, from + 499);
+    const { data, error } = await supabaseAdmin.from("app_state").select("user_id, state")
+      .or("state->push->>reminders.eq.true,state->push->>weighIn.eq.true,state->push->>idleWorkout.eq.true")
+      .range(from, from + 499);
     if (error) return res.status(500).json({ error: error.message });
     for (const row of data || []) {
-      const note = reminderFor(row.state);
-      if (!note) continue;
+      const notes = notificationsFor(row.state);
+      if (notes.length === 0) continue;
       people++;
-      const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600 })));
-      sent += results.filter((r) => r.status === "fulfilled").length;
+      for (const note of notes) {
+        const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600 })));
+        sent += results.filter((r) => r.status === "fulfilled").length;
+      }
     }
     if (!data || data.length < 500) break;
   }

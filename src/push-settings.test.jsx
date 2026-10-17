@@ -144,4 +144,26 @@ describe("notification switches", () => {
     await user.click((await screen.findAllByLabelText(/Mark set 1 done/))[0]);
     expect(globalThis.fetch.mock.calls.some(([u]) => String(u).includes("/api/rest-alert"))).toBe(false);
   }, 20000);
+
+  test("notifications picked in the quiz are turned on from the Home card, and the weigh-in time can be set", async () => {
+    stored.profile.notifications = ["weighIn", "idleWorkout"];
+    const sub = { endpoint: "https://push.example/q", keys: {} };
+    const reg = { pushManager: { getSubscription: vi.fn(async () => null), subscribe: vi.fn(async () => ({ toJSON: () => sub })) } };
+    Object.defineProperty(navigator, "serviceWorker", { value: { ready: Promise.resolve(reg) }, configurable: true });
+    window.PushManager = function () {};
+    window.Notification = { permission: "default", requestPermission: vi.fn(async () => "granted") };
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^Home$/ }));
+    await user.click(await screen.findByText("Turn on"));
+    await screen.findByRole("button", { name: /^Train$/ });
+    expect(stored.push).toMatchObject({ weighIn: true, idleWorkout: true, weighInHour: 8 });
+    expect(stored.push.reminders).toBeFalsy();
+    expect(screen.queryByText("Turn on your notifications")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^You$/ }));
+    await user.selectOptions(screen.getByLabelText("Weigh-in reminder time"), "7");
+    expect(stored.push.weighInHour).toBe(7);
+    delete navigator.serviceWorker; delete window.PushManager; delete window.Notification;
+  }, 20000);
 });

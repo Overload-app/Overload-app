@@ -4,7 +4,7 @@ import {
   ChevronRight, ChevronLeft, Award, RotateCcw, Home as HomeIcon,
   Beef, Wheat, Droplet, Scale, Sparkles, Zap, MessageCircle,
   Send, Camera, Loader2, AlertCircle, SkipForward, PlusCircle, LogOut, Info, Repeat, Clock, FileText,
-  Bell, BellOff,
+  Bell, BellOff, ChevronDown, Pencil,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -165,8 +165,14 @@ const SHELL_CSS = `
 
   /* Main app: bottom tab bar + full-bleed on phones, a real sidebar layout
      using the whole screen on anything roomier. */
-  .app-shell { min-height: 100vh; min-height: 100dvh; width: 100%; background: ${T.paper}; }
-  .app-main { padding-bottom: 90px; }
+  /* Phones: the page content scrolls inside .app-main and the shell itself
+     never moves. Real report (iPhone): scrolling up and down dragged the tab
+     bar and the Resume bar up into the middle of the screen — iOS moves
+     fixed bars along with a scrolling page during fast scrolls and the
+     bounce at the ends. With nothing scrolling but this inner box, the bars
+     stay put. */
+  .app-shell { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; width: 100%; background: ${T.paper}; }
+  .app-main { height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
   .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; width: 100%; background: #fff; border-top: 1px solid ${T.steel}; display: flex; padding: 8px 4px calc(8px + env(safe-area-inset-bottom, 0px)) 4px; box-sizing: border-box; z-index: 40; }
   .sidebar-nav { display: none; }
 
@@ -179,14 +185,14 @@ const SHELL_CSS = `
   .resume-bar { position: fixed; right: 16px; bottom: calc(150px + env(safe-area-inset-bottom, 0px)); z-index: 45; }
 
   @media (min-width: 900px) and (min-height: 600px) {
-    .app-shell { display: flex; }
+    .app-shell { display: flex; position: static; overflow: visible; min-height: 100vh; min-height: 100dvh; }
     .sidebar-nav {
       display: flex; flex-direction: column; width: 240px; flex-shrink: 0;
       background: ${T.ink}; min-height: 100vh; min-height: 100dvh; padding: 28px 16px;
       position: sticky; top: 0;
     }
     .bottom-nav { display: none; }
-    .app-main { flex: 1; padding-bottom: 40px; }
+    .app-main { flex: 1; padding-bottom: 40px; height: auto; overflow: visible; }
     .app-main-inner { max-width: 880px; margin: 0 auto; width: 100%; }
     .coach-panel { left: 240px; bottom: 0; }
     .resume-bar { right: 28px; bottom: 100px; }
@@ -3934,6 +3940,17 @@ export const QUIZ_STEPS = [
     optional: true,
     options: [["weekly", "Weekly review"], ["monthly", "Monthly review"]],
   },
+  {
+    // Real ask: "in the quiz at the start it asks which ones you want, and
+    // says you can change them anytime." Phones only allow the permission
+    // prompt from a tap, so these are switched on from a card on Home.
+    key: "notifications",
+    q: "Which notifications do you want?",
+    sub: "Optional — pick any. You can change these anytime on the You page.",
+    type: "multi",
+    optional: true,
+    options: [["reminders", "Workout reminders (6pm)"], ["restAlerts", "Rest timer alerts"], ["weighIn", "Weigh-in reminder"], ["idleWorkout", "Ask if I forgot to finish a workout"]],
+  },
 ];
 
 export function Onboarding({ onComplete }) {
@@ -4449,7 +4466,7 @@ export function seedLoggedSets(ex, logs) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds }) {
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
@@ -4556,8 +4573,10 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     };
   }, [onAutoSave]);
 
-  const [confirmExit, setConfirmExit] = useState(false);
-  const [confirmEmptyFinish, setConfirmEmptyFinish] = useState(false); // Finish tapped with no set checked off
+  const [confirmEmptyFinish, setConfirmEmptyFinish] = useState(false);
+  const [timeEdit, setTimeEdit] = useState(null);
+  const [noteEditIdx, setNoteEditIdx] = useState(null); // which exercise's note is being written
+  const [noteDraft, setNoteDraft] = useState(""); // minutes being typed into the "workout time" editor, or null // Finish tapped with no set checked off
   const [confirmDiscard, setConfirmDiscard] = useState(false); // second, explicit confirmation before Discard workout actually loses anything
   const [exerciseInfoIdx, setExerciseInfoIdx] = useState(null); // index of the exercise showing its full-screen info page, or null
   const [gifLoading, setGifLoading] = useState({}); // exercise name -> true while the one-time WorkoutX lookup is in flight
@@ -4844,10 +4863,29 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     };
   }, [rest === null]);
 
+  // A new personal best on this set: beats every earlier workout AND the
+  // other sets already done in this one. Real report: 40x10 then 40x7 both
+  // showed "new PR" — the 7 was beaten by the 10 a minute earlier.
+  function checkForPR(copy, exIdx, setIdx) {
+    const set = copy[exIdx].logged[setIdx];
+    const weight = Number(set.weight);
+    const reps = Number(set.reps);
+    if (!logs || !set.done || !(weight > 0) || !(reps > 0)) return;
+    const priorPR = exercisePR(logs, copy[exIdx].name);
+    const earlierToday = bestDoneSet(copy[exIdx].logged.filter((l, i) => i !== setIdx));
+    const beats = (b) => !b || weight > b.weight || (weight === b.weight && reps > b.reps);
+    if (priorPR && beats(priorPR) && beats(earlierToday)) {
+      setPrCelebration({ name: copy[exIdx].name, weight, reps });
+    }
+  }
+
   function updateSet(exIdx, setIdx, field, val) {
     setSets((s) => {
       const copy = s.map((e) => ({ ...e, logged: e.logged.map((l) => ({ ...l })) }));
       copy[exIdx].logged[setIdx][field] = val;
+      // Correcting an already checked-off set can make it a PR too. Real
+      // report: logged 110x10 by mistake, fixed it to 115 (a PR) — nothing.
+      if ((field === "weight" || field === "reps") && copy[exIdx].logged[setIdx].done) checkForPR(copy, exIdx, setIdx);
       // Same "trigger the side effect from inside the updater, where the
       // value is always current" rule the rest of this component follows.
       scheduleAutoSave(copy);
@@ -4892,20 +4930,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         // record. Real report: it read as "tying a PR shouldn't count as a
         // PR" — no prior match at all is the same case, just with no
         // number to visibly tie.
-        const justLogged = copy[exIdx].logged[setIdx];
-        const weight = Number(justLogged.weight);
-        const reps = Number(justLogged.reps);
-        if (logs && weight > 0 && reps > 0) {
-          const priorPR = exercisePR(logs, copy[exIdx].name);
-          // Also has to beat the sets already done in THIS workout. Real
-          // report: 40x10 then 40x7 both showed "new PR" — the 7 was beaten
-          // by the 10 a minute earlier.
-          const earlierToday = bestDoneSet(copy[exIdx].logged.filter((l, i) => i !== setIdx));
-          const beats = (b) => !b || weight > b.weight || (weight === b.weight && reps > b.reps);
-          if (priorPR && beats(priorPR) && beats(earlierToday)) {
-            setPrCelebration({ name: copy[exIdx].name, weight, reps });
-          }
-        }
+        checkForPR(copy, exIdx, setIdx);
       }
       // Saves right after the most meaningful action in a workout, not
       // just on the visibilitychange/pagehide listener elsewhere in this
@@ -4949,12 +4974,21 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       <style>{SHELL_CSS}</style>
       <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <button onClick={() => setConfirmExit(true)} aria-label="Exit workout" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
+          {/* Real ask: an arrow that drops the workout down so the rest of the
+              app can be used — it keeps running and saved, and the Resume
+              bar brings it straight back. Discard now lives under Finish. */}
+          <button onClick={() => onSaveExit(sets, rest)} aria-label="Minimize workout" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer", padding: 0, display: "flex" }}><ChevronDown size={26} /></button>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {resumedAt && (
-              <span style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#B9BEC6", fontWeight: 600 }}>
-                <Clock size={12} /> {elapsedLabel}
-              </span>
+              // Tap to correct the time. Real ask: "should be able to adjust
+              // the time of the workout while it's open."
+              <button
+                onClick={() => { if (onAdjustTime) { setTimeEdit(String(Math.round(elapsedSeconds / 60))); } }}
+                aria-label="Edit workout time"
+                style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#B9BEC6", fontWeight: 600, background: "none", border: "none", padding: 0, cursor: onAdjustTime ? "pointer" : "default" }}
+              >
+                <Clock size={12} /> {elapsedLabel}{onAdjustTime && <Pencil size={10} style={{ marginLeft: 2, opacity: 0.7 }} />}
+              </button>
             )}
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.charge, fontWeight: 700 }}>{doneSets}/{totalSets} SETS</span>
           </div>
@@ -5029,6 +5063,41 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                 <TrendingUp size={13} /> History & PR
               </button>
             </div>
+            {/* Real ask: "next session I want a lower incline for incline
+                dumbbell, but I'll forget in a week." A note on an exercise
+                shows up every time it comes round until it's cleared. */}
+            {onSaveNote && (noteEditIdx === exIdx ? (
+              <div style={{ marginTop: 8 }}>
+                <textarea
+                  autoFocus value={noteDraft} maxLength={300} aria-label={`Note for ${ex.name}`}
+                  placeholder="e.g. lower the incline a notch next time"
+                  onChange={(e) => setNoteDraft(e.target.value)}
+                  style={{ width: "100%", minHeight: 56, padding: 10, borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 14, boxSizing: "border-box", resize: "vertical" }}
+                />
+                <div style={{ display: "flex", gap: 14, marginTop: 4 }}>
+                  <button onClick={() => { onSaveNote(ex.name, noteDraft.trim()); setNoteEditIdx(null); }} style={{ background: "none", border: "none", color: T.charge, fontSize: 12, fontWeight: 700, padding: 0, cursor: "pointer" }}>Save note</button>
+                  {notes?.[normalizeGifKey(ex.name)] && (
+                    <button onClick={() => { onSaveNote(ex.name, ""); setNoteEditIdx(null); }} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: 0, cursor: "pointer" }}>Clear note</button>
+                  )}
+                  <button onClick={() => setNoteEditIdx(null)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: 0, cursor: "pointer" }}>Cancel</button>
+                </div>
+              </div>
+            ) : notes?.[normalizeGifKey(ex.name)] ? (
+              <button
+                onClick={() => { setNoteDraft(notes[normalizeGifKey(ex.name)]); setNoteEditIdx(exIdx); }}
+                aria-label={`Edit note for ${ex.name}`}
+                style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, width: "100%", textAlign: "left", background: "#FFF7E6", border: "1px solid #F5D9A0", borderRadius: 8, padding: "8px 10px", color: T.ink, fontSize: 13, cursor: "pointer" }}
+              >
+                <FileText size={13} color={T.warn} style={{ flexShrink: 0, marginTop: 2 }} /> <span style={{ whiteSpace: "pre-wrap" }}>{notes[normalizeGifKey(ex.name)]}</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => { setNoteDraft(""); setNoteEditIdx(exIdx); }}
+                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: T.steelDark, fontSize: 12, fontWeight: 600, padding: "8px 0 0", cursor: "pointer" }}
+              >
+                <FileText size={13} /> Note for next time
+              </button>
+            ))}
             <div style={{ marginTop: 10 }}>
               {ex.logged.map((l, setIdx) => (
                 <div key={setIdx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
@@ -5080,6 +5149,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         <Btn variant="accent" style={{ width: "100%", padding: 16 }} onClick={() => (sets.some((e) => e.logged.some((l) => l.done)) ? onFinish(sets) : setConfirmEmptyFinish(true))}>
           Finish workout <Check size={18} />
         </Btn>
+        <button onClick={() => setConfirmDiscard(true)} style={{ width: "100%", background: "none", border: "none", color: T.steelDark, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "10px 0 0" }}>
+          Discard workout
+        </button>
       </div>
 
       {rest !== null && (
@@ -5106,14 +5178,26 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         />
       )}
 
-      {confirmExit && !confirmDiscard && (
-        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 70, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
-          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Exit this workout?</h3>
-          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 24 }}>Save your progress to pick it back up later, or discard it completely.</p>
+
+      {timeEdit !== null && (
+        <div className="fullscreen-overlay" style={{ background: "rgba(18,22,28,0.92)", zIndex: 71, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", padding: 28, textAlign: "center" }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Workout time</h3>
+          <p style={{ color: "#B9BEC6", fontSize: 14, maxWidth: 320, marginBottom: 18 }}>How many minutes have you been training? The clock carries on from there.</p>
+          <input
+            type="number" inputMode="numeric" value={timeEdit} aria-label="Workout minutes"
+            onChange={(e) => setTimeEdit(e.target.value)}
+            style={{ width: 140, padding: "14px 16px", fontSize: 24, textAlign: "center", borderRadius: 12, border: "none", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 18 }}
+          />
           <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 320 }}>
-            <Btn variant="accent" onClick={() => onSaveExit(sets, rest)} style={{ width: "100%" }}>Save & exit</Btn>
-            <Btn variant="ghost" onClick={() => setConfirmDiscard(true)} style={{ width: "100%", color: "#fff", borderColor: "rgba(255,255,255,0.25)" }}>Discard workout</Btn>
-            <button onClick={() => setConfirmExit(false)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Keep training</button>
+            <Btn
+              variant="accent"
+              disabled={!(Number(timeEdit) >= 0 && Number(timeEdit) <= 600 && timeEdit !== "")}
+              onClick={() => { onAdjustTime(Math.round(Number(timeEdit) * 60)); setTimeEdit(null); }}
+              style={{ width: "100%" }}
+            >
+              Save time
+            </Btn>
+            <button onClick={() => setTimeEdit(null)} style={{ background: "none", border: "none", color: "#B9BEC6", fontSize: 13, cursor: "pointer", padding: "8px 0" }}>Cancel</button>
           </div>
         </div>
       )}
@@ -7615,12 +7699,41 @@ Write a short, honest, encouraging review — 3-5 sentences of overview, then 2-
 Respond ONLY with JSON, no markdown fences: {"overview": "<3-5 sentence summary>", "advice": ["<specific tip>", "<specific tip>"]}`;
 }
 
-function ExerciseProgress({ logs }) {
-  const names = Array.from(new Set(logs.workouts.flatMap((w) => w.exercises.map((e) => e.name)))).sort();
-  const [selected, setSelected] = useState(names[0] || "");
-  useEffect(() => { if (!selected && names[0]) setSelected(names[0]); }, [names.length]);
+// Lift progress, organised by workout day. Real report: "it's annoying —
+// you have to search through a list of every workout, it's hard to read, and
+// some get duplicated." It was one long dropdown of every name ever logged,
+// so "Lat Pulldown" and "Lat Pulldown (Wide)" or a renamed exercise showed up
+// as separate entries. Now: pick a day, then one of that day's exercises.
+// Names for the same exercise are merged (isSameCoreExercise).
+export function exerciseGroupsByDay(logs, program) {
+  const order = (program?.days || []).map((d) => d.name);
+  const byDay = new Map();
+  for (const w of [...(logs?.workouts || [])].reverse()) { // newest first, so the newest name wins
+    const day = w.dayName || "Other";
+    if (!byDay.has(day)) byDay.set(day, []);
+    const list = byDay.get(day);
+    for (const e of w.exercises || []) {
+      const hasNumbers = (e.logged || []).some((l) => (("done" in l) ? l.done : true) && Number(l.weight) > 0 && Number(l.reps) > 0);
+      if (!hasNumbers || list.some((n) => isSameCoreExercise(n, e.name))) continue;
+      list.push(e.name);
+    }
+  }
+  const days = [...byDay.keys()].filter((d) => byDay.get(d).length > 0)
+    .sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b);
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    });
+  return days.map((day) => ({ day, exercises: byDay.get(day) }));
+}
 
-  if (names.length === 0) {
+function ExerciseProgress({ logs, program }) {
+  const groups = exerciseGroupsByDay(logs, program);
+  const [day, setDay] = useState(groups[0]?.day || "");
+  const group = groups.find((g) => g.day === day) || groups[0];
+  const [selected, setSelected] = useState(group?.exercises[0] || "");
+  const exercise = group?.exercises.includes(selected) ? selected : group?.exercises[0];
+
+  if (groups.length === 0) {
     return (
       <Card style={{ textAlign: "center", padding: "24px 16px" }}>
         <div style={{ width: 44, height: 44, borderRadius: 12, background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px" }}>
@@ -7631,45 +7744,50 @@ function ExerciseProgress({ logs }) {
     );
   }
 
-  const history = exerciseHistory(logs, selected);
+  const history = exerciseHistory(logs, exercise);
   const first = history[0];
   const latest = history[history.length - 1];
   const delta = first && latest ? latest.weight - first.weight : 0;
+  const chip = (active) => ({
+    flexShrink: 0, padding: "7px 12px", borderRadius: 999, border: `1.5px solid ${active ? T.charge : T.steel}`,
+    background: active ? T.charge : "#fff", color: active ? "#fff" : T.ink, fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+  });
 
   return (
     <Card>
-      <select
-        value={selected} onChange={(e) => setSelected(e.target.value)}
-        style={{ width: "100%", padding: 12, borderRadius: 8, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 14, color: T.ink, boxSizing: "border-box", marginBottom: 10 }}
-      >
-        {names.map((n) => <option key={n} value={n}>{n}</option>)}
-      </select>
-      {history.length > 1 ? (
+      <div role="tablist" aria-label="Workout day" style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 6 }}>
+        {groups.map((g) => (
+          <button key={g.day} role="tab" aria-selected={g.day === group.day} onClick={() => { setDay(g.day); setSelected(g.exercises[0]); }} style={chip(g.day === group.day)}>{g.day}</button>
+        ))}
+      </div>
+      <div aria-label="Exercise" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+        {group.exercises.map((n) => (
+          <button key={n} aria-pressed={n === exercise} onClick={() => setSelected(n)} style={{ ...chip(false), borderColor: n === exercise ? T.charge : T.steel, color: n === exercise ? T.chargeDeep : T.ink, background: n === exercise ? "#EEEDFF" : "#fff" }}>{n}</button>
+        ))}
+      </div>
+      {history.length >= 1 ? (
         <>
           <ResponsiveContainer width="100%" height={160}>
             <LineChart data={history}>
               <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="dateLabel" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
-              <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} />
+              <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} width={36} />
               <Tooltip contentStyle={{ fontFamily: "Inter", fontSize: 12, borderRadius: 8 }} formatter={(v, k, p) => [`${v} lb × ${p.payload.reps}`, "Top set"]} />
               <Line type="monotone" dataKey="weight" stroke={T.charge} strokeWidth={3} dot={{ r: 3, fill: T.charge }} />
             </LineChart>
           </ResponsiveContainer>
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark, gap: 8 }}>
             <span>First: {first.weight}lb × {first.reps}</span>
-            <span style={{ color: delta > 0 ? T.good : delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
-              {delta > 0 ? "+" : ""}{delta}lb since first log
-            </span>
+            {history.length > 1 && (
+              <span style={{ color: delta > 0 ? T.good : delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
+                {delta > 0 ? "+" : ""}{delta}lb
+              </span>
+            )}
             <span>Latest: {latest.weight}lb × {latest.reps}</span>
           </div>
         </>
       ) : (
-        <div style={{ textAlign: "center", padding: "16px 0" }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px" }}>
-            <TrendingUp size={18} color={T.steelDark} />
-          </div>
-          <p style={{ color: T.steelDark, fontSize: 13, margin: 0 }}>Log this exercise at least twice to see a trend.</p>
-        </div>
+        <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", margin: "12px 0" }}>No checked-off sets for this one yet.</p>
       )}
     </Card>
   );
@@ -7872,7 +7990,7 @@ export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpen
       <MonthlySummary logs={logs} />
 
       <TickRule label="Exercise progress" />
-      <ExerciseProgress logs={logs} />
+      <ExerciseProgress logs={logs} program={state.program} />
 
       <TickRule label="Bodyweight" />
       <Card>
@@ -8185,7 +8303,8 @@ export function WorkoutCompleteSheet({ summary, onClose }) {
 ============================================================ */
 // reviewCadence is excluded: it isn't a profile answer, it's the two review
 // toggles, which already have their own switches further down this same tab.
-const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "reviewCadence");
+// notifications likewise: each has its own switch on this tab.
+const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "reviewCadence" && st.key !== "notifications");
 
 // Found by the stress test: the quiz took an age of -5 and a weight of 25 or
 // -5 lb. Those fed straight into the calorie targets, and a negative age
@@ -8412,7 +8531,42 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-function NotificationSettings({ push, onSetPushEnabled }) {
+// Every kind of notification, each with its own switch (real ask: "all of
+// the notifications for each different type can be turned on and off").
+export const NOTIFICATION_KINDS = [
+  ["reminders", "Workout reminders", "A nudge at 6pm your time on days you haven't trained yet."],
+  ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."],
+  ["weighIn", "Weigh-in reminder", "A reminder to weigh in at a time you pick."],
+  ["idleWorkout", "Forgot to finish?", "Asks if you're done when a workout's gone quiet for a while."],
+];
+
+// After the quiz: turns on the notifications they picked, with one tap.
+function NotificationPrompt({ kinds, onEnable, onDismiss }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const labels = NOTIFICATION_KINDS.filter(([k]) => kinds.includes(k)).map(([, label]) => label.toLowerCase());
+  return (
+    <div style={{ padding: "16px 16px 0" }}>
+      <Card style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Bell size={18} color={T.charge} />
+          <div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>Turn on your notifications</div>
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: T.steelDark }}>You picked: {labels.join(", ")}. Tap below to allow them — change any of them later on the You page.</p>
+        {error && <p role="alert" style={{ margin: 0, fontSize: 12, color: T.warn }}>{error}</p>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="accent" disabled={busy} style={{ flex: 1 }} onClick={async () => {
+            setBusy(true); setError("");
+            try { await onEnable(); } catch (e) { setError(e?.message || "Couldn't turn them on."); } finally { setBusy(false); }
+          }}>Turn on</Btn>
+          <Btn variant="ghost" onClick={onDismiss}>Not now</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
   async function toggle(kind) {
@@ -8430,7 +8584,7 @@ function NotificationSettings({ push, onSetPushEnabled }) {
     <>
       <TickRule label="Notifications" />
       <Card>
-        {[["reminders", "Workout reminders", "A nudge at 6pm your time on days you haven't trained yet."], ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."]].map(([kind, label, hint], i) => (
+        {NOTIFICATION_KINDS.map(([kind, label, hint], i) => (
           <div key={kind} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</div>
@@ -8452,13 +8606,28 @@ function NotificationSettings({ push, onSetPushEnabled }) {
             </button>
           </div>
         ))}
+        {push?.weighIn && onSetWeighInHour && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: `1px solid ${T.steel}` }}>
+            <label htmlFor="weigh-in-hour" style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>Weigh-in reminder time</label>
+            <select
+              id="weigh-in-hour"
+              value={Number.isInteger(push.weighInHour) ? push.weighInHour : 8}
+              onChange={(e) => onSetWeighInHour(Number(e.target.value))}
+              style={{ padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontSize: 14, background: "#fff" }}
+            >
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>{h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`}</option>
+              ))}
+            </select>
+          </div>
+        )}
         {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "8px 0 0" }}>{error}</p>}
       </Card>
     </>
   );
 }
 
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onEditQuiz }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onSetWeighInHour, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -8589,7 +8758,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
-      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} />}
+      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetWeighInHour={onSetWeighInHour} />}
 
       <TickRule label="Support & legal" />
       <Card>
@@ -9723,6 +9892,17 @@ export default function App() {
     setActiveTab("coach");
   }
 
+  // A corrected workout time: the clock restarts from that total and carries on.
+  function adjustWorkoutTime(totalSeconds) {
+    if (!session) return;
+    const now = Date.now();
+    setSession((s) => (s ? { ...s, baselineActiveSeconds: totalSeconds, resumedAt: now } : s));
+    persist((prev) => (prev?.inProgressWorkout ? {
+      ...prev,
+      inProgressWorkout: { ...prev.inProgressWorkout, activeSeconds: totalSeconds, runningSince: now, runningBaseline: totalSeconds, savedAt: new Date(now).toISOString() },
+    } : prev));
+  }
+
   function discardWorkoutProgress() {
     persist((prev) => ({ ...prev, inProgressWorkout: null }));
     setSession(null);
@@ -9906,7 +10086,10 @@ export default function App() {
     const sub = await subscribeForPush();
     persist((prev) => ({
       ...prev,
-      push: { ...prev.push, subscriptions: withSubscription(prev.push, sub), [kind]: true, tz: deviceTimeZone() },
+      push: {
+        ...prev.push, subscriptions: withSubscription(prev.push, sub), [kind]: true, tz: deviceTimeZone(),
+        ...(kind === "weighIn" && !Number.isInteger(prev.push?.weighInHour) ? { weighInHour: 8 } : {}),
+      },
     }));
   }
 
@@ -10094,6 +10277,25 @@ export default function App() {
           </div>
         )}
         <div className="app-main-inner">
+          {activeTab === "home" && (state.profile?.notifications || []).length > 0 && !(state.push?.subscriptions || []).length && !state.push?.promptDismissed && (
+            <NotificationPrompt
+              kinds={state.profile.notifications}
+              onEnable={async () => {
+                const sub = await subscribeForPush();
+                persist((prev) => ({
+                  ...prev,
+                  push: {
+                    ...prev.push,
+                    subscriptions: withSubscription(prev.push, sub),
+                    tz: deviceTimeZone(),
+                    ...Object.fromEntries((prev.profile?.notifications || []).map((k) => [k, true])),
+                    ...((prev.profile?.notifications || []).includes("weighIn") && !Number.isInteger(prev.push?.weighInHour) ? { weighInHour: 8 } : {}),
+                  },
+                }));
+              }}
+              onDismiss={() => persist((prev) => ({ ...prev, push: { ...prev.push, promptDismissed: true } }))}
+            />
+          )}
           {activeTab === "home" && (
             <Home
               state={state}
@@ -10118,7 +10320,7 @@ export default function App() {
               onDeleteReview={deleteReview}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onEditQuiz={() => setQuizEditorOpen(true)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onSetWeighInHour={(h) => persist((prev) => ({ ...prev, push: { ...prev.push, weighInHour: h } }))} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">
@@ -10260,6 +10462,13 @@ export default function App() {
           logs={state.logs}
           resumedAt={session.resumedAt}
           priorActiveSeconds={session.baselineActiveSeconds || 0}
+          onAdjustTime={(secs) => adjustWorkoutTime(secs)}
+          notes={state.exerciseNotes || {}}
+          onSaveNote={(name, text) => persist((prev) => {
+            const notes = { ...(prev.exerciseNotes || {}) };
+            if (text) notes[normalizeGifKey(name)] = text; else delete notes[normalizeGifKey(name)];
+            return { ...prev, exerciseNotes: notes };
+          })}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           initialRest={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.rest : null}
           onFinish={finishWorkout}

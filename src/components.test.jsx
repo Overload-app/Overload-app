@@ -917,6 +917,18 @@ describe("<WorkoutSession /> PR celebration", () => {
     expect(screen.queryByText("Back Squat · 40lb × 7")).not.toBeInTheDocument();
   });
 
+  test("fixing a checked-off set's weight to a new best shows the PR", async () => {
+    const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "112", reps: "10", done: true }] }] }] };
+    const user = setup(logs);
+    const w = screen.getByPlaceholderText("lb");
+    await user.clear(w); await user.type(w, "110");
+    await user.clear(screen.getByPlaceholderText("reps")); await user.type(screen.getByPlaceholderText("reps"), "10");
+    await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    expect(screen.queryByText("NEW PR")).not.toBeInTheDocument();
+    await user.clear(w); await user.type(w, "115");
+    expect(screen.getByText("Back Squat · 115lb × 10")).toBeInTheDocument();
+  });
+
   test("logging a set that does NOT beat the existing PR shows no toast", async () => {
     const logs = { workouts: [{ date: "2026-08-01", exercises: [{ name: "Back Squat", logged: [{ weight: "225", reps: "5", done: true }] }] }] };
     const user = setup(logs);
@@ -1468,7 +1480,6 @@ describe("<WorkoutSession /> discard requires a second, explicit confirmation", 
   // session shouldn't be one accidental tap away.
   test("tapping 'Discard workout' does NOT immediately discard — shows a second confirmation first", async () => {
     const { user, onCancel } = setup();
-    await user.click(screen.getByLabelText("Exit workout"));
     await user.click(screen.getByText("Discard workout"));
     expect(screen.getByText("Discard this workout?")).toBeInTheDocument();
     expect(onCancel).not.toHaveBeenCalled();
@@ -1476,7 +1487,6 @@ describe("<WorkoutSession /> discard requires a second, explicit confirmation", 
 
   test("only calls onCancel after the second, explicit confirmation", async () => {
     const { user, onCancel } = setup();
-    await user.click(screen.getByLabelText("Exit workout"));
     await user.click(screen.getByText("Discard workout"));
     await user.click(screen.getByText("Yes, discard it"));
     expect(onCancel).toHaveBeenCalledTimes(1);
@@ -1484,7 +1494,6 @@ describe("<WorkoutSession /> discard requires a second, explicit confirmation", 
 
   test("'Keep training' on the second confirmation backs out without discarding", async () => {
     const { user, onCancel } = setup();
-    await user.click(screen.getByLabelText("Exit workout"));
     await user.click(screen.getByText("Discard workout"));
     await user.click(screen.getByText("Keep training"));
     expect(screen.queryByText("Discard this workout?")).not.toBeInTheDocument();
@@ -2291,7 +2300,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
   });
 
-  test("review cadence is the actual final step, and it's optional too — 'Build my plan' shows without picking either", async () => {
+  test("notifications is the final step, optional, and says they can change it later", async () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} />);
     await goToInjuriesStep(user);
@@ -2299,7 +2308,28 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next")); // -> notes
     await user.click(screen.getByText("Next")); // -> food restrictions
     await skipFoodSteps(user);
+    await user.click(screen.getByText("Next")); // review cadence -> notifications
+    expect(screen.getByText("Which notifications do you want?")).toBeInTheDocument();
+    expect(screen.getByText(/change these anytime on the You page/)).toBeInTheDocument();
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
+  });
+
+  test("the notifications picked in the quiz end up on the profile", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    render(<Onboarding onComplete={onComplete} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Next"));
+    await skipFoodSteps(user);
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Weigh-in reminder"));
+    await user.click(screen.getByText("Workout reminders (6pm)"));
+    await user.click(screen.getByText("Build my plan"));
+    await user.click(await screen.findByText(/I understand Overload uses AI/));
+    await user.click(screen.getByText(/Let's go/));
+    expect(onComplete.mock.calls[0][0].profile.notifications).toEqual(["weighIn", "reminders"]);
   });
 
   // Real report: "the AI suggestions for what to eat aren't great" — nothing
@@ -2355,6 +2385,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.type(screen.getByPlaceholderText(/Prefer an upper\/lower split/), "No pull-up bar at my gym");
     await user.click(screen.getByText("Next"));
     await skipFoodSteps(user);
+    await user.click(screen.getByText("Next")); // review cadence
     await user.click(screen.getByText("Build my plan"));
     // Program building falls back to the offline generator in this test
     // env (no real network) and lands on the summary screen next, same as
@@ -2372,6 +2403,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await skipFoodSteps(user);
     await user.click(screen.getByText("Weekly review"));
     await user.click(screen.getByText("Monthly review"));
+    await user.click(screen.getByText("Next"));
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
   });
 });
@@ -2689,5 +2721,43 @@ describe("History & PR with one past session", () => {
     await user.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
     await user.click(screen.getByText(/History & PR/));
     expect(screen.getByText("+5lb since first log")).toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutSession /> arrow, time and notes", () => {
+  const day = { name: "Push", exercises: [{ name: "Incline Dumbbell Press", sets: 1, reps: "8", rest: 60, tips: ["a", "b", "c", "d"] }] };
+  const props = (over = {}) => ({ day, isOverride: false, lastLog: null, logs: { workouts: [] }, initialSets: null, onFinish: vi.fn(), onCancel: vi.fn(), onSaveExit: vi.fn(), equipment: "full", injuries: [], onSwapExercise: vi.fn(), onCacheAlternatives: vi.fn(), ...over });
+  test("the down arrow tucks the workout away (saved), and Discard sits under Finish", async () => {
+    const p = props();
+    const user = userEvent.setup();
+    render(<WorkoutSession {...p} />);
+    await user.click(screen.getByLabelText("Minimize workout"));
+    expect(p.onSaveExit).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Discard workout")).toBeInTheDocument();
+  });
+  test("tapping the clock lets them set the workout time", async () => {
+    const onAdjustTime = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkoutSession {...props({ resumedAt: Date.now(), priorActiveSeconds: 600, onAdjustTime })} />);
+    await user.click(screen.getByLabelText("Edit workout time"));
+    const box = screen.getByLabelText("Workout minutes");
+    expect(box.value).toBe("10");
+    await user.clear(box); await user.type(box, "45");
+    await user.click(screen.getByText("Save time"));
+    expect(onAdjustTime).toHaveBeenCalledWith(2700);
+  });
+  test("a note for next time is saved, shown, and can be cleared", async () => {
+    const onSaveNote = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<WorkoutSession {...props({ notes: {}, onSaveNote })} />);
+    await user.click(screen.getByText("Note for next time"));
+    await user.type(screen.getByLabelText("Note for Incline Dumbbell Press"), "lower the incline a notch");
+    await user.click(screen.getByText("Save note"));
+    expect(onSaveNote).toHaveBeenCalledWith("Incline Dumbbell Press", "lower the incline a notch");
+    rerender(<WorkoutSession {...props({ notes: { "incline dumbbell press": "lower the incline a notch" }, onSaveNote })} />);
+    expect(screen.getByText("lower the incline a notch")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Edit note for Incline Dumbbell Press"));
+    await user.click(screen.getByText("Clear note"));
+    expect(onSaveNote).toHaveBeenLastCalledWith("Incline Dumbbell Press", "");
   });
 });

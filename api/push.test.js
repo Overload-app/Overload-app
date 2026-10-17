@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE } from "./push-cron.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -152,5 +152,40 @@ describe("GitHub's hourly tick", () => {
     expect(await verifyGithubToken(sign(good, "k1", other), keys, nowSec)).toBe(false);
     expect(await verifyGithubToken(sign(good, "nope"), keys, nowSec)).toBe(false);
     expect(await verifyGithubToken("garbage", keys, nowSec)).toBe(false);
+  });
+});
+
+describe("weigh-in and forgotten-workout notifications", () => {
+  const sub = { endpoint: "https://push.example/1", keys: {} };
+  const base = (push, extra = {}) => ({ push: { subscriptions: [sub], tz: "UTC", ...push }, logs: { workouts: [], bodyweight: [] }, program: { days: [{ name: "Push" }] }, ...extra });
+  test("weigh-in goes out at the hour they picked, only if they haven't weighed in", () => {
+    const at7 = new Date("2026-10-17T07:07:00Z");
+    expect(weighInFor(base({ weighIn: true, weighInHour: 7 }), at7)?.kind).toBe("weighin");
+    expect(weighInFor(base({ weighIn: true, weighInHour: 8 }), at7)).toBeNull();
+    expect(weighInFor(base({ weighIn: false, weighInHour: 7 }), at7)).toBeNull();
+    const weighed = base({ weighIn: true, weighInHour: 7 }, { logs: { workouts: [], bodyweight: [{ date: "2026-10-17", weight: 180 }] } });
+    expect(weighInFor(weighed, at7)).toBeNull();
+    expect(weighInFor(base({ weighIn: true }), new Date("2026-10-17T08:07:00Z"))?.kind).toBe("weighin"); // default 8am
+  });
+  test("a workout quiet for 40-100 minutes gets one nudge", () => {
+    const now = new Date("2026-10-17T12:07:00Z");
+    const open = (minAgo) => base({ idleWorkout: true }, { inProgressWorkout: { dayIdx: 0, savedAt: new Date(now - minAgo * 60000).toISOString() } });
+    expect(idleWorkoutFor(open(20), now)).toBeNull();
+    expect(idleWorkoutFor(open(45), now)?.body).toContain("Push");
+    expect(idleWorkoutFor(open(130), now)).toBeNull();
+    expect(idleWorkoutFor(base({ idleWorkout: true }), now)).toBeNull();
+  });
+  test("an hourly run nudges a forgotten workout exactly once", () => {
+    const savedAt = new Date("2026-10-17T10:23:00Z");
+    const st = base({ idleWorkout: true }, { inProgressWorkout: { dayIdx: 0, savedAt: savedAt.toISOString() } });
+    let n = 0;
+    for (let h = 10; h < 16; h++) if (idleWorkoutFor(st, new Date(Date.UTC(2026, 9, 17, h, 7)))) n++;
+    expect(n).toBe(1);
+  });
+  test("each kind can be on or off on its own", () => {
+    const at18 = new Date("2026-10-17T18:07:00Z");
+    const st = base({ reminders: true, weighIn: true, weighInHour: 18 });
+    expect(notificationsFor(st, at18).map((n) => n.kind)).toEqual(["reminder", "weighin"]);
+    expect(notificationsFor(base({ reminders: false, weighIn: true, weighInHour: 18 }), at18).map((n) => n.kind)).toEqual(["weighin"]);
   });
 });

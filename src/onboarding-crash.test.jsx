@@ -95,7 +95,8 @@ async function walkQuiz(user) {
   await user.click(screen.getByText("Next"));     // notes
   await user.click(screen.getByText("Next"));     // food restrictions
   await user.click(screen.getByText("Next"));     // food preferences
-  await user.click(screen.getByText("Build my plan"));
+  await user.click(screen.getByText("Next"));     // review cadence
+  await user.click(screen.getByText("Build my plan")); // notifications (last step)
 }
 
 describe("finishing the quiz with no saved state (reset, or a brand-new signup)", () => {
