@@ -129,6 +129,13 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- iPhone: the tab bar and Resume bar no longer move when scrolling — on phones the page scrolls inside `.app-main` and `.app-shell` is fixed (CSS in `SHELL_CSS`; desktop unchanged).
+- Workout screen: the X is now a down arrow ("Minimize workout") that saves and tucks the workout away (Resume bar brings it back); "Discard workout" sits under Finish (still a 2-step confirm). The old exit menu is gone.
+- Tap the workout clock to set the time (`onAdjustTime` → `adjustWorkoutTime` in App).
+- Notes per exercise ("Note for next time"), shown every time that exercise comes round until cleared: `state.exerciseNotes[normalizeGifKey(name)]`, props `notes`/`onSaveNote` on `WorkoutSession`.
+- Progress: lift progress is grouped by workout day (day chips → exercise chips → graph); same exercise under different names merged: `exerciseGroupsByDay`, `ExerciseProgress`.
+- PR toast also fires when a checked-off set is corrected to a new best (`checkForPR` in `WorkoutSession`, called from `toggleDone` and `updateSet`).
+- Notifications: 4 kinds, each with its own switch on the You page (`NOTIFICATION_KINDS`): workout reminders (6pm), rest alerts, weigh-in reminder (hour picker, `push.weighInHour`, default 8am), and "Forgot to finish?" (a workout quiet for 40–100 min gets one nudge). Server: `weighInFor`, `idleWorkoutFor`, `notificationsFor` in api/push-cron.js. New last quiz step "Which notifications do you want?" (`profile.notifications`); after onboarding a Home card (`NotificationPrompt`) turns them on with one tap (phones need a tap for the permission prompt).
 - In-workout PR toast now also has to beat sets done earlier in the same workout (40x10 then 40x7 both said "new PR"). `bestDoneSet`.
 - History & PR: the graph always shows (it needed 2+ past sessions before), today's best checked-off set is added as "Today", and a rep tie goes to the bigger set (30x10/30x12 showed PR 30x10). History only counts checked-off sets.
 - Every exercise the Coach adds must have a demo video: `ensureVideoExercises` (in `sanitizeCoachResponse`) swaps any new exercise that isn't on the video-confirmed list (`POOLS`), hasn't got a found video in `gifCache`, isn't already in their program, and wasn't asked for by name — for a same-muscle, right-equipment exercise, preferring a different movement than the day already has. The reply says what was swapped.
