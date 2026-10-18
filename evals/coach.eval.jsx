@@ -32,7 +32,7 @@ const ONLY = (process.env.EVAL_ONLY || "").split(",").map((x) => x.trim()).filte
 const USER = { id: "eval-user", email: "eval@example.com", user_metadata: { name: "Eval" } };
 if (process.env.EVAL_STREAMING === "1") globalThis.__OVERLOAD_FORCE_STREAMING__ = true;
 if (process.env.EVAL_PROMPT) globalThis.__OVERLOAD_PROMPT__ = process.env.EVAL_PROMPT;
-const RUN_LABEL = `rulebook: ${process.env.EVAL_PROMPT || "full (shipped)"} · streaming: ${process.env.EVAL_STREAMING === "1" ? "forced on" : "as shipped (on)"}`;
+const RUN_LABEL = `model: ${process.env.EVAL_MODEL || "claude-sonnet-5 (shipped)"} · rulebook: ${process.env.EVAL_PROMPT || "as shipped (compact)"} · streaming: ${process.env.EVAL_STREAMING === "1" ? "forced on" : "as shipped (on)"}`;
 
 const ex = (name, sets = 3, reps = "8-12", rest = 90) => ({ name, sets, reps, rest, tips: ["Brace", "Control it", "Full range", "Don't rush"], alternatives: [] });
 const PROGRAM = { splitName: "Push / Pull / Legs", days: [
@@ -98,6 +98,10 @@ function costCents(u) {
 async function proxyToAnthropic(_url, init) {
   if (ledger.cents >= BUDGET_CENTS) throw new Error(`Eval budget of $${(BUDGET_CENTS / 100).toFixed(2)} reached — stopping.`);
   const body = buildUpstreamBody(JSON.parse(init.body));
+  // EVAL_MODEL=claude-haiku-5-5 runs the Coach on a different model, to see
+  // whether a cheaper one holds up. No fallback here on purpose: if the model
+  // rejects the request, that's exactly what the test should show.
+  if (process.env.EVAL_MODEL) body.model = process.env.EVAL_MODEL;
   const started = Date.now();
   const res = await realFetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -105,7 +109,7 @@ async function proxyToAnthropic(_url, init) {
     body: JSON.stringify(body),
   });
   const record = (u) => {
-    const c = costCents(u || {});
+    const c = costCents(u || {}) * (body.model === "claude-haiku-5-5" ? 0.05 : 1);
     ledger.cents += c;
     ledger.calls++;
     ledger.rows.push({ ms: Date.now() - started, cents: c, in: u?.input_tokens, read: u?.cache_read_input_tokens, write: u?.cache_creation_input_tokens, out: u?.output_tokens, streamed: !!body.stream });
@@ -433,7 +437,7 @@ run("Coach test list (real AI)", () => {
       `Per call: ${ledger.rows.map((r) => `${(r.cents).toFixed(2)}c/${r.ms}ms (in ${r.in}, cache read ${r.read}, cache write ${r.write}, out ${r.out})`).join("; ")}`,
     ];
     mkdirSync("evals/results", { recursive: true });
-    const file = `evals/results/coach-${process.env.EVAL_PROMPT || "full"}-${Date.now()}.md`;
+    const file = `evals/results/coach-${process.env.EVAL_MODEL ? "haiku" : "sonnet"}-${process.env.EVAL_PROMPT || "shipped"}-${Date.now()}.md`;
     writeFileSync(file, lines.join("\n"));
     console.log("\n" + lines.slice(0, 3).join("\n") + `\nFull report: ${file}\n`);
   });
