@@ -129,6 +129,7 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- AI cost cuts (2026-10-17): (1) meal estimates/photos/photo fixes, meal ideas, reviews and exercise alternatives use the cheaper `claude-haiku-5-5` (`LIGHT_MODEL`, ~1/20th the price); the server allows only `MODEL` or `LIGHT_MODEL` and retries a refused cheap call on `MODEL`. Coach and program building stay on `claude-sonnet-5`. (2) Subscribers have a fair-use limit of 25¢/day (`SUBSCRIBER_DAILY_CAP_CENTS` in api/claude.js; 402 `daily-ai-limit` → `DAILY_LIMIT_MESSAGE`); trial stays 15¢/day, 75¢/month; emails in the Vercel env `UNCAPPED_EMAILS` (the owner) are never capped. (3) Coach uses the compact rulebook (`COACH_PROMPT_VERSION = "compact"`; set "full" to go back) — kept in sync with the newest rules.
 - iPhone: the tab bar and Resume bar no longer move when scrolling — on phones the page scrolls inside `.app-main` and `.app-shell` is fixed (CSS in `SHELL_CSS`; desktop unchanged).
 - Workout screen: the X is now a down arrow ("Minimize workout") that saves and tucks the workout away (Resume bar brings it back); "Discard workout" sits under Finish (still a 2-step confirm). The old exit menu is gone.
 - Tap the workout clock to set the time (`onAdjustTime` → `adjustWorkoutTime` in App).
