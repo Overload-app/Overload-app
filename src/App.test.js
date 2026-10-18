@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  breaksDiet,
   exerciseGroupsByDay,
   ensureVideoExercises,
   bestDoneSet,
@@ -5217,5 +5218,28 @@ describe("lift progress grouped by workout day", () => {
     expect(groups.map((g) => g.day)).toEqual(["Push", "Pull"]);
     expect(groups[1].exercises).toEqual(["Cable Lat Pulldown", "Barbell Curl"]);
     expect(groups[0].exercises).toEqual(["Barbell Bench Press"]); // nothing checked off for Cable Fly
+  });
+});
+
+describe("diet rules are enforced on meal ideas, whichever model wrote them", () => {
+  test("meat for a vegetarian, dairy for dairy-free, nuts for an allergy are dropped", () => {
+    const meals = [
+      { name: "Chicken fajita bowl", cal: 600, protein: 45, carb: 60, fat: 15 },
+      { name: "Black bean and tofu burrito bowl", cal: 600, protein: 35, carb: 70, fat: 15 },
+      { name: "Turkey and bean enchilada skillet", cal: 650, protein: 45, carb: 60, fat: 20 },
+    ];
+    expect(mealSuggestionsFrom({ suggestions: meals }, { diet: ["vegetarian"] }).map((m) => m.name)).toEqual(["Black bean and tofu burrito bowl"]);
+    expect(breaksDiet("Greek yogurt parfait", ["dairy_free"])).toBe(true);
+    expect(breaksDiet("Smoothie with almond milk", ["dairy_free"])).toBe(false);
+    expect(breaksDiet("Peanut butter oats", ["nut_allergy"])).toBe(true);
+    expect(breaksDiet("Sandwich on gluten-free bread", ["gluten_free"])).toBe(false);
+    expect(breaksDiet("Vegan cheese pizza", ["vegan"])).toBe(false);
+    expect(breaksDiet("Scrambled eggs", ["vegan"])).toBe(true);
+    expect(breaksDiet("Beef burger", [])).toBe(false);
+  });
+  test("the closest video-confirmed swap is picked (a rear-delt fly stays a rear-delt fly)", () => {
+    const ex = (name) => ({ name, sets: 3, reps: "12", rest: 60 });
+    const { exercises } = ensureVideoExercises(["Dumbbell Row", "Dumbbell Reverse Flye", "Dumbbell Curl"].map(ex), { equipment: "dumbbell" });
+    expect(exercises[1].name).toBe("Dumbbell Rear Delt Fly");
   });
 });

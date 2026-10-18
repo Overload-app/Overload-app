@@ -251,7 +251,7 @@ run("every AI feature, against the real model", () => {
   test("meal suggestions", async () => {
     await Promise.all(SUGGEST.map(([id, profile, remaining, banned]) => check(id, `suggestions: ${profile.diet.join("/") || "no diet"}, ${remaining.cal} cal left`, async () => {
       const raw = await claudeChat({ system: buildMealSuggestionSystem(), messages: [{ role: "user", content: mealSuggestionUserMessage(profile, remaining) }] });
-      const list = mealSuggestionsFrom(parseJSONLoose(raw));
+      const list = mealSuggestionsFrom(parseJSONLoose(raw), profile);
       const text = list.map((m) => `${m.name} ${m.note}`).join(" | ");
       const roomy = remaining.cal > 300;
       return {

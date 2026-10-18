@@ -1812,7 +1812,7 @@ export function inferMuscleGroup(name) {
   // Before the chest rule, which matches any "fly": a reverse/rear-delt fly is
   // a pull-day exercise, and calling it chest made the top-up below add Bench
   // Press to a back day that contained one.
-  if (/rear delt|reverse fly|face pull/.test(n)) return "shoulders";
+  if (/rear delt|reverse fly|face pull/.test(n.replace(/flyes?\b/g, "fly"))) return "shoulders";
   if (/press|fly|pec deck|push-?up/.test(n) && !/overhead press|shoulder press|leg press/.test(n)) return "chest";
   if (/overhead press|shoulder press|lateral raise|rear delt|face pull|y-raise|arnold|handstand|pike push-?up/.test(n)) return "shoulders";
   if (/row|pulldown|pull-?up|chin-?up|pullover/.test(n)) return "back";
@@ -1899,11 +1899,19 @@ export function ensureVideoExercises(exercises, { message = "", gifCache = {}, e
     const group = EXERCISE_TO_GROUP[name] || inferMuscleGroup(name);
     // Prefer a different movement from what the day already has (another
     // row next to Dumbbell Row is the very thing reported).
-    const movement = (n) => String(n || "").toLowerCase().trim().split(/\s+/).pop();
+    const words = (n) => String(n || "").toLowerCase().replace(/flyes?\b/g, "fly").split(/[^a-z]+/).filter((w) => w && !["dumbbell", "barbell", "cable", "machine"].includes(w));
+    const movement = (n) => words(n).pop();
     const dayMoves = new Set(out.filter((_, j) => j !== i).map((o) => movement(o?.name)));
+    const mine = new Set(words(name));
+    const overlap = (c) => words(c).filter((w) => mine.has(w)).length;
     const candidates = (pool[group] || []).filter((cand) => gifCache?.[normalizeGifKey(cand)] !== null
       && !out.some((other, j) => j !== i && isSameCoreExercise(other?.name, cand)));
-    const choice = candidates.find((c) => !dayMoves.has(movement(c))) || candidates[0];
+    // Closest match first — found by the live test: "Dumbbell Reverse Flye"
+    // on a pull day was swapped for Dumbbell Shoulder Press instead of
+    // Dumbbell Rear Delt Fly. Then a different movement from the rest of the
+    // day (another row next to Dumbbell Row is what was reported before).
+    const score = (c) => overlap(c) - (dayMoves.has(movement(c)) ? 2 : 0);
+    const choice = [...candidates].sort((a, b) => score(b) - score(a))[0];
     if (!choice) return;
     swapped.push([name, choice]);
     out[i] = { ...e, name: choice, tips: tipsForExercise(choice), alternatives: [] };
@@ -2800,7 +2808,25 @@ export function parseLooseList(text) {
   return items.length ? items : null;
 }
 
-export function mealSuggestionsFrom(parsed) {
+// Meal ideas that clearly break a diet rule are dropped, whichever model
+// wrote them. Found by the live test: the cheaper model suggested chicken
+// and turkey to a vegetarian. Plant versions ("almond milk", "vegan cheese",
+// "gluten-free bread") are allowed.
+const PLANT = "(?<!(almond|oat|soy|coconut|cashew|rice|vegan|plant|plant-based|dairy-free|nut|peanut|gluten-free|gf|lettuce|veggie|beyond|impossible|meatless|tofu)[- ])";
+const DIET_BANS = {
+  vegetarian: new RegExp(`${PLANT}\\b(chicken|beef|steak|pork|turkey|fish|salmon|tuna|shrimp|prawns?|bacon|ham|pepperoni|sausage|anchov\\w*|lamb|duck|crab|lobster|cod|tilapia|jerky|prosciutto|salami|chorizo|meatballs?|burger patty)\\b`, "i"),
+  vegan: new RegExp(`${PLANT}\\b(chicken|beef|steak|pork|turkey|fish|salmon|tuna|shrimp|prawns?|bacon|ham|pepperoni|sausage|lamb|duck|crab|lobster|cod|jerky|eggs?|egg whites?|whey|casein|milk|cheese|yogurt|butter|cream|honey|ghee|mayo|parmesan|mozzarella|feta|cottage cheese)\\b`, "i"),
+  dairy_free: new RegExp(`${PLANT}\\b(milk|cheese|yogurt|whey|casein|butter|cream|ghee|parmesan|mozzarella|feta|cottage cheese|ice cream)\\b`, "i"),
+  gluten_free: new RegExp(`${PLANT}\\b(bread|bagel|wrap|tortilla|pasta|noodles?|toast|bun|pita|couscous|beer|croissant|cereal|crackers?|pizza)\\b`, "i"),
+  halal: /\b(pork|bacon|ham|pepperoni|prosciutto|chorizo|salami|beer|wine)\b/i,
+  kosher: /\b(pork|bacon|ham|pepperoni|prosciutto|chorizo|salami|shrimp|prawns?|crab|lobster|shellfish)\b/i,
+  nut_allergy: /(?<!nut[- ]free )\b(peanuts?|almonds?|cashews?|walnuts?|pecans?|pistachios?|hazelnuts?|macadamias?|nut butter|peanut butter|almond butter|nutella|almond milk)\b/i,
+};
+export function breaksDiet(text, diet) {
+  return (diet || []).some((d) => DIET_BANS[d] && DIET_BANS[d].test(String(text || "")));
+}
+
+export function mealSuggestionsFrom(parsed, profile) {
   let list = null;
   for (const key of ["suggestions", "meals", "ideas", "options", "items"]) {
     let v = parsed?.[key];
@@ -2812,6 +2838,7 @@ export function mealSuggestionsFrom(parsed) {
     .filter((m) => m && typeof m === "object")
     .map((m) => cleanAiMeal(m))
     .filter((m) => m.name && m.name !== "Meal" && m.cal > 0)
+    .filter((m) => !breaksDiet(m.name, profile?.diet))
     .slice(0, 5);
 }
 
@@ -7017,7 +7044,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       const system = buildMealSuggestionSystem();
       const userMsg = mealSuggestionUserMessage(profile, remaining);
       const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }], model: LIGHT_MODEL });
-      const list = mealSuggestionsFrom(parseJSONLoose(raw));
+      const list = mealSuggestionsFrom(parseJSONLoose(raw), profile);
       if (list.length === 0) {
         logError("Meal suggestions came back empty", { stack: String(raw).slice(0, 3000), context: { type: "meal-suggestions-empty" } });
         throw new Error("empty");
