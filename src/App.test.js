@@ -163,6 +163,10 @@ import {
   isAuthError,
 } from "./App.jsx";
 import { supabase } from "./supabaseClient.js";
+// Most rulebook-wording tests below check the FULL rulebook's text; the
+// compact one has its own tests. Pin "full" here unless a test sets another.
+globalThis.__OVERLOAD_PROMPT__ = "full";
+beforeEach(() => { globalThis.__OVERLOAD_PROMPT__ = "full"; });
 
 vi.mock("./supabaseClient.js", () => ({ supabase: { from: vi.fn() } }));
 
@@ -2176,14 +2180,23 @@ describe("AI text is always safe to put on screen", () => {
 // The compact rulebook: the same rules in roughly a quarter of the tokens.
 // Shipped switched off until the Coach test list has compared both.
 describe("compact Coach rulebook", () => {
+  const COACH_COMPACT_RULES_FOR_TEST = () => { globalThis.__OVERLOAD_PROMPT__ = "compact"; try { return buildCoachStaticSystem(); } finally { delete globalThis.__OVERLOAD_PROMPT__; } };
   function compact() {
     globalThis.__OVERLOAD_PROMPT__ = "compact";
-    try { return buildCoachStaticSystem(); } finally { delete globalThis.__OVERLOAD_PROMPT__; }
+    try { return buildCoachStaticSystem(); } finally { globalThis.__OVERLOAD_PROMPT__ = "full"; }
   }
 
-  test("ships switched off — the full rulebook is what the Coach gets", () => {
-    expect(COACH_PROMPT_VERSION).toBe("full");
-    expect(buildCoachStaticSystem()).toBe(buildCoachStaticSystemFull());
+  test("ships switched on — the compact rulebook is what the Coach gets (owner's call, 2026-10-17)", () => {
+    expect(COACH_PROMPT_VERSION).toBe("compact");
+    delete globalThis.__OVERLOAD_PROMPT__;
+    expect(buildCoachStaticSystem()).toBe(COACH_COMPACT_RULES_FOR_TEST());
+  });
+
+  test("keeps the newest rules too: two-day changes, 'harder' within their minutes, one row per dumbbell day", () => {
+    const c = compact();
+    expect(c).toContain("TWO OR MORE days");
+    expect(c).toContain("within their minutes");
+    expect(c).toContain("ONE row variation per day");
   });
 
   test("is far smaller, which is the point", () => {

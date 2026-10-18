@@ -143,7 +143,9 @@ export default async function handler(req, res) {
   const userMsg = `Exercise: ${name}. Available equipment: ${equipmentDescription(equipment)}. Injuries/areas to avoid: ${injuries || "none"}.`;
 
   try {
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+    // The cheaper model (cost cut), with the main one as a fallback if it
+    // refuses the request.
+    const send = (model) => fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -156,7 +158,7 @@ export default async function handler(req, res) {
       // wrapped the list in prose. Same fix as the app's main AI calls: a
       // forced structured answer, with thinking kept low.
       body: JSON.stringify({
-        model: "claude-sonnet-5",
+        model,
         max_tokens: 1500,
         system,
         messages: [{ role: "user", content: userMsg }],
@@ -165,6 +167,8 @@ export default async function handler(req, res) {
         output_config: { effort: "low" },
       }),
     });
+    let upstream = await send("claude-haiku-5-5");
+    if (!upstream.ok && [400, 404].includes(upstream.status)) upstream = await send("claude-sonnet-5");
     const data = await upstream.json();
     if (!upstream.ok) {
       return res.status(upstream.status).json({ error: data?.error?.message || `Anthropic API error ${upstream.status}` });

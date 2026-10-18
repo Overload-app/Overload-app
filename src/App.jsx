@@ -283,7 +283,15 @@ const CACHE_WRITE_1H_MULTIPLIER = 2;
 // account could run well past $0.75/month because most of what it spent was
 // never added up. Takes the whole usage object now rather than two numbers,
 // so a field being added upstream can't silently go missing again.
-export function estimateCostCents(usageOrInputTokens, outputTokens) {
+// The cheaper model the simple jobs use (meal estimates, meal ideas,
+// reviews). Real ask: cut AI costs — a heavy day cost 31 cents. It costs a
+// twentieth of the main model per token. The Coach and program building stay
+// on the main model. If the server can't use it, it falls back on its own.
+export const LIGHT_MODEL = "claude-haiku-5-5";
+const LIGHT_MODEL_PRICE_FACTOR = 0.05; // $0.10/$0.50 vs $2/$10 per million tokens
+
+export function estimateCostCents(usageOrInputTokens, outputTokens, model) {
+  if (model === LIGHT_MODEL) return estimateCostCents(usageOrInputTokens, outputTokens) * LIGHT_MODEL_PRICE_FACTOR;
   const usage = typeof usageOrInputTokens === "object" && usageOrInputTokens !== null
     ? usageOrInputTokens
     : { input_tokens: usageOrInputTokens, output_tokens: outputTokens };
@@ -363,8 +371,9 @@ export function budgetAllows(aiUsage) {
 }
 
 export const BUDGET_EXCEEDED_MESSAGE = "You've used up this trial's AI limit for now — subscribing removes the cap, or this resets tomorrow.";
-function budgetExceededError() {
-  const err = new Error(BUDGET_EXCEEDED_MESSAGE);
+export const DAILY_LIMIT_MESSAGE = "You've reached today's AI limit — it resets tomorrow. Everything else in the app works as normal.";
+function budgetExceededError(message = BUDGET_EXCEEDED_MESSAGE) {
+  const err = new Error(message);
   err.budgetExceeded = true;
   return err;
 }
@@ -463,7 +472,7 @@ export async function readCoachStream(body, onPartialReply) {
   return { toolJson, usage };
 }
 
-export async function claudeChat({ system, messages, onPartialReply }) {
+export async function claudeChat({ system, messages, onPartialReply, model }) {
   if (aiBudgetContext?.isTrialUnsubscribed && !budgetAllows(aiBudgetContext.aiUsage)) {
     throw budgetExceededError();
   }
@@ -570,7 +579,7 @@ export async function claudeChat({ system, messages, onPartialReply }) {
       // most engaged users). Same margin applied everywhere claudeChat is
       // used (onboarding program generation has the identical shape).
       body: JSON.stringify({
-        model: "claude-sonnet-5",
+        model: model || "claude-sonnet-5",
         max_tokens: 8000,
         system,
         messages,
@@ -605,9 +614,12 @@ export async function claudeChat({ system, messages, onPartialReply }) {
   // leaving the Coach spinning forever.
   if (!isStream) clearTimeout(timeoutId);
   if (res.status === 402) {
-    // The server's own copy of the free-trial AI cap (see api/claude.js).
+    // The server's AI spending limits (see api/claude.js): the free-trial
+    // cap, or a subscriber's daily fair-use limit.
     clearTimeout(timeoutId);
-    throw budgetExceededError();
+    let reason = "";
+    try { reason = (await res.json())?.error || ""; } catch (e) {}
+    throw budgetExceededError(reason === "daily-ai-limit" ? DAILY_LIMIT_MESSAGE : BUDGET_EXCEEDED_MESSAGE);
   }
   if (!res.ok) {
     let detail = "";
@@ -644,7 +656,7 @@ export async function claudeChat({ system, messages, onPartialReply }) {
   const data = await res.json();
   if (data.usage) {
     const u = data.usage;
-    const costCents = estimateCostCents(u);
+    const costCents = estimateCostCents(u, undefined, data.model || model);
     // Logged as real numbers, not a model. Every attempt so far to work out
     // why a conversation cost what it did has been arithmetic on estimates,
     // and the estimates have been wrong; this prints what was actually
@@ -5892,9 +5904,12 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
 // the same rules in roughly a quarter of the tokens: the full version is about
 // 10,400 tokens re-sent with every message, and for light use most sessions
 // start by paying to re-cache it (2x, ~4 cents) — most of a $0.36 day of
-// barely-used app. Left on "full" until the Coach test list has run both
-// (EVAL_PROMPT=compact npm run eval:coach) and "compact" scores as well.
-export const COACH_PROMPT_VERSION = "full";
+// barely-used app. Switched to "compact" on 2026-10-17 (owner's call, to cut
+// costs): in the live Coach test it scored as well as "full" (19/25 vs
+// 17/25), and the one thing it did worse — keeping non-dumbbell exercises in
+// a dumbbell-only day — is now enforced by the app itself (equipmentAskedFor,
+// usesOnly). To go back: set this to "full".
+export const COACH_PROMPT_VERSION = "compact";
 
 export function buildCoachStaticSystem() {
   const version = globalThis.__OVERLOAD_PROMPT__ || COACH_PROMPT_VERSION;
@@ -5920,7 +5935,7 @@ WHICH DAY — settle this before anything else:
 
 THREE KINDS OF CHANGE — use exactly one of "programDayEdit", "program", "todayOverride" (or none if nothing changes):
 1. Permanent change to ONE day (the usual case: "swap squat for leg press", "add abs", "my knees hurt, adjust leg day") -> "programDayEdit": {"dayIndex", "day": {"name", "exercises"}} with that day's FULL new exercise list. Don't resend other days.
-2. Permanent change across several days or the structure ("change my split", "add a day", "make my whole program harder") -> "program" with every day.
+2. Permanent change across several days or the structure ("change my split", "add a day", "make my whole program harder") -> "program" with every day. One message that changes TWO OR MORE days ("swap curls on pull and add calf raises to legs") is always case 2 — "programDayEdit" carries only one day, so the other change would silently not happen.
 3. One-time change for exactly ONE workout ("today", "this session", a reason that only affects one day) -> "todayOverride" (that session's exercises) AND "todayOverrideDayIndex" (which day — any day, not just the next). Used once, then removed.
 Anything lasting longer than one session ("this week", "this winter", "until my knee heals", "for my cut") is case 1 or 2, never case 3. They can always undo it.
 
@@ -5929,7 +5944,8 @@ A ONE-TIME VERSION OF A DAY is that day, changed only as asked: keep the same nu
 ADDING AND REMOVING: "add X" is a direct request — add it to the day it fits best (abs: whichever day has room; a muscle: the day built around it) in the same response. Never remove an exercise they didn't ask to remove to make room; if it pushes past their time budget, set "overrideCeiling": true and mention the extra time in a short clause. When removing or banning something, check the returned day really no longer contains it; if honoring it would leave too few exercises, say so instead of quietly leaving it in.
 
 EXAMPLES:
-- "lock in this winter, make my program harder, same days" -> case 2: same days, same exercises where they fit, genuinely harder (more sets, tighter reps, heavier progression); nothing else changed.
+- "lock in this winter, make my program harder, same days" -> case 2: same days, same exercises, genuinely harder within their minutes — heavier rep ranges on compounds, harder variations, shorter rest. Don't pile on sets that won't fit (past EXERCISE_CEILING they just get cut back out); nothing else changed.
+- With only dumbbells, back work is dumbbell rows, pullovers, renegade rows, reverse flyes and shrugs — ONE row variation per day (a chest-supported row is the same movement as a dumbbell row).
 - "focus on muscle more than fat loss" -> update "program" toward hypertrophy AND set real "targets" (a surplus, protein ~1g/lb, rest split carbs/fat).
 - "go back to before we did X" -> find the matching entry in the version history and set "restoreIndex"; everything else null. If nothing matches, say so and ask what they want.
 - "go back to my original program" -> "restoreOriginal": true; everything else null.
@@ -6929,6 +6945,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         try {
           const raw = await claudeChat({
             system: MEAL_PHOTO_SYSTEM,
+        model: LIGHT_MODEL,
             messages: [{ role: "user", content: [
               { type: "image", source: { type: "base64", media_type: item.mediaType, data: item.base64 } },
               { type: "text", text: "Identify this meal and estimate its calories and macros." },
@@ -6974,6 +6991,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     try {
       const raw = await claudeChat({
         system: MEAL_TEXT_SYSTEM,
+        model: LIGHT_MODEL,
         messages: [{ role: "user", content: text }],
       });
       const parsed = parseJSONLoose(raw);
@@ -6998,7 +7016,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       const remaining = { cal: targets.calories - totals.cal, protein: targets.protein - totals.protein, carb: targets.carbs - totals.carb, fat: targets.fat - totals.fat };
       const system = buildMealSuggestionSystem();
       const userMsg = mealSuggestionUserMessage(profile, remaining);
-      const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }] });
+      const raw = await claudeChat({ system, messages: [{ role: "user", content: userMsg }], model: LIGHT_MODEL });
       const list = mealSuggestionsFrom(parseJSONLoose(raw));
       if (list.length === 0) {
         logError("Meal suggestions came back empty", { stack: String(raw).slice(0, 3000), context: { type: "meal-suggestions-empty" } });
@@ -7006,7 +7024,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       }
       setSuggestions(list);
     } catch (e) {
-      setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Couldn't get suggestions — try again.");
+      setSuggestError(e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? e.message : "Couldn't get suggestions — try again.");
     } finally {
       setSuggestLoading(false);
     }
@@ -7020,12 +7038,13 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     try {
       const raw = await claudeChat({
         system: MEAL_PHOTO_SYSTEM,
+        model: LIGHT_MODEL,
         messages: photoFixMessages(lastPhoto, what),
       });
       setPhotoResult(cleanAiMeal(parseJSONLoose(raw), mealNameFromDescription(what)));
       setPhotoFix("");
     } catch (err) {
-      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : err.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE : "Couldn't re-check that photo — try again, or fix the name and numbers yourself.");
+      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : err.budgetExceeded ? err.message : "Couldn't re-check that photo — try again, or fix the name and numbers yourself.");
     } finally {
       setPhotoLoading(false);
     }
@@ -7057,6 +7076,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     try {
       const raw = await claudeChat({
         system: MEAL_PHOTO_SYSTEM,
+        model: LIGHT_MODEL,
         messages: [{ role: "user", content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
           { type: "text", text: "Identify this meal and estimate its calories and macros." },
@@ -8927,6 +8947,7 @@ export default function App() {
         try {
           const raw = await claudeChat({
             system: buildReviewSystem(state.profile, cadence, summary),
+            model: LIGHT_MODEL,
             messages: [{ role: "user", content: "Write my review now." }],
           });
           ({ overview, advice } = reviewFromParsed(parseJSONLoose(raw)));
@@ -9643,7 +9664,7 @@ export default function App() {
           context: { type: "coach-request-failure", status: e?.status },
         });
       }
-      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? BUDGET_EXCEEDED_MESSAGE
+      const failText = e.offline ? OFFLINE_MESSAGE : e.timeout ? TIMEOUT_MESSAGE : e.budgetExceeded ? e.message
         : e.status === 429 ? "That's a lot of messages in a few minutes — give it a moment, then try again."
         : e.status === 413 ? "That message is too long for me — try a shorter version."
         : "Sorry, I couldn't reach the coach just now. Please try sending that again in a moment.";

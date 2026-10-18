@@ -16,6 +16,13 @@ import { waitUntil } from "@vercel/functions";
 // the client sends these too, but a request that asks for anything else
 // (a more expensive model, a much larger response) gets these instead.
 export const MODEL = "claude-sonnet-5";
+// The cheaper model the app may ask for on simple jobs (meal estimates, meal
+// ideas, reviews). Real ask: cut AI costs — a heavy day cost 31 cents. Any
+// other model name a caller sends is replaced with MODEL.
+export const LIGHT_MODEL = "claude-haiku-5-5";
+const ALLOWED_MODELS = new Set([MODEL, LIGHT_MODEL]);
+// Dollars per million tokens, input / output.
+const PRICES = { [MODEL]: [2, 10], [LIGHT_MODEL]: [0.1, 0.5] };
 export const MAX_OUTPUT_TOKENS = 8000;
 
 export function bearerToken(req) {
@@ -34,7 +41,7 @@ export function buildUpstreamBody(clientBody) {
   const maxTokens = Number.isFinite(requested) && requested > 0
     ? Math.min(Math.round(requested), MAX_OUTPUT_TOKENS)
     : MAX_OUTPUT_TOKENS;
-  const upstream = { model: MODEL, max_tokens: maxTokens };
+  const upstream = { model: ALLOWED_MODELS.has(body.model) ? body.model : MODEL, max_tokens: maxTokens };
   for (const field of ["system", "messages", "tools", "tool_choice", "output_config"]) {
     if (body[field] !== undefined) upstream[field] = body[field];
   }
@@ -75,20 +82,24 @@ export function overRateLimit(userId, now = Date.now(), calls = recentCalls) {
   return false;
 }
 
-// The free-trial AI spending cap, enforced here rather than only in the app
-// (which a script calling this endpoint directly would skip). Same limits the
-// app shows: 15 cents a day, 75 cents a month, for accounts that aren't
-// subscribed. Spending is recorded per account per day in the ai_usage table
-// (supabase-migration-ai-usage.sql); until that table exists, the cap is
-// simply not enforced, so deploying this first can't lock anyone out.
+// AI spending caps, enforced here rather than only in the app (which a script
+// calling this endpoint directly would skip). Free trial: the limits the app
+// shows, 15 cents a day and 75 cents a month. Subscribers: a fair-use limit
+// of 25 cents a day — real ask after a heavy day cost 31 cents, more than a
+// subscription can carry every day. Normal use never comes close. Accounts in
+// the UNCAPPED_EMAILS environment variable (comma-separated — the owner) have
+// no limit. Spending is recorded per account per day in the ai_usage table;
+// without that table nothing is enforced, so nobody can be locked out by it.
 export const TRIAL_DAILY_CAP_CENTS = 15;
 export const TRIAL_MONTHLY_CAP_CENTS = 75;
-const INPUT_DOLLARS_PER_TOKEN = 2 / 1_000_000;
-const OUTPUT_DOLLARS_PER_TOKEN = 10 / 1_000_000;
+export const SUBSCRIBER_DAILY_CAP_CENTS = 25;
 
-// The same arithmetic as estimateCostCents in the app.
-export function usageCostCents(usage) {
+// The same arithmetic as estimateCostCents in the app, priced per model.
+export function usageCostCents(usage, model = MODEL) {
   if (!usage) return 0;
+  const [inPrice, outPrice] = PRICES[model] || PRICES[MODEL];
+  const INPUT_DOLLARS_PER_TOKEN = inPrice / 1_000_000;
+  const OUTPUT_DOLLARS_PER_TOKEN = outPrice / 1_000_000;
   const write1h = usage.cache_creation?.ephemeral_1h_input_tokens || 0;
   const write5m = usage.cache_creation?.ephemeral_5m_input_tokens || 0;
   const unattributed = Math.max(0, (usage.cache_creation_input_tokens || 0) - write1h - write5m);
@@ -98,6 +109,15 @@ export function usageCostCents(usage) {
     + write5m * 1.25 * INPUT_DOLLARS_PER_TOKEN
     + (usage.output_tokens || 0) * OUTPUT_DOLLARS_PER_TOKEN;
   return dollars * 100;
+}
+
+export function spentToday(rows, today) {
+  return (rows || []).filter((r) => String(r.day).slice(0, 10) === today).reduce((n, r) => n + (Number(r.cents) || 0), 0);
+}
+
+export function isUncapped(email, list = process.env.UNCAPPED_EMAILS) {
+  const e = String(email || "").trim().toLowerCase();
+  return !!e && String(list || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).includes(e);
 }
 
 export function overTrialCap(rows, today) {
@@ -111,23 +131,27 @@ export function overTrialCap(rows, today) {
   return daily >= TRIAL_DAILY_CAP_CENTS || monthly >= TRIAL_MONTHLY_CAP_CENTS;
 }
 
-// null = no cap applies (subscribed, or the usage table isn't set up yet).
-async function trialSpendCheck(supabaseAdmin, userId, today) {
+// null = no cap applies (an uncapped account, or the usage table isn't set
+// up yet). Otherwise { over, reason }.
+async function spendCheck(supabaseAdmin, userId, email, today) {
+  if (isUncapped(email)) return null;
   try {
     const [{ data: profile }, usage] = await Promise.all([
       supabaseAdmin.from("profiles").select("subscribed").eq("id", userId).maybeSingle(),
       supabaseAdmin.from("ai_usage").select("day, cents").eq("user_id", userId).gte("day", `${today.slice(0, 7)}-01`),
     ]);
-    if (profile?.subscribed === true) return null;
     if (usage.error) return null;
-    return { over: overTrialCap(usage.data, today) };
+    if (profile?.subscribed === true) {
+      return { over: spentToday(usage.data, today) >= SUBSCRIBER_DAILY_CAP_CENTS, reason: "daily-ai-limit" };
+    }
+    return { over: overTrialCap(usage.data, today), reason: "trial-ai-limit" };
   } catch (e) {
     return null;
   }
 }
 
-function recordSpend(supabaseAdmin, userId, today, usage) {
-  const cents = usageCostCents(usage);
+function recordSpend(supabaseAdmin, userId, today, usage, model) {
+  const cents = usageCostCents(usage, model);
   if (!(cents > 0)) return;
   try {
     waitUntil(Promise.resolve(supabaseAdmin.rpc("add_ai_usage", { p_user: userId, p_day: today, p_cents: cents })).catch(() => {}));
@@ -192,13 +216,14 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: "Not signed in." });
   }
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
-  let userId;
+  let userId, userEmail;
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data || !data.user) {
       return res.status(401).json({ error: "Not signed in." });
     }
     userId = data.user.id;
+    userEmail = data.user.email;
     if (overRateLimit(data.user.id)) {
       return res.status(429).json({ error: "That's a lot of requests in a few minutes — give it a moment and try again." });
     }
@@ -211,32 +236,39 @@ export default async function handler(req, res) {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const spend = await trialSpendCheck(supabaseAdmin, userId, today);
+  const spend = await spendCheck(supabaseAdmin, userId, userEmail, today);
   if (spend?.over) {
-    return res.status(402).json({ error: "trial-ai-limit" });
+    return res.status(402).json({ error: spend.reason });
   }
 
   try {
-    const upstreamBody = buildUpstreamBody(req.body);
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+    let upstreamBody = buildUpstreamBody(req.body);
+    const send = (body) => fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(upstreamBody),
+      body: JSON.stringify(body),
     });
+    let upstream = await send(upstreamBody);
+    // Safety net for the cheaper model: if Anthropic refuses the request for
+    // it (a model or feature it doesn't take), run it on the main model.
+    if (!upstream.ok && upstreamBody.model !== MODEL && [400, 404].includes(upstream.status)) {
+      upstreamBody = { ...upstreamBody, model: MODEL };
+      upstream = await send(upstreamBody);
+    }
     // Streamed only when the app asked for it (see COACH_STREAMING_ENABLED in
     // App.jsx), and only for a successful response — an error from Anthropic
     // is a normal JSON body and goes through the ordinary path below.
     if (upstreamBody.stream && upstream.ok && upstream.body) {
       const usage = await pipeEventStream(upstream.body, res);
-      if (spend) recordSpend(supabaseAdmin, userId, today, usage);
+      if (spend) recordSpend(supabaseAdmin, userId, today, usage, upstreamBody.model);
       return;
     }
     const data = await upstream.json();
-    if (spend && upstream.ok) recordSpend(supabaseAdmin, userId, today, data?.usage);
+    if (spend && upstream.ok) recordSpend(supabaseAdmin, userId, today, data?.usage, upstreamBody.model);
     res.status(upstream.status).json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
