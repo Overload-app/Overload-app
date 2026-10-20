@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  coachUsesLightModel,
   breaksDiet,
   exerciseGroupsByDay,
   ensureVideoExercises,
@@ -5241,5 +5242,40 @@ describe("diet rules are enforced on meal ideas, whichever model wrote them", ()
     const ex = (name) => ({ name, sets: 3, reps: "12", rest: 60 });
     const { exercises } = ensureVideoExercises(["Dumbbell Row", "Dumbbell Reverse Flye", "Dumbbell Curl"].map(ex), { equipment: "dumbbell" });
     expect(exercises[1].name).toBe("Dumbbell Rear Delt Fly");
+  });
+});
+
+describe("which Coach messages the cheaper model answers", () => {
+  const p = { diet: [] };
+  const veg = { diet: ["vegetarian"] };
+  test("plain questions and chat go to the cheaper model", () => {
+    for (const t of ["how do I do a romanian deadlift?", "have I hit 180 yet?", "how is my bench press progressing?", "just hit 225 on bench!!", "what's a good rep range for hypertrophy?", "thanks!", "how much protein should I eat a day?"]) {
+      expect(coachUsesLightModel(t, p, []), t).toBe(true);
+    }
+  });
+  test("anything that could change their program or targets goes to the main model", () => {
+    for (const t of ["swap bench for dumbbell press", "add calf raises to leg day", "make my push day harder", "only dumbbells today", "switch to a cut", "undo that", "give me 5000 calories", "change my split to 4 days", "can I train 5 days a week now", "my knee hurts", "I'm 15, give me a max strength program"]) {
+      expect(coachUsesLightModel(t, p, []), t).toBe(false);
+    }
+  });
+  test("food questions go to the main model when they have a diet rule", () => {
+    expect(coachUsesLightModel("give me 3 high protein dinner ideas", veg, [])).toBe(false);
+    expect(coachUsesLightModel("give me 3 high protein dinner ideas", p, [])).toBe(true);
+  });
+  test("a short answer to the Coach's question goes to the main model", () => {
+    const chat = [{ role: "user", text: "make push dumbbells" }, { role: "assistant", text: "Which push day — A or B?" }];
+    expect(coachUsesLightModel("the volume one", p, chat)).toBe(false);
+  });
+});
+
+describe("barbell lifts named without the word 'barbell'", () => {
+  test("don't count as dumbbell-only", () => {
+    expect(usesOnly("Overhead Press", "dumbbell")).toBe(false);
+    expect(usesOnly("Bench Press", "dumbbell")).toBe(false);
+    expect(usesOnly("Romanian Deadlift", "dumbbell")).toBe(false);
+    expect(usesOnly("Dumbbell Overhead Press", "dumbbell")).toBe(true);
+    expect(usesOnly("Dumbbell Romanian Deadlift", "dumbbell")).toBe(true);
+    expect(usesOnly("Goblet Squat", "dumbbell")).toBe(true);
+    expect(usesOnly("Lateral Raise", "dumbbell")).toBe(true);
   });
 });

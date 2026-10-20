@@ -247,4 +247,21 @@ describe("a one-time change asked for on a day that isn't next", () => {
       expect(d.exercises.length).toBe(before.find((b) => b.name === d.name).exercises.length);
     });
   }, 20000);
+
+  test("a plain question goes to the cheaper model; a change it slips in is redone by the main model", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Coach$/ }));
+    const input = screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day");
+    const models = () => fetchSpy.mock.calls.filter(([u]) => String(u).includes("/api/claude")).map(([, init]) => JSON.parse(init.body).model);
+    // nextReply makes a one-time change — the cheaper model isn't trusted with that.
+    await user.type(input, "what's a good rep range for hypertrophy?{enter}");
+    await screen.findByText(/Done — your next Push/, {}, { timeout: 4000 });
+    expect(models()).toEqual(["claude-haiku-5-5", "claude-sonnet-5"]);
+    // A change request goes straight to the main model.
+    await user.type(input, "make push shoulder/volume all dumbbells for today{enter}");
+    await screen.findAllByText(/Done — your next Push/, {}, { timeout: 4000 });
+    expect(models().slice(2)).toEqual(["claude-sonnet-5"]);
+  }, 20000);
 });

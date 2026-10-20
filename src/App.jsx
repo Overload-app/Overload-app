@@ -648,7 +648,7 @@ export async function claudeChat({ system, messages, onPartialReply, model }) {
     const { usage } = streamed;
     let toolJson = streamed.toolJson;
     try { toolJson = JSON.stringify(unwrapToolInput(JSON.parse(toolJson))); } catch (e) { /* left as written; parsed downstream */ }
-    const costCents = estimateCostCents(usage);
+    const costCents = estimateCostCents(usage, undefined, model);
     console.log(`[ai-cost] ${costCents.toFixed(4)}c (streamed) | uncached in ${usage.input_tokens || 0} | cache read ${usage.cache_read_input_tokens || 0} | cache write ${usage.cache_creation_input_tokens || 0} | out ${usage.output_tokens || 0}`);
     if (onAiUsageRecorded) onAiUsageRecorded(costCents);
     return toolJson;
@@ -912,8 +912,8 @@ export function normalizeCoachStructuredFields(parsed) {
   return normalized;
 }
 
-export async function requestCoachResponse(system, messages, onPartialReply) {
-  const raw = await claudeChat({ system, messages, onPartialReply });
+export async function requestCoachResponse(system, messages, onPartialReply, model) {
+  const raw = await claudeChat({ system, messages, onPartialReply, model });
   try {
     const parsed = normalizeCoachStructuredFields(parseJSONLoose(raw));
     // Plain text from the very first read, so the blank-reply retry check
@@ -1739,9 +1739,12 @@ export function equipmentAskedFor(text) {
 
 const NEEDS_GYM = /barbell|cable|machine|smith|pulldown|pull-down|leg press|leg extension|leg curl|ez[- ]?bar|trap bar|hack squat|pec deck|t-bar|lat pull/i;
 const NEEDS_ANY_EQUIPMENT = /dumbbell|barbell|cable|machine|kettlebell|smith|ez[- ]?bar|trap bar|pulldown|leg press|leg extension|leg curl|band|weighted|plate|bench press|press machine/i;
+// Lifts that mean a barbell unless the name says otherwise. Found by the live
+// Coach test: an "all dumbbells" push day kept "Overhead Press".
+const BARBELL_BY_DEFAULT = /\b(overhead press|military press|bench press|deadlift|back squat|front squat|pendlay row|bent[- ]over row|good morning|hip thrust)\b/i;
 export function usesOnly(name, equipment) {
   const n = String(name || "");
-  if (equipment === "dumbbell") return /dumbbell/i.test(n) || !NEEDS_GYM.test(n);
+  if (equipment === "dumbbell") return /dumbbell|\bdb\b|goblet|kettlebell/i.test(n) || (!NEEDS_GYM.test(n) && !BARBELL_BY_DEFAULT.test(n));
   if (equipment === "bodyweight") return !NEEDS_ANY_EQUIPMENT.test(n);
   return true;
 }
@@ -6470,6 +6473,29 @@ export function withUndoSnapshot(prev, next) {
 // to the Coach.
 export const COACH_MESSAGE_MAX_CHARS = 1500;
 
+// Which Coach messages the cheaper model answers. Real ask: "only use the
+// more expensive one for difficult questions" — most messages are questions,
+// and a live test showed the cheaper model gets program changes and diet
+// rules wrong. So it only gets messages that are clearly just a question or
+// chat, with nothing that could change their program, days, calories or
+// targets; nothing about pain or injury; no food question when they have a
+// diet rule (it suggested meat to a vegetarian); and never a short reply to
+// the Coach's own question (that's usually an answer to "which day?").
+const CHANGE_WORDS = /\b(change|changing|swap|switch|replace|add|adding|remove|drop|take out|cut|make|set|put|move|adjust|update|modify|edit|redo|rebuild|build|create|design|plan|program|split|routine|schedule|\d+\s*days?|days a week|leg day|push day|pull day|day split|workout|session|harder|easier|lighter|heavier|shorter|longer|more|less|fewer|extra|deload|bulk|cutting|bulking|lose|gain|calories|macros|protein target|targets?|undo|revert|go back|restore|today|tomorrow|this week|instead|only|dumbbells?|barbell|machines?|bodyweight|home|gym|equipment)\b/i;
+const HURT_WORDS = /\b(hurt|hurts|pain|painful|sore|injur\w*|tweak\w*|strain\w*|sprain\w*|ache|aching|knee|shoulder|back|elbow|wrist|hip|ankle|neck)\b/i;
+const FOOD_WORDS = /\b(eat|eating|food|foods|meal|meals|snack|snacks|dinner|lunch|breakfast|recipe|diet|cook|protein|carbs?|fat|calories)\b/i;
+export function coachUsesLightModel(message, profile, chat) {
+  const text = String(message || "").trim();
+  if (!text || text.length > 400) return false;
+  if (CHANGE_WORDS.test(text) || HURT_WORDS.test(text)) return false;
+  const hasDietRule = (profile?.diet || []).some((d) => d && d !== "none") || !!String(profile?.otherDiet || "").trim();
+  if (hasDietRule && FOOD_WORDS.test(text)) return false;
+  // A short reply right after the Coach spoke is usually an answer to its question.
+  const last = (chat || [])[(chat || []).length - 1];
+  if (last?.role === "assistant" && /\?/.test(last.text || "") && text.split(/\s+/).length <= 6) return false;
+  return true;
+}
+
 export function guardTextFor(message, chat) {
   const text = String(message || "").trim();
   if (text.split(/\s+/).length > 6) return text;
@@ -9401,10 +9427,19 @@ export default function App() {
       // See withBlankReplyRetry's own comment — a blank/unparseable
       // response always gets one automatic retry with direct feedback
       // before the person ever sees a dead-end failure message.
-      const { parsed: rawParsed } = await withBlankReplyRetry(
-        (msgs) => { setStreamingReply(""); return requestCoachResponse(system, msgs, setStreamingReply); },
+      // Simple questions go to the cheaper model; anything that could change
+      // their program or targets goes to the main one (see coachUsesLightModel).
+      const ask = (model) => withBlankReplyRetry(
+        (msgs) => { setStreamingReply(""); return requestCoachResponse(system, msgs, setStreamingReply, model); },
         apiMessages
       );
+      const light = coachUsesLightModel(trimmed, stateRef.current?.profile, baseList);
+      let { parsed: rawParsed } = await ask(light ? LIGHT_MODEL : undefined);
+      // Safety net: if the cheaper model tries to change anything after all,
+      // that answer is thrown away and the main model handles it instead.
+      if (light && coachResponseFlags(sanitizeCoachResponse(rawParsed, stateRef.current, guardText).parsed).madeChange) {
+        ({ parsed: rawParsed } = await ask(undefined));
+      }
       console.log("Coach response received:", JSON.stringify(rawParsed));
       // Everything below reads the cleaned reply — see sanitizeCoachResponse.
       const { parsed, rejected } = sanitizeCoachResponse(rawParsed, stateRef.current, guardText);
