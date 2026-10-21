@@ -129,6 +129,9 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- "Next day" everywhere (Home, Coach, reminders) is now the day after the one trained most recently (`nextDayIndexFor` in App.jsx, `nextDayIndex` in api/push-cron.js), not total-workouts-modulo-days (which drifted when days were done out of order).
+- Reminders survive GitHub skipping runs (only ~40 of ~140 hourly runs happened in 6 days): with the `push_sent` table (supabase-migration-push-sent.sql), a reminder goes out on the first run anywhere in its window (workout 6–11pm, weigh-in hour +4) and is recorded so it's never sent twice; without the table, exact hour only. Workout reminders can be limited to chosen weekdays (`push.reminderDays`, day picker on the You page).
+- Coach rule: it can't see which exercises have videos — it uses exactly the exercise/variation asked for ("Machine Seated Calf Raise") and never claims one has no video (real report: it renamed to "Calf Raise" and said there was no video).
 - Coach model split (2026-10-20): `coachUsesLightModel(message, profile, chat)` sends plain questions/chat to `LIGHT_MODEL` (Haiku) and anything that could change the program, days, calories or targets, anything about pain/injury, food questions when they have a diet rule, and short answers to the Coach's own question to `claude-sonnet-5`. Safety net in `sendCoachMessage`: if the Haiku answer would make a change, it's discarded and Sonnet is asked. Live test: 23/24 for 23.6¢. Haiku alone on the Coach was tested and rejected (meat to a vegetarian, guessed days).
 - Meal ideas are filtered against diet rules in code (`breaksDiet`, `DIET_BANS`, inside `mealSuggestionsFrom(parsed, profile)`), whichever model wrote them.
 - Video swap picks the closest match (word overlap, minus a penalty for repeating a movement the day already has); "Reverse Flye" counts as a rear-delt fly.
