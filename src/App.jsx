@@ -1358,6 +1358,23 @@ function focusFit(exercises, dayName) {
 // Coach then explained it in circles. A one-time change goes on the day the
 // person named, and on a day its exercises actually belong to. When the
 // Coach's chosen day contradicts both of those, the app moves it.
+// The day that comes next: the one after the day they trained most recently.
+// Real report: Home said "Legs" was next when they'd just done Push (Pull
+// comes after Push). It used to count total workouts logged, which drifts
+// the moment anyone trains days out of order or a workout is deleted.
+// Falls back to that count only when the last day can't be matched.
+export function nextDayIndexFor(state) {
+  const days = state?.program?.days || [];
+  if (days.length === 0) return 0;
+  const workouts = state?.logs?.workouts || [];
+  if (workouts.length === 0) return 0;
+  const last = [...workouts].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0))[workouts.length - 1];
+  const name = String(last?.dayName || "").trim().toLowerCase();
+  let idx = days.findIndex((d) => String(d.name || "").trim().toLowerCase() === name);
+  if (idx === -1 && name) idx = days.findIndex((d) => { const n = String(d.name || "").trim().toLowerCase(); return n && (name.startsWith(n) || n.startsWith(name)); });
+  return idx === -1 ? workouts.length % days.length : (idx + 1) % days.length;
+}
+
 export function resolveOverrideTarget(parsed, state, message = "") {
   const days = state?.program?.days || [];
   const dayCount = days.length;
@@ -1375,7 +1392,7 @@ export function resolveOverrideTarget(parsed, state, message = "") {
     if (named.length === 1) return { dayIdx: named[0], valid: true };
     const byFocus = named.length === 0 ? bestByFocus() : null;
     if (byFocus !== null) return { dayIdx: byFocus, valid: true };
-    return { dayIdx: (state.logs?.workouts?.length || 0) % dayCount, valid: true };
+    return { dayIdx: nextDayIndexFor(state), valid: true };
   }
   const idx = coerceInt(raw);
   if (idx === null || idx < 0 || idx >= dayCount) return { dayIdx: null, valid: false };
@@ -2246,7 +2263,7 @@ export function overrideDayIdx(state) {
     // day — the exact bug this is fixing.
     return stored >= 0 && stored < dayCount ? stored : null;
   }
-  return (state.logs?.workouts?.length || 0) % dayCount;
+  return nextDayIndexFor(state);
 }
 
 // Whether finishing a workout on dayIdx uses up the one-time change. Only the
@@ -5617,7 +5634,7 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   const { program, targets, logs, profile } = state;
   const [insightDismissed, setInsightDismissed] = useState(false);
   const insight = insightDismissed ? null : detectCoachInsight(state);
-  const nextIdx = logs.workouts.length % program.days.length;
+  const nextIdx = nextDayIndexFor(state);
   // Same fix as the active workout screen: a Coach todayOverride swap has
   // no name of its own, so the preview card must derive one too — showing
   // the stale scheduled day's name/count here (before they even tap "Start
@@ -5986,7 +6003,7 @@ RESPOND ONLY with this JSON object — start with "{", no text before or after i
 RULES:
 - Build permanent changes by editing the exact "Current program JSON" — never from memory of earlier messages.
 - Only exercises their equipment allows. Never anything that aggravates a stated injury.
-- Exercise names are the plain standard name only — no parentheses, dashes or descriptors ("Leg Press", not "Leg Press (Low)"); spell equipment out ("Dumbbell Row", not "DB Row"). Keep the exact spelling of any exercise already in their program. Otherwise choose ONLY from the exercise vocabulary in your context (every one has a demo video); go outside it only when nothing on it fits or they asked for something specific — then offer the closest on-list option and be upfront theirs may have no video.
+- Exercise names are the plain standard name only — no parentheses, dashes or descriptors ("Leg Press", not "Leg Press (Low)"); spell equipment out ("Dumbbell Row", not "DB Row"). Keep the exact spelling of any exercise already in their program. Otherwise choose ONLY from the exercise vocabulary in your context (every one has a demo video); go outside it only when nothing on it fits or they asked for something specific by name — then use exactly what they asked for, with its equipment in the name ("Machine Seated Calf Raise"). You can't see which exercises have videos (the app checks itself), so never say one has no video or rename theirs to something else for that reason.
 - New exercise: exactly 4 short, specific form tips (setup, execution, a common mistake) and 3 "alternatives" from the vocabulary (fewer real ones beats padding). Exercise kept from the current program: "tips": [] and "alternatives": [] — the app restores the saved ones.
 - MINIMUM 4 exercises on a day you design or a one-time day, unless they explicitly ask for fewer. If time is tight, trim rest (floor 45s) then sets (floor 2) before cutting exercises.
 - Keep the same number of training days unless they ask to change it.
@@ -6072,7 +6089,7 @@ Rules:
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
 - Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, no trailing descriptor word or phrase either (not "Leg Press (Low)," not "Leg Press Moderate Depth" — just "Leg Press"). These get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance, range of motion — that belongs in "tips," never the name.
 - If an exercise you're including already appears somewhere in "Current program JSON" (or in the version history) given in your context below, use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Otherwise, ONLY choose from the exercise vocabulary list given in your context below, named EXACTLY as written — every one of those is confirmed to have a real instructional video. Only go outside it for a movement pattern that list genuinely has no equivalent for, or because the user explicitly asked for something specific by name — not to add variety for its own sake.
-- If the user names a SPECIFIC exercise not on that vocabulary list (e.g. asking to swap in something particular), and something on the list is a genuinely similar movement, say so and offer it as the option that'll actually have a demo video — but still give them what they explicitly asked for if they confirm they want it, being upfront in "reply" that their specific pick likely won't have an instructional video available (only the exercise name itself, not the tips — those you write either way).
+- If the user names a SPECIFIC exercise or variation (e.g. "make it a machine seated calf raise"), use exactly that, as a plain standard name with its equipment ("Machine Seated Calf Raise"). You CANNOT see which exercises have demo videos — the app looks the video up itself and warns them if there isn't one. So never say an exercise has no video or isn't in the library, and never swap what they asked for into something else for that reason. Real report: asked to make a seated calf raise a machine seated calf raise, the Coach renamed it to plain "Calf Raise" and claimed there was no video, when there was.
 - Never include exercises that would aggravate stated injuries.
 - You have NO other way to undo anything. "restoreIndex" and "restoreOriginal" are the only two, and both work off snapshots the app saved — you cannot reconstruct a previous version from memory, and you cannot "put it back" by describing it. Real report of this going wrong: asked to "forget what you just did," Coach replied "nothing changed, your day is back to exactly what it was before" with every field null — so nothing was undone, and the user was told the opposite. If they ask you to undo, revert, forget, or go back to how it was, you MUST set "restoreIndex" (matching a version-history entry) or "restoreOriginal", in that same response. If nothing in the history matches what they're describing, say plainly that you can't undo that one and ask what they want it to look like instead. Never claim, imply, or let a reply read as though something was reverted when neither field is set.
 - Never call a "todayOverride" permanent, saved, or lasting. It applies to ONE upcoming session and the app labels it that way on screen, so saying "saved permanently" directly contradicts what they're looking at — a real report ("why does it say swapped by coach for today only"). If they ask for a change to be permanent, the answer is a "programDayEdit" (or "program"), not a reassurance about an override. And if they tell you a label in the app contradicts what you said, believe the app: it reflects what actually got saved, and you should say which of the two you actually did rather than guessing that their screen is stale.
@@ -6120,7 +6137,7 @@ ${COACH_LIMIT_RULES}`;
 export function coachDayContext(state) {
   const days = (state.program?.days || []).map((d, i) => ({ dayIndex: i, name: d.name, exerciseCount: (d.exercises || []).length }));
   if (days.length === 0) return { days, openDayIndex: null, nextDayIndex: null, loggedSetsInOpenWorkout: 0 };
-  const nextDayIndex = (state.logs?.workouts?.length || 0) % days.length;
+  const nextDayIndex = nextDayIndexFor(state);
   const inProgress = state.inProgressWorkout;
   const openDayIndex = inProgress && days[inProgress.dayIdx] ? inProgress.dayIdx : null;
   const loggedSetsInOpenWorkout = openDayIndex === null
@@ -8607,7 +8624,7 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
 // Every kind of notification, each with its own switch (real ask: "all of
 // the notifications for each different type can be turned on and off").
 export const NOTIFICATION_KINDS = [
-  ["reminders", "Workout reminders", "A nudge at 6pm your time on days you haven't trained yet."],
+  ["reminders", "Workout reminders", "A nudge in the evening (from 6pm your time) on days you haven't trained yet."],
   ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."],
   ["weighIn", "Weigh-in reminder", "A reminder to weigh in at a time you pick."],
   ["idleWorkout", "Forgot to finish?", "Asks if you're done when a workout's gone quiet for a while."],
@@ -8639,7 +8656,9 @@ function NotificationPrompt({ kinds, onEnable, onDismiss }) {
   );
 }
 
-function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour }) {
+const WEEKDAYS = [["S", "Sunday"], ["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"], ["F", "Friday"], ["S", "Saturday"]];
+
+function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour, onSetReminderDays }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
   async function toggle(kind) {
@@ -8679,6 +8698,33 @@ function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour }) {
             </button>
           </div>
         ))}
+        {push?.reminders && onSetReminderDays && (() => {
+          // Real ask: "you should be able to set days for workout reminders."
+          // Nothing saved yet means every day.
+          const chosen = Array.isArray(push.reminderDays) && push.reminderDays.length > 0 ? push.reminderDays : [0, 1, 2, 3, 4, 5, 6];
+          return (
+            <div style={{ padding: "9px 0", borderTop: `1px solid ${T.steel}` }}>
+              <div style={{ fontSize: 13, color: T.ink, fontWeight: 600, marginBottom: 8 }}>Workout reminder days</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {WEEKDAYS.map(([short, full], d) => {
+                  const on = chosen.includes(d);
+                  return (
+                    <button
+                      key={d} aria-label={full} aria-pressed={on}
+                      onClick={() => {
+                        const next = on ? chosen.filter((x) => x !== d) : [...chosen, d].sort();
+                        if (next.length > 0) onSetReminderDays(next);
+                      }}
+                      style={{ width: 34, height: 34, borderRadius: "50%", border: `1.5px solid ${on ? T.charge : T.steel}`, background: on ? T.charge : "#fff", color: on ? "#fff" : T.steelDark, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}
+                    >
+                      {short}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
         {push?.weighIn && onSetWeighInHour && (
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: `1px solid ${T.steel}` }}>
             <label htmlFor="weigh-in-hour" style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>Weigh-in reminder time</label>
@@ -8700,7 +8746,7 @@ function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour }) {
   );
 }
 
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onSetWeighInHour, onEditQuiz }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onSetWeighInHour, onSetReminderDays, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -8831,7 +8877,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
-      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetWeighInHour={onSetWeighInHour} />}
+      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetWeighInHour={onSetWeighInHour} onSetReminderDays={onSetReminderDays} />}
 
       <TickRule label="Support & legal" />
       <Card>
@@ -10403,7 +10449,7 @@ export default function App() {
               onDeleteReview={deleteReview}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onSetWeighInHour={(h) => persist((prev) => ({ ...prev, push: { ...prev.push, weighInHour: h } }))} onEditQuiz={() => setQuizEditorOpen(true)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onSetWeighInHour={(h) => persist((prev) => ({ ...prev, push: { ...prev.push, weighInHour: h } }))} onSetReminderDays={(days) => persist((prev) => ({ ...prev, push: { ...prev.push, reminderDays: days } }))} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">

@@ -65,6 +65,7 @@ import {
   COACH_PROMPT_VERSION,
   asText,
   cleanAiMeal,
+  nextDayIndexFor,
   coachUsesLightModel,
   breaksDiet,
   exerciseGroupsByDay,
@@ -5277,5 +5278,42 @@ describe("barbell lifts named without the word 'barbell'", () => {
     expect(usesOnly("Dumbbell Romanian Deadlift", "dumbbell")).toBe(true);
     expect(usesOnly("Goblet Squat", "dumbbell")).toBe(true);
     expect(usesOnly("Lateral Raise", "dumbbell")).toBe(true);
+  });
+});
+
+describe("the next day is the one after the last day trained", () => {
+  const program = { days: ["Push", "Pull", "Legs", "Upper"].map((name) => ({ name })) };
+  const w = (date, dayName) => ({ date, dayName });
+  test("the real report: just did Push, so Pull is next — whatever the total count says", () => {
+    const logs = { workouts: [w("2026-10-10", "Push"), w("2026-10-11", "Pull"), w("2026-10-13", "Legs"), w("2026-10-15", "Push"), w("2026-10-16", "Upper"), w("2026-10-18", "Push")] };
+    expect(nextDayIndexFor({ program, logs })).toBe(1);
+  });
+  test("wraps around, uses the latest date, and copes with renamed days", () => {
+    expect(nextDayIndexFor({ program, logs: { workouts: [w("2026-10-18", "Upper")] } })).toBe(0);
+    expect(nextDayIndexFor({ program, logs: { workouts: [w("2026-10-18", "Legs"), w("2026-10-02", "Push")] } })).toBe(3);
+    expect(nextDayIndexFor({ program, logs: { workouts: [w("2026-10-18", "Pull (Back/Biceps)")] } })).toBe(2);
+  });
+  test("nothing logged starts at day 1; an unknown day falls back to the count", () => {
+    expect(nextDayIndexFor({ program, logs: { workouts: [] } })).toBe(0);
+    expect(nextDayIndexFor({ program, logs: { workouts: [w("2026-10-18", "Mystery"), w("2026-10-17", "Mystery")] } })).toBe(2);
+  });
+});
+
+describe("the Coach never claims an exercise has no video", () => {
+  test("both rulebooks say it can't see videos and should use exactly what was asked for", () => {
+    globalThis.__OVERLOAD_PROMPT__ = "full";
+    const full = buildCoachStaticSystem();
+    globalThis.__OVERLOAD_PROMPT__ = "compact";
+    const compact = buildCoachStaticSystem();
+    globalThis.__OVERLOAD_PROMPT__ = "full";
+    expect(full).toMatch(/CANNOT see which exercises have demo videos/);
+    expect(full).not.toMatch(/likely won't have an instructional video/);
+    expect(compact).toMatch(/can't see which exercises have videos/);
+    expect(compact).not.toMatch(/be upfront theirs may have no video/);
+  });
+  test("an exercise they asked for by name is kept as asked", () => {
+    const ex = (name) => ({ name, sets: 3, reps: "12", rest: 60 });
+    const { exercises } = ensureVideoExercises([ex("Machine Seated Calf Raise")], { equipment: "full", message: "make the seated calf raise video a machine seated calf raise" });
+    expect(exercises[0].name).toBe("Machine Seated Calf Raise");
   });
 });

@@ -73,11 +73,46 @@ export function localDateISO(timeZone, now = new Date()) {
   }
 }
 
+// Day of the week where they are: 0 = Sunday ... 6 = Saturday.
+export function localWeekday(timeZone, now = new Date()) {
+  try {
+    const d = new Intl.DateTimeFormat("en-US", { timeZone: timeZone || "UTC", weekday: "short" }).format(now);
+    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(d);
+  } catch (e) {
+    return now.getUTCDay();
+  }
+}
+
+// Real report: "I've only had 1 go off." GitHub's hourly schedule skips most
+// runs (about 40 ran in 6 days instead of ~140), and a reminder only went out
+// if a run landed in its exact hour. With catch-up on (the server can see
+// what was already sent today — the push_sent table), a reminder goes out on
+// the first run any time in its window and is recorded so it's never sent
+// twice. Without that table, only the exact hour counts, as before.
+export const REMINDER_WINDOW_HOURS = 5; // 6pm-10:59pm
+export const WEIGH_IN_WINDOW_HOURS = 4;
+function inWindow(hourNow, start, width, catchUp) {
+  return catchUp ? hourNow >= start && hourNow < start + width : hourNow === start;
+}
+
+// Same rule as the app's nextDayIndexFor: the day after the one trained last.
+export function nextDayIndex(days, workouts) {
+  if (!days.length) return 0;
+  if (!workouts.length) return 0;
+  const last = [...workouts].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0))[workouts.length - 1];
+  const name = String(last?.dayName || "").trim().toLowerCase();
+  let idx = days.findIndex((d) => String(d.name || "").trim().toLowerCase() === name);
+  if (idx === -1 && name) idx = days.findIndex((d) => { const n = String(d.name || "").trim().toLowerCase(); return n && (name.startsWith(n) || n.startsWith(name)); });
+  return idx === -1 ? workouts.length % days.length : (idx + 1) % days.length;
+}
+
 // The reminder to send this person today, or null for none.
-export function reminderFor(state, now = new Date()) {
+export function reminderFor(state, now = new Date(), catchUp = false) {
   const push = state?.push;
-  if (localHour(push?.tz, now) !== REMINDER_HOUR) return null;
+  if (!inWindow(localHour(push?.tz, now), REMINDER_HOUR, REMINDER_WINDOW_HOURS, catchUp)) return null;
   if (!push?.reminders || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
+  // Real ask: choose which days the reminder can go off. None chosen = every day.
+  if (Array.isArray(push.reminderDays) && push.reminderDays.length > 0 && !push.reminderDays.includes(localWeekday(push.tz, now))) return null;
   const days = state?.program?.days || [];
   if (days.length === 0) return null;
   const workouts = state?.logs?.workouts || [];
@@ -88,7 +123,7 @@ export function reminderFor(state, now = new Date()) {
   const thisWeek = workouts.filter((w) => w.date >= weekAgo && w.date <= today).length;
   const perWeek = Number(state?.profile?.daysPerWeek) || days.length;
   if (thisWeek >= perWeek) return null;
-  const next = days[workouts.length % days.length];
+  const next = days[nextDayIndex(days, workouts)];
   return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
 }
 
@@ -96,11 +131,11 @@ export function reminderFor(state, now = new Date()) {
 // Sent at the hour they picked (their time), unless they've already weighed
 // in today.
 export const DEFAULT_WEIGH_IN_HOUR = 8;
-export function weighInFor(state, now = new Date()) {
+export function weighInFor(state, now = new Date(), catchUp = false) {
   const push = state?.push;
   if (!push?.weighIn || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
   const hour = Number.isInteger(push.weighInHour) ? push.weighInHour : DEFAULT_WEIGH_IN_HOUR;
-  if (localHour(push.tz, now) !== hour) return null;
+  if (!inWindow(localHour(push.tz, now), hour, WEIGH_IN_WINDOW_HOURS, catchUp)) return null;
   const today = localDateISO(push.tz, now);
   if ((state?.logs?.bodyweight || []).some((w) => w.date === today)) return null;
   return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/" };
@@ -125,9 +160,14 @@ export function idleWorkoutFor(state, now = new Date()) {
   return { kind: "idle", title: "Still working out?", body: `Nothing's been logged on ${day} for a while — tap to finish it or keep going.`, tag: "idle", url: "/" };
 }
 
-// Everything due for this person this hour.
-export function notificationsFor(state, now = new Date()) {
-  return [reminderFor(state, now), weighInFor(state, now), idleWorkoutFor(state, now)].filter(Boolean);
+// Everything due for this person now. sentToday: the kinds already sent
+// today (a Set) when the push_sent table is there — which switches on
+// catch-up; null when it isn't.
+export function notificationsFor(state, now = new Date(), sentToday = null) {
+  const catchUp = sentToday instanceof Set;
+  return [reminderFor(state, now, catchUp), weighInFor(state, now, catchUp), idleWorkoutFor(state, now)]
+    .filter(Boolean)
+    .filter((n) => !catchUp || n.kind === "idle" || !sentToday.has(n.kind));
 }
 
 export default async function handler(req, res) {
@@ -151,12 +191,21 @@ export default async function handler(req, res) {
       .range(from, from + 499);
     if (error) return res.status(500).json({ error: error.message });
     for (const row of data || []) {
-      const notes = notificationsFor(row.state);
+      const day = localDateISO(row.state?.push?.tz);
+      // What's already gone out today (null if the push_sent table isn't set up).
+      let sentToday = null;
+      const { data: sentRows, error: sentError } = await supabaseAdmin.from("push_sent").select("kind").eq("user_id", row.user_id).eq("day", day);
+      if (!sentError) sentToday = new Set((sentRows || []).map((r) => r.kind));
+      const notes = notificationsFor(row.state, new Date(), sentToday);
       if (notes.length === 0) continue;
       people++;
       for (const note of notes) {
         const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600 })));
-        sent += results.filter((r) => r.status === "fulfilled").length;
+        const ok = results.filter((r) => r.status === "fulfilled").length;
+        sent += ok;
+        if (ok > 0 && sentToday && note.kind !== "idle") {
+          await supabaseAdmin.from("push_sent").insert({ user_id: row.user_id, kind: note.kind, day });
+        }
       }
     }
     if (!data || data.length < 500) break;

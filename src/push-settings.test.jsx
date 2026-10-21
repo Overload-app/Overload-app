@@ -166,4 +166,20 @@ describe("notification switches", () => {
     expect(stored.push.weighInHour).toBe(7);
     delete navigator.serviceWorker; delete window.PushManager; delete window.Notification;
   }, 20000);
+
+  test("workout reminder days can be picked, and the last one can't be turned off", async () => {
+    stored.push = { reminders: true, subscriptions: [{ endpoint: "https://push.example/abc" }], tz: "UTC" };
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^You$/ }));
+    expect(screen.getByRole("button", { name: "Sunday" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Sunday" }));
+    await user.click(screen.getByRole("button", { name: "Saturday" }));
+    expect(stored.push.reminderDays).toEqual([1, 2, 3, 4, 5]);
+    for (const d of ["Monday", "Tuesday", "Wednesday", "Thursday"]) await user.click(screen.getByRole("button", { name: d }));
+    expect(stored.push.reminderDays).toEqual([5]);
+    await user.click(screen.getByRole("button", { name: "Friday" }));
+    expect(stored.push.reminderDays).toEqual([5]);
+  }, 20000);
 });

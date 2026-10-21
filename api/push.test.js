@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor } from "./push-cron.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -187,5 +187,36 @@ describe("weigh-in and forgotten-workout notifications", () => {
     const st = base({ reminders: true, weighIn: true, weighInHour: 18 });
     expect(notificationsFor(st, at18).map((n) => n.kind)).toEqual(["reminder", "weighin"]);
     expect(notificationsFor(base({ reminders: false, weighIn: true, weighInHour: 18 }), at18).map((n) => n.kind)).toEqual(["weighin"]);
+  });
+});
+
+describe("reminders that survive GitHub skipping runs", () => {
+  const sub = { endpoint: "https://push.example/1", keys: {} };
+  const st = (push, extra = {}) => ({ push: { subscriptions: [sub], tz: "UTC", ...push }, profile: { daysPerWeek: 5 }, program: { days: [{ name: "Push" }, { name: "Pull" }, { name: "Legs" }] }, logs: { workouts: [], bodyweight: [] }, ...extra });
+  const at = (h) => new Date(Date.UTC(2026, 9, 20, h, 37)); // a Tuesday
+  test("with catch-up, a late run still sends — once", () => {
+    const s1 = st({ reminders: true });
+    expect(notificationsFor(s1, at(20), null)).toEqual([]); // old way: exact hour only
+    expect(notificationsFor(s1, at(20), new Set()).map((n) => n.kind)).toEqual(["reminder"]);
+    expect(notificationsFor(s1, at(21), new Set(["reminder"]))).toEqual([]);
+    expect(notificationsFor(s1, at(23), new Set())).toEqual([]); // window over
+  });
+  test("weigh-in catches up within its window", () => {
+    const s1 = st({ weighIn: true, weighInHour: 7 });
+    expect(notificationsFor(s1, at(9), new Set()).map((n) => n.kind)).toEqual(["weighin"]);
+    expect(notificationsFor(s1, at(9), new Set(["weighin"]))).toEqual([]);
+    expect(notificationsFor(s1, at(12), new Set())).toEqual([]);
+  });
+  test("workout reminders only on the days they picked", () => {
+    expect(localWeekday("UTC", at(18))).toBe(2);
+    expect(reminderFor(st({ reminders: true, reminderDays: [1, 3, 5] }), at(18))).toBeNull();
+    expect(reminderFor(st({ reminders: true, reminderDays: [2] }), at(18))?.kind).toBe("reminder");
+    expect(reminderFor(st({ reminders: true, reminderDays: [] }), at(18))?.kind).toBe("reminder");
+  });
+  test("names the day after the one trained last", () => {
+    const days = [{ name: "Push" }, { name: "Pull" }, { name: "Legs" }];
+    expect(nextDayIndex(days, [{ date: "2026-10-19", dayName: "Push" }, { date: "2026-10-12", dayName: "Legs" }])).toBe(1);
+    const s1 = st({ reminders: true }, { logs: { workouts: [{ date: "2026-10-19", dayName: "Push" }], bodyweight: [] } });
+    expect(reminderFor(s1, at(18)).body).toContain("Pull");
   });
 });
