@@ -5588,7 +5588,7 @@ function ExerciseDetailSheet({ name, logs, todayLogged, onClose }) {
                 <Card>
                   <div aria-label={`Top set over time for ${name}`} role="img">
                     <ResponsiveContainer width="100%" height={180}>
-                      <LineChart data={trend}>
+                      <LineChart data={trend} margin={CHART_MARGIN}>
                         <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
                         <XAxis dataKey="dateLabel" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
                         <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} width={36} />
@@ -7789,6 +7789,10 @@ Write a short, honest, encouraging review — 3-5 sentences of overview, then 2-
 Respond ONLY with JSON, no markdown fences: {"overview": "<3-5 sentence summary>", "advice": ["<specific tip>", "<specific tip>"]}`;
 }
 
+// Room on the right of every graph so the last date label isn't cut off
+// (real report, from the Progress tab — it happened on all of them).
+const CHART_MARGIN = { top: 8, right: 24, left: 0, bottom: 4 };
+
 // Lift progress, organised by workout day. Real report: "it's annoying —
 // you have to search through a list of every workout, it's hard to read, and
 // some get duplicated." It was one long dropdown of every name ever logged,
@@ -7843,22 +7847,44 @@ function ExerciseProgress({ logs, program }) {
     background: active ? T.charge : "#fff", color: active ? "#fff" : T.ink, fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
   });
 
+  // Real report: "kind of confusing — we need something that splits the
+  // workouts and the exercises so it's more obvious." Two labelled steps:
+  // the workout (tabs), then that workout's exercises (a plain list), then a
+  // title saying exactly what the graph shows.
+  const stepLabel = { fontSize: 10, fontWeight: 700, letterSpacing: 1, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", margin: "0 0 6px" };
   return (
     <Card>
-      <div role="tablist" aria-label="Workout day" style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 6 }}>
+      <p style={stepLabel}>1 · WORKOUT</p>
+      <div role="tablist" aria-label="Workout day" style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6 }}>
         {groups.map((g) => (
           <button key={g.day} role="tab" aria-selected={g.day === group.day} onClick={() => { setDay(g.day); setSelected(g.exercises[0]); }} style={chip(g.day === group.day)}>{g.day}</button>
         ))}
       </div>
-      <div aria-label="Exercise" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+      <div style={{ borderTop: `1px solid ${T.steel}`, margin: "10px 0 12px" }} />
+      <p style={stepLabel}>2 · EXERCISE</p>
+      <div aria-label="Exercise" style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
         {group.exercises.map((n) => (
-          <button key={n} aria-pressed={n === exercise} onClick={() => setSelected(n)} style={{ ...chip(false), borderColor: n === exercise ? T.charge : T.steel, color: n === exercise ? T.chargeDeep : T.ink, background: n === exercise ? "#EEEDFF" : "#fff" }}>{n}</button>
+          <button
+            key={n} aria-pressed={n === exercise} onClick={() => setSelected(n)}
+            style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", textAlign: "left",
+              padding: "10px 12px", borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600,
+              border: `1.5px solid ${n === exercise ? T.charge : "transparent"}`,
+              background: n === exercise ? "#EEEDFF" : T.paper, color: n === exercise ? T.chargeDeep : T.ink,
+            }}
+          >
+            <span>{n}</span>
+            {n === exercise ? <TrendingUp size={14} /> : <ChevronRight size={14} color={T.steelDark} />}
+          </button>
         ))}
+      </div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 4 }}>
+        {exercise} <span style={{ color: T.steelDark, fontWeight: 500 }}>· top set each session</span>
       </div>
       {history.length >= 1 ? (
         <>
           <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={history}>
+            <LineChart data={history} margin={CHART_MARGIN}>
               <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="dateLabel" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
               <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} width={36} />
@@ -8086,7 +8112,7 @@ export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpen
       <Card>
         {chartData.length > 1 ? (
           <ResponsiveContainer width="100%" height={180}>
-            <LineChart data={chartData}>
+            <LineChart data={chartData} margin={CHART_MARGIN}>
               <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="date" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
               <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 3", "dataMax + 3"]} />
