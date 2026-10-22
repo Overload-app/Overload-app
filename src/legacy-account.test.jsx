@@ -136,18 +136,17 @@ describe("an account saved before the pre-launch changes", () => {
     expect(stored.logs.workouts.length).toBe(1);
   }, 30000);
 
-  test("old reviews show and can be collapsed and deleted", async () => {
+  // Weekly/monthly check-ins were removed (real ask: "delete weekly and
+  // monthly check ins"). An account that had them on still loads, makes no
+  // new one, and keeps the old ones saved.
+  test("old reviews are kept in the data but no longer shown or made", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(tab("Progress"));
-    // Weekly reviews are on and the last was over a week ago, so loading the
-    // app also (correctly) generates a new one — at least the old one shows.
-    expect(screen.getAllByText("WEEKLY REVIEW").length).toBeGreaterThanOrEqual(1);
     noCrash();
-    await user.click(screen.getAllByRole("button", { name: /^Delete weekly review/ })[0]);
-    await user.click(screen.getByText("DELETE"));
-    noCrash();
+    expect(screen.queryByText("WEEKLY REVIEW")).not.toBeInTheDocument();
+    expect(stored.reviews.weekly).toHaveLength(1);
     expect(stored.logs.workouts.length).toBe(1);
   }, 30000);
 

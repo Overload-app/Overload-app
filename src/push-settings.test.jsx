@@ -28,8 +28,6 @@ function storedState() {
       nutrition: [{ date: daysAgo(0), meals: [{ name: "Oats", cal: 400, protein: 20, carb: 60, fat: 8 }] }, { date: daysAgo(1), meals: [{ name: "Pasta", cal: 700, protein: 30, carb: 100, fat: 15 }] }],
       bodyweight: [{ date: daysAgo(5), weight: 176 }, { date: daysAgo(1), weight: 175 }],
     },
-    reviews: { weekly: [{ generatedAt: new Date().toISOString(), periodStart: daysAgo(7), periodEnd: daysAgo(0), overview: "Good week", advice: ["Keep going"] }], monthly: [] },
-    reviewsEnabled: { weekly: true, monthly: false },
     accountCreatedAt: "2026-09-01T00:00:00.000Z",
     coachChat: [{ role: "assistant", text: "Hey — I'm your coach." }],
     gifCache: {}, todayOverride: null, inProgressWorkout: null, programHistory: [],
@@ -76,12 +74,13 @@ describe("notification switches", () => {
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(screen.getByRole("button", { name: /^You$/ }));
-    const sw = screen.getByRole("switch", { name: /workout reminders/i });
-    expect(sw).toHaveAttribute("aria-checked", "false");
-    await user.click(sw);
+    await user.click(screen.getByRole("button", { name: "Workout" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/doesn't support notifications/);
-    expect(screen.getByRole("switch", { name: /workout reminders/i })).toHaveAttribute("aria-checked", "false");
-    expect(stored.push?.reminders).toBeFalsy();
+    expect(screen.queryAllByTestId("reminder")).toHaveLength(0);
+    expect(stored.push?.schedules).toBeFalsy();
+    const sw = screen.getByRole("switch", { name: /rest alerts/i });
+    await user.click(sw);
+    expect(screen.getByRole("switch", { name: /rest alerts/i })).toHaveAttribute("aria-checked", "false");
   }, 20000);
 
   test("an iPhone in Safari is told to add it to the Home Screen first", async () => {
@@ -105,9 +104,9 @@ describe("notification switches", () => {
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(screen.getByRole("button", { name: /^You$/ }));
-    await user.click(screen.getByRole("switch", { name: /workout reminders/i }));
-    await screen.findByRole("switch", { name: /workout reminders/i, checked: true });
-    expect(stored.push.reminders).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Workout" }));
+    await screen.findByLabelText("Workout reminder time");
+    expect(stored.push.schedules.map((r) => [r.type, r.hour])).toEqual([["workout", 18]]);
     expect(stored.push.subscriptions).toEqual([sub]);
     expect(typeof stored.push.tz).toBe("string");
     // The other switch turns on without asking again for a second device entry.
@@ -145,8 +144,9 @@ describe("notification switches", () => {
     expect(globalThis.fetch.mock.calls.some(([u]) => String(u).includes("/api/rest-alert"))).toBe(false);
   }, 20000);
 
-  test("notifications picked in the quiz are turned on from the Home card, and the weigh-in time can be set", async () => {
-    stored.profile.notifications = ["weighIn", "idleWorkout"];
+  test("reminders picked in the quiz are turned on from the Home card, and can be changed later", async () => {
+    stored.profile.notifications = ["idleWorkout"];
+    stored.push = { schedules: [{ id: "f1", type: "food", hour: 12, days: [0, 1, 2, 3, 4, 5, 6] }] };
     const sub = { endpoint: "https://push.example/q", keys: {} };
     const reg = { pushManager: { getSubscription: vi.fn(async () => null), subscribe: vi.fn(async () => ({ toJSON: () => sub })) } };
     Object.defineProperty(navigator, "serviceWorker", { value: { ready: Promise.resolve(reg) }, configurable: true });
@@ -156,30 +156,40 @@ describe("notification switches", () => {
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(screen.getByRole("button", { name: /^Home$/ }));
-    await user.click(await screen.findByText("Turn on"));
+    expect(await screen.findByText(/log food reminder at 12pm/)).toBeInTheDocument();
+    await user.click(screen.getByText("Turn on"));
     await screen.findByRole("button", { name: /^Train$/ });
-    expect(stored.push).toMatchObject({ weighIn: true, idleWorkout: true, weighInHour: 8 });
-    expect(stored.push.reminders).toBeFalsy();
+    expect(stored.push).toMatchObject({ idleWorkout: true, subscriptions: [sub] });
     expect(screen.queryByText("Turn on your notifications")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^You$/ }));
-    await user.selectOptions(screen.getByLabelText("Weigh-in reminder time"), "7");
-    expect(stored.push.weighInHour).toBe(7);
+    await user.selectOptions(screen.getByLabelText("Log food reminder time"), "13");
+    expect(stored.push.schedules[0].hour).toBe(13);
+    // A second food reminder, at the next sensible time.
+    await user.click(screen.getByRole("button", { name: "Log food" }));
+    expect(stored.push.schedules.map((r) => [r.type, r.hour])).toEqual([["food", 13], ["food", 12]]);
+    await user.click(screen.getByRole("button", { name: "Delete log food reminder at 1pm" }));
+    expect(stored.push.schedules.map((r) => r.hour)).toEqual([12]);
     delete navigator.serviceWorker; delete window.PushManager; delete window.Notification;
   }, 20000);
 
-  test("workout reminder days can be picked, and the last one can't be turned off", async () => {
-    stored.push = { reminders: true, subscriptions: [{ endpoint: "https://push.example/abc" }], tz: "UTC" };
+  test("an old account's workout reminder and weigh-in time carry over, and their days can be picked", async () => {
+    stored.push = { reminders: true, reminderDays: [1, 3, 5], weighIn: true, weighInHour: 7, subscriptions: [{ endpoint: "https://push.example/abc" }], tz: "UTC" };
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(screen.getByRole("button", { name: /^You$/ }));
-    expect(screen.getByRole("button", { name: "Sunday" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(screen.getByRole("button", { name: "Sunday" }));
-    await user.click(screen.getByRole("button", { name: "Saturday" }));
-    expect(stored.push.reminderDays).toEqual([1, 2, 3, 4, 5]);
-    for (const d of ["Monday", "Tuesday", "Wednesday", "Thursday"]) await user.click(screen.getByRole("button", { name: d }));
-    expect(stored.push.reminderDays).toEqual([5]);
-    await user.click(screen.getByRole("button", { name: "Friday" }));
-    expect(stored.push.reminderDays).toEqual([5]);
+    expect(screen.getAllByTestId("reminder")).toHaveLength(2);
+    expect(screen.getByLabelText("Workout reminder time")).toHaveValue("18");
+    expect(screen.getByLabelText("Weigh-in reminder time")).toHaveValue("7");
+    expect(screen.getByText("Repeats: Mon, Wed, Fri")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Monday (workout at 6pm)" }));
+    await user.click(screen.getByRole("button", { name: "Wednesday (workout at 6pm)" }));
+    expect(stored.push.schedules.find((r) => r.type === "workout").days).toEqual([5]);
+    // The last day can't be turned off.
+    await user.click(screen.getByRole("button", { name: "Friday (workout at 6pm)" }));
+    expect(stored.push.schedules.find((r) => r.type === "workout").days).toEqual([5]);
+    await user.click(screen.getAllByRole("button", { name: "Weekdays" })[0]);
+    expect(stored.push.schedules.find((r) => r.type === "workout").days).toEqual([1, 2, 3, 4, 5]);
+    expect(stored.push.schedules.find((r) => r.type === "weighin")).toMatchObject({ id: "weighin", hour: 7 });
   }, 20000);
 });

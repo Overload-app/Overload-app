@@ -1,7 +1,7 @@
-// The daily workout reminder. Real ask: "it should be based off their time
-// zone." Runs every hour and nudges the people for whom it's now
-// REMINDER_HOUR where they are, if they have reminders on, haven't trained
-// yet today, and haven't already hit their days-per-week this week.
+// Scheduled reminders (workout, food logging, weigh-in) and the
+// forgot-to-finish nudge. Real ask: "it should be based off their time
+// zone." Runs every hour and sends each reminder whose hour has come where
+// the person is, on the days they picked.
 //
 // Vercel's free plan only runs its own crons once a day, so the hourly tick
 // comes from GitHub Actions (.github/workflows/push-cron.yml). GitHub signs
@@ -106,39 +106,96 @@ export function nextDayIndex(days, workouts) {
   return idx === -1 ? workouts.length % days.length : (idx + 1) % days.length;
 }
 
-// The reminder to send this person today, or null for none.
-export function reminderFor(state, now = new Date(), catchUp = false) {
-  const push = state?.push;
-  if (!inWindow(localHour(push?.tz, now), REMINDER_HOUR, REMINDER_WINDOW_HOURS, catchUp)) return null;
-  if (!push?.reminders || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
-  // Real ask: choose which days the reminder can go off. None chosen = every day.
-  if (Array.isArray(push.reminderDays) && push.reminderDays.length > 0 && !push.reminderDays.includes(localWeekday(push.tz, now))) return null;
-  const days = state?.program?.days || [];
-  if (days.length === 0) return null;
-  const workouts = state?.logs?.workouts || [];
-  const today = localDateISO(push.tz, now);
-  if (workouts.some((w) => w.date === today)) return null;
-  // Already done this week's sessions (last 7 days, today included): no nag.
-  const weekAgo = localDateISO(push.tz, new Date(now.getTime() - 6 * 86400000));
-  const thisWeek = workouts.filter((w) => w.date >= weekAgo && w.date <= today).length;
-  const perWeek = Number(state?.profile?.daysPerWeek) || days.length;
-  if (thisWeek >= perWeek) return null;
-  const next = days[nextDayIndex(days, workouts)];
-  return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
+// Real ask: "schedule food log reminders at certain times, and how often it
+// repeats, and you should be able to make multiple. same with workout days."
+// Each reminder is { id, type: "workout"|"food"|"weighin", hour, days } in
+// state.push.schedules. Same as reminderSchedules() in src/App.jsx: accounts
+// from before that list existed keep their one 6pm workout reminder and
+// their weigh-in time, under the ids those were already sent as.
+export const DEFAULT_WEIGH_IN_HOUR = 8;
+const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
+export function reminderSchedules(push) {
+  if (Array.isArray(push?.schedules)) return push.schedules;
+  const out = [];
+  if (push?.reminders) out.push({ id: "reminder", type: "workout", hour: REMINDER_HOUR, days: Array.isArray(push.reminderDays) && push.reminderDays.length > 0 ? push.reminderDays : EVERY_DAY });
+  if (push?.weighIn) out.push({ id: "weighin", type: "weighin", hour: Number.isInteger(push.weighInHour) ? push.weighInHour : DEFAULT_WEIGH_IN_HOUR, days: EVERY_DAY });
+  return out;
 }
 
-// Real ask: "add a weigh-in notification where you can set the time."
-// Sent at the hour they picked (their time), unless they've already weighed
-// in today.
-export const DEFAULT_WEIGH_IN_HOUR = 8;
-export function weighInFor(state, now = new Date(), catchUp = false) {
-  const push = state?.push;
-  if (!push?.weighIn || !Array.isArray(push.subscriptions) || push.subscriptions.length === 0) return null;
-  const hour = Number.isInteger(push.weighInHour) ? push.weighInHour : DEFAULT_WEIGH_IN_HOUR;
-  if (!inWindow(localHour(push.tz, now), hour, WEIGH_IN_WINDOW_HOURS, catchUp)) return null;
+// How late a skipped hourly run can still send each kind. Food reminders get
+// less room, since people often set several a day.
+export const FOOD_WINDOW_HOURS = 2;
+const WINDOW = { workout: REMINDER_WINDOW_HOURS, weighin: WEIGH_IN_WINDOW_HOURS, food: FOOD_WINDOW_HOURS };
+
+// The message for one reminder, or null when there's no point sending it.
+function reminderMessage(type, state, now) {
+  const push = state.push;
   const today = localDateISO(push.tz, now);
-  if ((state?.logs?.bodyweight || []).some((w) => w.date === today)) return null;
-  return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/" };
+  if (type === "workout") {
+    const days = state?.program?.days || [];
+    if (days.length === 0) return null;
+    const workouts = state?.logs?.workouts || [];
+    if (workouts.some((w) => w.date === today)) return null;
+    // Already done this week's sessions (last 7 days, today included): no nag.
+    const weekAgo = localDateISO(push.tz, new Date(now.getTime() - 6 * 86400000));
+    const thisWeek = workouts.filter((w) => w.date >= weekAgo && w.date <= today).length;
+    const perWeek = Number(state?.profile?.daysPerWeek) || days.length;
+    if (thisWeek >= perWeek) return null;
+    const next = days[nextDayIndex(days, workouts)];
+    return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
+  }
+  if (type === "weighin") {
+    if ((state?.logs?.bodyweight || []).some((w) => w.date === today)) return null;
+    return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/" };
+  }
+  if (type === "food") {
+    const meals = (state?.logs?.nutrition || []).find((d) => d.date === today)?.meals || [];
+    const cal = Math.round(meals.reduce((a, m) => a + (Number(m?.cal) || 0), 0));
+    const target = Number(state?.targets?.calories) || 0;
+    const body = meals.length === 0
+      ? "Nothing logged yet today — add what you've eaten so far."
+      : target > 0 ? `You're at ${cal} of ${target} calories today — log anything you've eaten since.` : "Log anything you've eaten since your last meal.";
+    return { kind: "food", title: "Log your food 🍽️", body, tag: "food", url: "/" };
+  }
+  return null;
+}
+
+// The reminders to send now: { note, keys } — keys are the push_sent names
+// to record, so each reminder goes out at most once a day. If a late run
+// finds two of the same type due (say food at 12pm and 1pm), only one
+// notification goes out and both are marked sent.
+export function scheduledFor(state, now = new Date(), sentToday = null) {
+  const push = state?.push;
+  if (!Array.isArray(push?.subscriptions) || push.subscriptions.length === 0) return [];
+  const catchUp = sentToday instanceof Set;
+  const hourNow = localHour(push.tz, now);
+  const weekday = localWeekday(push.tz, now);
+  const byType = new Map();
+  for (const r of reminderSchedules(push)) {
+    if (!r || !Number.isInteger(r.hour) || !WINDOW[r.type]) continue;
+    const key = String(r.id || `${r.type}-${r.hour}`);
+    if (catchUp && sentToday.has(key)) continue;
+    if (Array.isArray(r.days) && r.days.length > 0 && !r.days.includes(weekday)) continue;
+    if (!inWindow(hourNow, r.hour, WINDOW[r.type], catchUp)) continue;
+    if (!byType.has(r.type)) byType.set(r.type, []);
+    byType.get(r.type).push(key);
+  }
+  const out = [];
+  for (const [type, keys] of byType) {
+    const note = reminderMessage(type, state, now);
+    if (note) out.push({ note, keys });
+  }
+  return out;
+}
+
+// Kept for the tests and anything else that asked for one kind by name.
+export function reminderFor(state, now = new Date(), catchUp = false) {
+  const workout = reminderSchedules(state?.push).filter((r) => r.type === "workout");
+  return scheduledFor({ ...state, push: { ...state?.push, schedules: workout } }, now, catchUp ? new Set() : null)[0]?.note || null;
+}
+export function weighInFor(state, now = new Date(), catchUp = false) {
+  const weighin = reminderSchedules(state?.push).filter((r) => r.type === "weighin");
+  return scheduledFor({ ...state, push: { ...state?.push, schedules: weighin } }, now, catchUp ? new Set() : null)[0]?.note || null;
 }
 
 // Real ask: "a notification if numbers haven't been logged in a while,
@@ -160,14 +217,16 @@ export function idleWorkoutFor(state, now = new Date()) {
   return { kind: "idle", title: "Still working out?", body: `Nothing's been logged on ${day} for a while — tap to finish it or keep going.`, tag: "idle", url: "/" };
 }
 
-// Everything due for this person now. sentToday: the kinds already sent
-// today (a Set) when the push_sent table is there — which switches on
+// Everything due for this person now, as { note, keys } (keys empty for the
+// idle nudge, which is never recorded). sentToday: the push_sent names
+// already sent today (a Set) when that table is there — which switches on
 // catch-up; null when it isn't.
+export function dueFor(state, now = new Date(), sentToday = null) {
+  const idle = idleWorkoutFor(state, now);
+  return [...scheduledFor(state, now, sentToday), ...(idle ? [{ note: idle, keys: [] }] : [])];
+}
 export function notificationsFor(state, now = new Date(), sentToday = null) {
-  const catchUp = sentToday instanceof Set;
-  return [reminderFor(state, now, catchUp), weighInFor(state, now, catchUp), idleWorkoutFor(state, now)]
-    .filter(Boolean)
-    .filter((n) => !catchUp || n.kind === "idle" || !sentToday.has(n.kind));
+  return dueFor(state, now, sentToday).map((d) => d.note);
 }
 
 export default async function handler(req, res) {
@@ -187,7 +246,7 @@ export default async function handler(req, res) {
   let sent = 0, people = 0;
   for (let from = 0; ; from += 500) {
     const { data, error } = await supabaseAdmin.from("app_state").select("user_id, state")
-      .or("state->push->>reminders.eq.true,state->push->>weighIn.eq.true,state->push->>idleWorkout.eq.true")
+      .or("state->push->>reminders.eq.true,state->push->>weighIn.eq.true,state->push->>idleWorkout.eq.true,state->push->>schedules.not.is.null")
       .range(from, from + 499);
     if (error) return res.status(500).json({ error: error.message });
     for (const row of data || []) {
@@ -196,15 +255,15 @@ export default async function handler(req, res) {
       let sentToday = null;
       const { data: sentRows, error: sentError } = await supabaseAdmin.from("push_sent").select("kind").eq("user_id", row.user_id).eq("day", day);
       if (!sentError) sentToday = new Set((sentRows || []).map((r) => r.kind));
-      const notes = notificationsFor(row.state, new Date(), sentToday);
-      if (notes.length === 0) continue;
+      const due = dueFor(row.state, new Date(), sentToday);
+      if (due.length === 0) continue;
       people++;
-      for (const note of notes) {
+      for (const { note, keys } of due) {
         const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600 })));
         const ok = results.filter((r) => r.status === "fulfilled").length;
         sent += ok;
-        if (ok > 0 && sentToday && note.kind !== "idle") {
-          await supabaseAdmin.from("push_sent").insert({ user_id: row.user_id, kind: note.kind, day });
+        if (ok > 0 && sentToday && keys.length > 0) {
+          await supabaseAdmin.from("push_sent").insert(keys.map((kind) => ({ user_id: row.user_id, kind, day })));
         }
       }
     }

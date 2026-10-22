@@ -240,7 +240,7 @@ function timeoutError() {
    and per month — $0.75/month hard ceiling. Enforced centrally here since
    claudeChat is the one function every AI feature in the app already
    routes through (Coach, program generation, meal photo analysis,
-   exercise-alternatives lookup, periodic reviews) — covers all of them
+   exercise-alternatives lookup) — covers all of them
    automatically, including anything added later, with nothing to
    duplicate at each call site.
 
@@ -3992,29 +3992,25 @@ export const QUIZ_STEPS = [
     placeholder: "e.g. love chicken, rice, eggs, Greek yogurt · hate fish and mushrooms · eat out most lunches · on a tight budget",
   },
   {
-    key: "reviewCadence",
-    q: "Want periodic AI check-ins on your progress?",
-    sub: "Optional — a short written review of your training and nutrition, generated automatically once a period's worth of data is in. Pick either, both, or neither; change this anytime in Settings.",
-    type: "multi",
-    optional: true,
-    options: [["weekly", "Weekly review"], ["monthly", "Monthly review"]],
-  },
-  {
     // Real ask: "in the quiz at the start it asks which ones you want, and
-    // says you can change them anytime." Phones only allow the permission
-    // prompt from a tap, so these are switched on from a card on Home.
+    // says you can change them anytime" — and later, "make sure when people
+    // do the quiz they can set all these up or it says set up later in
+    // wherever you can set it up." Phones only allow the permission prompt
+    // from a tap, so these are switched on from a card on Home afterwards.
     key: "notifications",
-    q: "Which notifications do you want?",
-    sub: "Optional — pick any. You can change these anytime on the You page.",
-    type: "multi",
+    q: "Set up your reminders",
+    sub: "Optional — add workout, food-logging and weigh-in reminders at the times and days you want, as many as you like. Or tap \"Set up later\" and do it anytime on the You page, under Notifications.",
+    type: "reminders",
     optional: true,
-    options: [["reminders", "Workout reminders (6pm)"], ["restAlerts", "Rest timer alerts"], ["weighIn", "Weigh-in reminder"], ["idleWorkout", "Ask if I forgot to finish a workout"]],
+    // Same two as NOTIFICATION_KINDS (defined further down the file).
+    options: [["restAlerts", "Rest timer alerts"], ["idleWorkout", "Ask if I forgot to finish a workout"]],
   },
 ];
 
 export function Onboarding({ onComplete }) {
   const [step, setStep] = useState(-1);
   const [answers, setAnswers] = useState({});
+  const answersNow = answers;
   const [feet, setFeet] = useState(5);
   const [inches, setInches] = useState(8);
   const [building, setBuilding] = useState(false);
@@ -4065,7 +4061,10 @@ export function Onboarding({ onComplete }) {
     else setStep((s) => s + 1);
   }
 
-  async function finish() {
+  // later: they tapped "Set up later" on the notifications step, so nothing
+  // picked there is kept.
+  async function finish(later = false) {
+    const answers = later ? { ...answersNow, notifications: [], reminderSchedules: [] } : answersNow;
     const profile = {
       ...answers,
       heightIn: answers.heightIn || (Number(feet) || 5) * 12 + (Number(inches) || 0),
@@ -4076,8 +4075,6 @@ export function Onboarding({ onComplete }) {
       diet: answers.diet || [],
       otherDiet: answers.otherDiet || "",
       foodPrefs: answers.foodPrefs || "",
-      weeklyReviewEnabled: (answers.reviewCadence || []).includes("weekly"),
-      monthlyReviewEnabled: (answers.reviewCadence || []).includes("monthly"),
       name: "",
     };
     const targets = calcTargets(profile);
@@ -4261,6 +4258,28 @@ export function Onboarding({ onComplete }) {
             style={{ width: "100%", padding: "16px 18px", fontSize: 16, borderRadius: 12, border: `2px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", resize: "none" }}
           />
         )}
+        {cur.type === "reminders" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <ReminderList schedules={answers.reminderSchedules || []} onChange={(next) => setAns("reminderSchedules", next)} />
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 8 }}>Also:</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {cur.options.map(([val, label]) => {
+                  const active = (answers.notifications || []).includes(val);
+                  return (
+                    <button
+                      key={val} aria-pressed={active}
+                      onClick={() => toggleMulti("notifications", val)}
+                      style={{ padding: "10px 14px", borderRadius: 20, cursor: "pointer", border: `2px solid ${active ? T.charge : T.steel}`, background: active ? "#EEEDFF" : T.card, fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 13, color: T.ink }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
         {cur.type === "height" && (
           <div style={{ display: "flex", gap: 12 }}>
             {[["ft", feet, setFeet, 3, 8], ["in", inches, setInches, 0, 11]].map(([lab, v, setV, min, max]) => (
@@ -4284,6 +4303,11 @@ export function Onboarding({ onComplete }) {
           {step === QUIZ_STEPS.length - 1 ? "Build my plan" : "Next"} <ChevronRight size={18} />
         </Btn>
       </div>
+      {cur.type === "reminders" && (
+        <button onClick={() => finish(true)} style={{ background: "none", border: "none", color: T.steelDark, fontSize: 13, fontWeight: 600, textDecoration: "underline", cursor: "pointer", marginTop: 12, padding: 4 }}>
+          Set up later (You page → Notifications)
+        </button>
+      )}
     </div>
   );
 }
@@ -5719,27 +5743,6 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
         </div>
       )}
 
-      {/* A generated review sits permanently under Progress either way —
-          this is just a heads-up that a new one showed up, not the only
-          place to see it. */}
-      {(() => {
-        const unseen = ["weekly", "monthly"]
-          .flatMap((cadence) => (state.reviews?.[cadence] || []).map((r, i) => ({ cadence, r, i })))
-          .filter(({ r }) => !r.seen);
-        if (unseen.length === 0) return null;
-        const cadenceLabel = unseen.length > 1 ? "reviews are" : `${unseen[0].cadence} review is`;
-        return (
-          <button
-            onClick={() => setActiveTab("progress")}
-            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", background: T.card, border: `1px solid ${T.steel}`, borderRadius: 12, padding: "12px 14px", marginTop: 10, cursor: "pointer", textAlign: "left" }}
-          >
-            <TrendingUp size={16} color={T.chargeDeep} style={{ flexShrink: 0 }} />
-            <span style={{ flex: 1, fontSize: 13, color: T.ink, fontWeight: 600 }}>Your {cadenceLabel} ready — see it in Progress</span>
-            <ChevronRight size={16} color={T.steelDark} />
-          </button>
-        );
-      })()}
-
       <TickRule label="Next workout" />
       <Card style={{ background: T.ink, border: "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -6376,7 +6379,7 @@ If the "Age plan" line says STANDARD, or there is no "Age plan" line, ignore thi
 
 const COACH_LOG_RULES = `THEIR LOGGED DATA. Your context below carries a summary of what they have actually logged — every workout's date/day/duration, their most-trained lifts with best and latest sets, their bodyweight history with the current weight, and their recent daily calories and protein against target.
 - You can see all of it. NEVER say you have no visibility into their weight log, their workouts, or their food — a real report is you saying exactly that twice in one conversation. If they ask how they're progressing, whether they're gaining or losing too fast, whether their protein is actually where it should be, or what they lifted last time, answer from these numbers and cite the real ones.
-- What you genuinely CANNOT do is act later on your own. You only ever run when they send a message, so you cannot watch their log and alert them when something happens. If they ask you to tell them when they hit a target weight, say plainly that you can't watch for it, but that you WILL see their latest weight every time they message you, so they can just ask — and if the number in your context already meets what they described, say so immediately instead of waiting to be asked again. The app's own weekly/monthly reviews are the only thing that runs by itself.
+- What you genuinely CANNOT do is act later on your own. You only ever run when they send a message, so you cannot watch their log and alert them when something happens. If they ask you to tell them when they hit a target weight, say plainly that you can't watch for it, but that you WILL see their latest weight every time they message you, so they can just ask — and if the number in your context already meets what they described, say so immediately instead of waiting to be asked again. The only things that run by themselves are the reminders they set up on the You page.
 - Treat gaps as gaps, not as zeroes. An unlogged day means they didn't log, not that they ate nothing or skipped training — never scold someone for a number that's really a missing entry.`;
 
 const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their days, by dayIndex", "Open right now", "Next scheduled"):
@@ -7688,107 +7691,6 @@ export function detectCoachInsight(state) {
   return null;
 }
 
-/* ============================================================
-   PERIODIC AI REVIEWS (weekly / monthly)
-   Rolling-window, not calendar-aligned — the next review is simply due one
-   period after the last one (or after the account was created, for the
-   very first one), rather than trying to line up with a fixed weekday or
-   the 1st of the month. Simpler to reason about, and doesn't require
-   knowing what day the account was created relative to any calendar
-   boundary.
-============================================================ */
-const REVIEW_PERIOD_MS = { weekly: 7 * 86400000, monthly: 30 * 86400000 };
-
-export function reviewPeriodStart(reviews, accountCreatedAt, cadence) {
-  const list = reviews?.[cadence] || [];
-  const last = list.length > 0 ? list[list.length - 1] : null;
-  // Deleting a review must NOT make the next one come due early (that would
-  // fire an unwanted AI generation), so the schedule is anchored to a
-  // timestamp kept outside the list. Older accounts have no anchor yet, so
-  // fall back to the newest entry, and take whichever is later either way.
-  const times = [];
-  const anchor = reviews?.lastGeneratedAt?.[cadence];
-  if (anchor) times.push(new Date(anchor).getTime());
-  if (last?.generatedAt) times.push(new Date(last.generatedAt).getTime());
-  if (times.length === 0) return new Date(accountCreatedAt).getTime();
-  return Math.max(...times);
-}
-
-// The anchor an older account (saved before lastGeneratedAt existed) is
-// implicitly running on: the newest review's date. Captured before a delete
-// so removing that review doesn't move the next due date earlier.
-export function reviewPeriodStartAnchorISO(reviews, cadence) {
-  const list = reviews?.[cadence] || [];
-  return list.length > 0 ? list[list.length - 1].generatedAt : null;
-}
-
-export function nextReviewDueAt(reviews, accountCreatedAt, cadence) {
-  return reviewPeriodStart(reviews, accountCreatedAt, cadence) + REVIEW_PERIOD_MS[cadence];
-}
-
-export function isReviewDue(reviews, accountCreatedAt, cadence, now = new Date()) {
-  if (!accountCreatedAt) return false;
-  return now.getTime() >= nextReviewDueAt(reviews, accountCreatedAt, cadence);
-}
-
-// Deterministic stats for the period — computed regardless of whether the
-// AI call that turns them into prose succeeds, so there's always at least
-// real numbers behind a review, never just AI-generated vibes.
-// The review's overview and advice, however the AI packed them. Found by the
-// live test: the advice sometimes arrived as text inside the overview
-// ("...on track.</advice> <advice>[\"Aim for...\"]"), or as one string, and
-// the review then showed no advice at all.
-export function reviewFromParsed(parsed) {
-  let overview = asText(parsed?.overview);
-  let advice = parsed?.advice;
-  if (typeof advice === "string") {
-    try { advice = JSON.parse(advice); } catch (e) { advice = advice.split(/\n+|(?<=\.)\s+(?=[A-Z])/); }
-  }
-  advice = Array.isArray(advice) ? advice.map(asText).filter(Boolean) : [];
-  const tag = overview.search(/<\/?advice>/i);
-  if (tag !== -1) {
-    const tail = overview.slice(tag);
-    overview = overview.slice(0, tag).trim();
-    if (advice.length === 0) {
-      const list = tail.match(/\[[\s\S]*\]/);
-      if (list) { try { advice = JSON.parse(list[0]).map(asText).filter(Boolean); } catch (e) {} }
-    }
-  }
-  return { overview: overview || null, advice: advice.slice(0, 6) };
-}
-
-export function summarizeReviewPeriod(logs, periodStartMs, periodEndMs) {
-  const inRange = (dateStr) => {
-    const t = new Date(dateStr).getTime();
-    return t >= periodStartMs && t <= periodEndMs;
-  };
-  const workouts = (logs.workouts || []).filter((w) => inRange(w.date));
-  const totalDurationSec = workouts.reduce((a, w) => a + (w.durationSec || 0), 0);
-  const timedCount = workouts.filter((w) => w.durationSec).length;
-  const weighIns = (logs.bodyweight || []).filter((w) => inRange(w.date)).sort((a, b) => (a.date > b.date ? 1 : -1));
-  const weightChange = weighIns.length >= 2 ? Number((weighIns[weighIns.length - 1].weight - weighIns[0].weight).toFixed(1)) : null;
-  return {
-    workoutCount: workouts.length,
-    avgDurationSec: timedCount > 0 ? Math.round(totalDurationSec / timedCount) : null,
-    weightChange,
-    startWeight: weighIns[0]?.weight ?? null,
-    endWeight: weighIns[weighIns.length - 1]?.weight ?? null,
-  };
-}
-
-export function buildReviewSystem(profile, cadence, summary) {
-  const periodLabel = cadence === "weekly" ? "the past week" : "the past month";
-  return `You are an evidence-based strength & nutrition coach writing a short periodic progress review for a client in a workout app called Overload, covering ${periodLabel}.
-
-Client profile: goal=${profile.goal}, experience=${profile.experience}, days/week target=${profile.daysPerWeek}.${foodPreferenceText(profile) ? `
-Their food preferences: ${foodPreferenceText(profile)} Any diet advice below must respect this — never suggest something they can't eat, build suggestions from food they actually like, and if what they like isn't an obvious fit, adapt it (keep the flavour, fix the macros) rather than telling them to avoid it. Name real dishes, not food groups.` : ""}
-Logged data for ${periodLabel}: ${summary.workoutCount} workout(s) logged${summary.avgDurationSec ? `, averaging ${Math.round(summary.avgDurationSec / 60)} min each` : ""}.${summary.weightChange !== null ? ` Bodyweight went from ${summary.startWeight}lb to ${summary.endWeight}lb (${summary.weightChange > 0 ? "+" : ""}${summary.weightChange}lb).` : " No bodyweight trend available for this period."}
-
-Write a short, honest, encouraging review — 3-5 sentences of overview, then 2-3 concrete, specific pieces of advice for training and/or diet going forward. If little or nothing was logged this period, say that plainly and gently rather than inventing progress that didn't happen — ask what got in the way rather than assuming.
-
-Respond ONLY with JSON, no markdown fences: {"overview": "<3-5 sentence summary>", "advice": ["<specific tip>", "<specific tip>"]}`;
-}
-
 // Room on the right of every graph so the last date label isn't cut off
 // (real report, from the Progress tab — it happened on all of them).
 const CHART_MARGIN = { top: 8, right: 24, left: 0, bottom: 4 };
@@ -7909,139 +7811,7 @@ function ExerciseProgress({ logs, program }) {
   );
 }
 
-// Shows generated weekly/monthly reviews, most-recent-first within each
-// cadence, only when at least one of either exists — nothing shown at all
-// (not even an empty state) for accounts that never enabled either, so
-// this doesn't clutter Progress for the common case of neither being on.
-// Marks any unseen entries as seen once they're actually rendered here
-// (this section itself IS "viewing" them, whether reached via the Home
-// banner or just browsing Progress directly).
-// Reviews pile up over time, so each one is a collapsible row: label + date
-// always visible, the write-up only when opened. A review that hasn't been
-// read yet starts open; ones already seen start closed. Deleting is a
-// two-tap confirm — the write-up is gone for good once it's removed.
-function ReviewCard({ label, entry, onDelete }) {
-  // The `seen` flag flips to true moments after mount (ReviewsSection marks
-  // it), and this initializer only runs once, so a brand-new review stays
-  // open for the visit in which it first appeared.
-  const [open, setOpen] = useState(!entry.seen);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  return (
-    <Card style={{ marginBottom: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          aria-label={`${open ? "Collapse" : "Expand"} ${label.toLowerCase()} from ${entry.generatedAt.slice(0, 10)}`}
-          style={{
-            flex: 1, display: "flex", alignItems: "center", gap: 8, minWidth: 0,
-            background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left",
-          }}
-        >
-          <ChevronRight
-            size={14}
-            color={T.steelDark}
-            style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
-          />
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.chargeDeep, fontWeight: 700, letterSpacing: 0.5 }}>{label}</span>
-          <span style={{ fontSize: 11, color: T.steelDark, marginLeft: "auto" }}>{entry.generatedAt.slice(0, 10)}</span>
-        </button>
-        {onDelete && (
-          confirmDelete ? (
-            <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-              <button
-                onClick={onDelete}
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
-                  color: T.protein, background: "none", border: "none", padding: "3px 2px", cursor: "pointer",
-                }}
-              >
-                DELETE
-              </button>
-              <button
-                onClick={() => setConfirmDelete(false)}
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
-                  color: T.steelDark, background: "none", border: "none", padding: "3px 2px", cursor: "pointer",
-                }}
-              >
-                KEEP
-              </button>
-            </span>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              aria-label={`Delete ${label.toLowerCase()} from ${entry.generatedAt.slice(0, 10)}`}
-              style={{ flexShrink: 0, background: "none", border: "none", padding: 2, cursor: "pointer", lineHeight: 0 }}
-            >
-              <X size={14} color={T.steelDark} />
-            </button>
-          )
-        )}
-      </div>
-      {open && (
-        <div style={{ marginTop: 8 }}>
-          {asText(entry.overview) ? (
-            <p style={{ fontSize: 13, color: T.ink, margin: "0 0 8px", lineHeight: 1.5 }}>{asText(entry.overview)}</p>
-          ) : (
-            <p style={{ fontSize: 13, color: T.steelDark, margin: "0 0 8px", fontStyle: "italic" }}>
-              {entry.summary?.workoutCount ?? 0} workout{entry.summary?.workoutCount === 1 ? "" : "s"} logged this period.
-            </p>
-          )}
-          {entry.advice && entry.advice.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {entry.advice.map(asText).filter(Boolean).map((tip, i) => (
-                <li key={i} style={{ fontSize: 12.5, color: T.steelDark, marginBottom: 3 }}>{tip}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function ReviewsSection({ reviews, onMarkSeen, onDelete }) {
-  const weekly = reviews?.weekly || [];
-  const monthly = reviews?.monthly || [];
-  useEffect(() => {
-    weekly.forEach((r, i) => { if (!r.seen) onMarkSeen?.("weekly", i); });
-    monthly.forEach((r, i) => { if (!r.seen) onMarkSeen?.("monthly", i); });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekly.length, monthly.length]);
-
-  if (weekly.length === 0 && monthly.length === 0) return null;
-
-  return (
-    <>
-      <TickRule label="Reviews" />
-      {weekly.slice().reverse().slice(0, 3).map((r, i) => {
-        const idx = weekly.length - 1 - i;
-        return (
-          <ReviewCard
-            key={`w-${r.generatedAt}`}
-            label="WEEKLY REVIEW"
-            entry={r}
-            onDelete={onDelete ? () => onDelete("weekly", idx) : null}
-          />
-        );
-      })}
-      {monthly.slice().reverse().slice(0, 3).map((r, i) => {
-        const idx = monthly.length - 1 - i;
-        return (
-          <ReviewCard
-            key={`m-${r.generatedAt}`}
-            label="MONTHLY REVIEW"
-            entry={r}
-            onDelete={onDelete ? () => onDelete("monthly", idx) : null}
-          />
-        );
-      })}
-    </>
-  );
-}
-
-export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpenHistory, onMarkReviewSeen, onDeleteReview }) {
+export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpenHistory }) {
   const { logs, profile } = state;
   const [entry, setEntry] = useState("");
   const [entryError, setEntryError] = useState("");
@@ -8099,8 +7869,6 @@ export function Progress({ state, addWeight, removeWeight, restoreWeight, onOpen
           <ChevronRight size={16} color={T.steelDark} />
         </button>
       )}
-
-      <ReviewsSection reviews={state.reviews} onMarkSeen={onMarkReviewSeen} onDelete={onDeleteReview} />
 
       <TickRule label="This month" />
       <MonthlySummary logs={logs} />
@@ -8417,10 +8185,8 @@ export function WorkoutCompleteSheet({ summary, onClose }) {
    happens — and a program rebuild is only generated AFTER they accept it, so
    rejecting one never costs an AI call.
 ============================================================ */
-// reviewCadence is excluded: it isn't a profile answer, it's the two review
-// toggles, which already have their own switches further down this same tab.
-// notifications likewise: each has its own switch on this tab.
-const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "reviewCadence" && st.key !== "notifications");
+// notifications is excluded: reminders have their own section on this tab.
+const EDITABLE_QUIZ_STEPS = QUIZ_STEPS.filter((st) => st.key !== "notifications");
 
 // Found by the stress test: the quiz took an age of -5 and a weight of 25 or
 // -5 lb. Those fed straight into the calorie targets, and a negative age
@@ -8647,20 +8413,148 @@ export function QuizEditor({ profile, targets, onCancel, onSave }) {
 /* ============================================================
    PROFILE
 ============================================================ */
-// Every kind of notification, each with its own switch (real ask: "all of
-// the notifications for each different type can be turned on and off").
+// The two notifications that are just on or off (real ask: "all of the
+// notifications for each different type can be turned on and off"). The
+// timed ones — workout, food and weigh-in reminders — are REMINDER_TYPES.
 export const NOTIFICATION_KINDS = [
-  ["reminders", "Workout reminders", "A nudge in the evening (from 6pm your time) on days you haven't trained yet."],
   ["restAlerts", "Rest alerts", "Buzzes you when rest is up, even with the app closed."],
-  ["weighIn", "Weigh-in reminder", "A reminder to weigh in at a time you pick."],
   ["idleWorkout", "Forgot to finish?", "Asks if you're done when a workout's gone quiet for a while."],
 ];
 
+// Reminders people schedule themselves. Real ask: "schedule food log
+// reminders at certain times, and how often it repeats, and you should be
+// able to make multiple. same with workout days." Each one is
+// { id, type, hour, days } in state.push.schedules — days are 0 (Sunday)
+// to 6. api/push-cron.js sends them; it keeps its own copy of
+// reminderSchedules() below, so change both together.
+export const REMINDER_TYPES = [
+  ["workout", "Workout", "Skipped on days you've already trained."],
+  ["food", "Log food", "A nudge to log what you've eaten."],
+  ["weighin", "Weigh-in", "Skipped once you've weighed in that day."],
+];
+const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
+const WEEKDAYS = [["S", "Sunday"], ["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"], ["F", "Friday"], ["S", "Saturday"]];
+
+// Accounts from before schedules existed had one workout reminder (6pm,
+// optional days) and one weigh-in time; those carry on as two reminders
+// until the first edit saves a real list. Their ids match the names the
+// server already used for them, so nothing is sent twice on the switch.
+export function reminderSchedules(push) {
+  if (Array.isArray(push?.schedules)) return push.schedules;
+  const out = [];
+  if (push?.reminders) out.push({ id: "reminder", type: "workout", hour: 18, days: Array.isArray(push.reminderDays) && push.reminderDays.length > 0 ? push.reminderDays : EVERY_DAY });
+  if (push?.weighIn) out.push({ id: "weighin", type: "weighin", hour: Number.isInteger(push.weighInHour) ? push.weighInHour : 8, days: EVERY_DAY });
+  return out;
+}
+
+const DEFAULT_REMINDER_HOURS = { workout: [18, 7, 12, 16], food: [12, 19, 8, 15], weighin: [8, 7, 9] };
+export function newReminder(type, existing = []) {
+  const taken = existing.filter((r) => r.type === type).map((r) => r.hour);
+  const hours = DEFAULT_REMINDER_HOURS[type] || [12];
+  const hour = hours.find((h) => !taken.includes(h)) ?? hours[0];
+  return { id: `${type}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, type, hour, days: EVERY_DAY };
+}
+
+export function hourLabel(h) {
+  return h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`;
+}
+
+export function repeatLabel(days) {
+  const d = [...new Set(days || [])].sort();
+  if (d.length === 7 || d.length === 0) return "Every day";
+  if (d.join() === "1,2,3,4,5") return "Weekdays";
+  if (d.join() === "0,6") return "Weekends";
+  return d.map((x) => WEEKDAYS[x][1].slice(0, 3)).join(", ");
+}
+
+// The list of reminders with their time and repeat days, and buttons to add
+// more. Used on the You page and in the quiz.
+export function ReminderList({ schedules, onChange, disabled }) {
+  const list = schedules || [];
+  const update = (id, patch) => onChange(list.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const presets = [["Every day", EVERY_DAY], ["Weekdays", [1, 2, 3, 4, 5]], ["Weekends", [0, 6]]];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {list.length === 0 && <p style={{ margin: 0, fontSize: 12, color: T.steelDark }}>No reminders yet — add as many as you like below.</p>}
+      {list.map((r) => {
+        const typeLabel = (REMINDER_TYPES.find(([t]) => t === r.type) || [, "Reminder"])[1];
+        const days = Array.isArray(r.days) && r.days.length > 0 ? r.days : EVERY_DAY;
+        return (
+          <div key={r.id} data-testid="reminder" style={{ border: `1px solid ${T.steel}`, borderRadius: 10, padding: 10, background: "#fff" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: T.ink }}>{typeLabel} reminder</span>
+              <select
+                aria-label={`${typeLabel} reminder time`}
+                value={r.hour}
+                disabled={disabled}
+                onChange={(e) => update(r.id, { hour: Number(e.target.value) })}
+                style={{ padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontSize: 14, background: "#fff" }}
+              >
+                {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hourLabel(h)}</option>)}
+              </select>
+              <button
+                aria-label={`Delete ${typeLabel.toLowerCase()} reminder at ${hourLabel(r.hour)}`}
+                disabled={disabled}
+                onClick={() => onChange(list.filter((x) => x.id !== r.id))}
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: T.steelDark, display: "flex" }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ fontSize: 12, color: T.steelDark, margin: "6px 0" }}>Repeats: {repeatLabel(days)}</div>
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              {WEEKDAYS.map(([short, full], d) => {
+                const on = days.includes(d);
+                return (
+                  <button
+                    key={d} aria-label={`${full} (${typeLabel.toLowerCase()} at ${hourLabel(r.hour)})`} aria-pressed={on} disabled={disabled}
+                    onClick={() => {
+                      const next = on ? days.filter((x) => x !== d) : [...days, d].sort();
+                      if (next.length > 0) update(r.id, { days: next });
+                    }}
+                    style={{ width: 32, height: 32, borderRadius: "50%", border: `1.5px solid ${on ? T.charge : T.steel}`, background: on ? T.charge : "#fff", color: on ? "#fff" : T.steelDark, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}
+                  >
+                    {short}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              {presets.map(([label, d]) => (
+                <button
+                  key={label} disabled={disabled} onClick={() => update(r.id, { days: d })}
+                  style={{ fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 12, border: `1px solid ${T.steel}`, background: repeatLabel(days) === label ? "#EEEDFF" : "#fff", color: T.ink, cursor: "pointer" }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {REMINDER_TYPES.map(([type, label]) => (
+          <button
+            key={type} disabled={disabled}
+            onClick={() => onChange([...list, newReminder(type, list)])}
+            style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 600, padding: "8px 12px", borderRadius: 18, border: `1.5px dashed ${T.charge}`, background: "#fff", color: T.chargeDeep, cursor: "pointer" }}
+          >
+            <Plus size={14} /> {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // After the quiz: turns on the notifications they picked, with one tap.
-function NotificationPrompt({ kinds, onEnable, onDismiss }) {
+function NotificationPrompt({ kinds, schedules, onEnable, onDismiss }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const labels = NOTIFICATION_KINDS.filter(([k]) => kinds.includes(k)).map(([, label]) => label.toLowerCase());
+  const labels = [
+    ...(schedules || []).map((r) => `${((REMINDER_TYPES.find(([t]) => t === r.type) || [, "reminder"])[1]).toLowerCase()} reminder at ${hourLabel(r.hour)}`),
+    ...NOTIFICATION_KINDS.filter(([k]) => kinds.includes(k)).map(([, label]) => label.toLowerCase()),
+  ];
   return (
     <div style={{ padding: "16px 16px 0" }}>
       <Card style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -8682,9 +8576,7 @@ function NotificationPrompt({ kinds, onEnable, onDismiss }) {
   );
 }
 
-const WEEKDAYS = [["S", "Sunday"], ["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"], ["F", "Friday"], ["S", "Saturday"]];
-
-function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour, onSetReminderDays }) {
+function NotificationSettings({ push, onSetPushEnabled, onSetSchedules }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
   async function toggle(kind) {
@@ -8698,12 +8590,26 @@ function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour, onSetR
       setBusy(null);
     }
   }
+  async function changeSchedules(next) {
+    setError("");
+    setBusy("schedules");
+    try {
+      await onSetSchedules(next);
+    } catch (e) {
+      setError(e?.message || "Couldn't save that reminder.");
+    } finally {
+      setBusy(null);
+    }
+  }
   return (
     <>
       <TickRule label="Notifications" />
       <Card>
-        {NOTIFICATION_KINDS.map(([kind, label, hint], i) => (
-          <div key={kind} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
+        <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>Reminders</div>
+        <div style={{ fontSize: 12, color: T.steelDark, marginBottom: 10 }}>Workout, food-logging and weigh-in reminders at the times and days you choose (your time zone).</div>
+        {onSetSchedules && <ReminderList schedules={reminderSchedules(push)} onChange={changeSchedules} disabled={busy !== null} />}
+        {NOTIFICATION_KINDS.map(([kind, label, hint]) => (
+          <div key={kind} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: `1px solid ${T.steel}`, marginTop: 10 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</div>
               <div style={{ fontSize: 12, color: T.steelDark }}>{hint}</div>
@@ -8724,55 +8630,13 @@ function NotificationSettings({ push, onSetPushEnabled, onSetWeighInHour, onSetR
             </button>
           </div>
         ))}
-        {push?.reminders && onSetReminderDays && (() => {
-          // Real ask: "you should be able to set days for workout reminders."
-          // Nothing saved yet means every day.
-          const chosen = Array.isArray(push.reminderDays) && push.reminderDays.length > 0 ? push.reminderDays : [0, 1, 2, 3, 4, 5, 6];
-          return (
-            <div style={{ padding: "9px 0", borderTop: `1px solid ${T.steel}` }}>
-              <div style={{ fontSize: 13, color: T.ink, fontWeight: 600, marginBottom: 8 }}>Workout reminder days</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {WEEKDAYS.map(([short, full], d) => {
-                  const on = chosen.includes(d);
-                  return (
-                    <button
-                      key={d} aria-label={full} aria-pressed={on}
-                      onClick={() => {
-                        const next = on ? chosen.filter((x) => x !== d) : [...chosen, d].sort();
-                        if (next.length > 0) onSetReminderDays(next);
-                      }}
-                      style={{ width: 34, height: 34, borderRadius: "50%", border: `1.5px solid ${on ? T.charge : T.steel}`, background: on ? T.charge : "#fff", color: on ? "#fff" : T.steelDark, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}
-                    >
-                      {short}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })()}
-        {push?.weighIn && onSetWeighInHour && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "9px 0", borderTop: `1px solid ${T.steel}` }}>
-            <label htmlFor="weigh-in-hour" style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>Weigh-in reminder time</label>
-            <select
-              id="weigh-in-hour"
-              value={Number.isInteger(push.weighInHour) ? push.weighInHour : 8}
-              onChange={(e) => onSetWeighInHour(Number(e.target.value))}
-              style={{ padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${T.steel}`, fontSize: 14, background: "#fff" }}
-            >
-              {Array.from({ length: 24 }, (_, h) => (
-                <option key={h} value={h}>{h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`}</option>
-              ))}
-            </select>
-          </div>
-        )}
         {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "8px 0 0" }}>{error}</p>}
       </Card>
     </>
   );
 }
 
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetReviewEnabled, onSetPushEnabled, onSetWeighInHour, onSetReminderDays, onEditQuiz }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetPushEnabled, onSetSchedules, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -8880,30 +8744,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
-      <TickRule label="Reviews" />
-      <Card>
-        <p style={{ fontSize: 12, color: T.steelDark, margin: "0 0 10px" }}>A short AI-written progress review, generated automatically once a period's worth of data is in.</p>
-        {[["weekly", "Weekly review"], ["monthly", "Monthly review"]].map(([cadence, label], i) => (
-          <div key={cadence} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
-            <span style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>{label}</span>
-            <button
-              role="switch"
-              aria-checked={!!state.reviewsEnabled?.[cadence]}
-              aria-label={`Toggle ${label.toLowerCase()}`}
-              onClick={() => onSetReviewEnabled(cadence, !state.reviewsEnabled?.[cadence])}
-              style={{
-                width: 42, height: 24, borderRadius: 12, border: "none", cursor: "pointer", padding: 2,
-                background: state.reviewsEnabled?.[cadence] ? T.charge : T.steel,
-                display: "flex", justifyContent: state.reviewsEnabled?.[cadence] ? "flex-end" : "flex-start",
-              }}
-            >
-              <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", display: "block" }} />
-            </button>
-          </div>
-        ))}
-      </Card>
-
-      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetWeighInHour={onSetWeighInHour} onSetReminderDays={onSetReminderDays} />}
+      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetSchedules={onSetSchedules} />}
 
       <TickRule label="Support & legal" />
       <Card>
@@ -9050,51 +8891,6 @@ export default function App() {
       window.removeEventListener("pageshow", refreshIfNewer);
     };
   }, [account]);
-
-  // Checks once per state change whether a weekly/monthly review has come
-  // due — no cron/background jobs here, so "the app was opened" is the
-  // only real trigger point available. reviewGenerating guards against
-  // firing twice for the same cadence while a request is already in
-  // flight (a fast double-render, or logs changing again mid-request).
-  const reviewGeneratingRef = useRef({ weekly: false, monthly: false });
-  useEffect(() => {
-    if (!account || !state?.accountCreatedAt) return;
-    ["weekly", "monthly"].forEach(async (cadence) => {
-      if (!state.reviewsEnabled?.[cadence]) return;
-      if (reviewGeneratingRef.current[cadence]) return;
-      if (!isReviewDue(state.reviews, state.accountCreatedAt, cadence)) return;
-      reviewGeneratingRef.current[cadence] = true;
-      try {
-        const periodStartMs = reviewPeriodStart(state.reviews, state.accountCreatedAt, cadence);
-        const summary = summarizeReviewPeriod(state.logs, periodStartMs, Date.now());
-        let overview = null;
-        let advice = [];
-        try {
-          const raw = await claudeChat({
-            system: buildReviewSystem(state.profile, cadence, summary),
-            model: LIGHT_MODEL,
-            messages: [{ role: "user", content: "Write my review now." }],
-          });
-          ({ overview, advice } = reviewFromParsed(parseJSONLoose(raw)));
-        } catch (e) {
-          // No connection or the call failed — still record a real,
-          // data-only review below rather than losing the period
-          // entirely; nothing here should block on AI availability.
-        }
-        const entry = { generatedAt: new Date().toISOString(), periodStartMs, periodEndMs: Date.now(), summary, overview, advice, seen: false };
-        persist((prev) => ({
-          ...prev,
-          reviews: {
-            ...prev.reviews,
-            [cadence]: [...(prev.reviews?.[cadence] || []), entry],
-            lastGeneratedAt: { ...prev.reviews?.lastGeneratedAt, [cadence]: entry.generatedAt },
-          },
-        }));
-      } finally {
-        reviewGeneratingRef.current[cadence] = false;
-      }
-    });
-  }, [account, state?.logs, state?.reviewsEnabled, state?.accountCreatedAt]);
 
   useEffect(() => {
     (async () => {
@@ -9247,13 +9043,10 @@ export default function App() {
       saveState(user.id, finalState);
     }
 
-    // Same backfill idea for accounts created before periodic reviews
-    // existed — without accountCreatedAt, isReviewDue() has no anchor to
-    // count a period from and silently never fires. Best-effort: falls
-    // back to their oldest history snapshot's savedAt, or now if there's
-    // no history either — either way the first review just ends up due
-    // one period from whenever this backfill actually ran, not "always
-    // was on since day one," which is fine for a one-time migration.
+    // Same backfill idea for accounts created before accountCreatedAt
+    // existed (it anchored the weekly/monthly reviews, removed 2026-10-21;
+    // old saved reviews are left untouched in their data). Falls back to
+    // their oldest history snapshot's savedAt, or now.
     if (finalState && !finalState.accountCreatedAt) {
       const history = finalState.programHistory || [];
       const oldest = history.length > 0 ? history[history.length - 1] : null;
@@ -9872,9 +9665,13 @@ export default function App() {
     setActiveTab("home");
   }
 
-  function handleOnboarded({ profile, program, targets }) {
+  function handleOnboarded({ profile: quizProfile, program, targets }) {
+    // The reminders picked in the quiz live with the other notification
+    // settings, not in the profile the AI reads.
+    const { reminderSchedules: schedules, ...profile } = quizProfile;
     const fresh = {
       profile, program, targets,
+      ...(Array.isArray(schedules) && schedules.length > 0 ? { push: { schedules } } : {}),
       // Kept forever, separate from programHistory (which only holds the
       // most recent PROGRAM_HISTORY_LIMIT changes and can age out) — this
       // is what "back to my original program" restores, guaranteed, no
@@ -9890,8 +9687,6 @@ export default function App() {
       programHistory: [],
       gifCache: {},
       accountCreatedAt: new Date().toISOString(),
-      reviewsEnabled: { weekly: !!profile.weeklyReviewEnabled, monthly: !!profile.monthlyReviewEnabled },
-      reviews: { weekly: [], monthly: [] },
     };
     persist(fresh);
   }
@@ -10233,6 +10028,20 @@ export default function App() {
   // Workout reminders / rest alerts. Turning one on asks for notification
   // permission and saves this device with the account; turning it off just
   // stops sending (the device stays saved for the other switch).
+  // Saves the reminder list. Adding one asks for notification permission
+  // (if it hasn't been given) and saves this device, like a switch does.
+  async function setReminderSchedules(next) {
+    const added = next.length > reminderSchedules(state.push).length;
+    const sub = added ? await subscribeForPush() : null;
+    persist((prev) => ({
+      ...prev,
+      push: {
+        ...prev.push, schedules: next,
+        ...(sub ? { subscriptions: withSubscription(prev.push, sub), tz: deviceTimeZone() } : {}),
+      },
+    }));
+  }
+
   async function setPushEnabled(kind, enabled) {
     if (!enabled) {
       persist((prev) => ({ ...prev, push: { ...prev.push, [kind]: false } }));
@@ -10244,35 +10053,6 @@ export default function App() {
       push: {
         ...prev.push, subscriptions: withSubscription(prev.push, sub), [kind]: true, tz: deviceTimeZone(),
         ...(kind === "weighIn" && !Number.isInteger(prev.push?.weighInHour) ? { weighInHour: 8 } : {}),
-      },
-    }));
-  }
-
-  function setReviewEnabled(cadence, enabled) {
-    persist((prev) => ({ ...prev, reviewsEnabled: { ...prev.reviewsEnabled, [cadence]: enabled } }));
-  }
-
-  function markReviewSeen(cadence, index) {
-    persist((prev) => ({
-      ...prev,
-      reviews: { ...prev.reviews, [cadence]: (prev.reviews?.[cadence] || []).map((r, i) => (i === index ? { ...r, seen: true } : r)) },
-    }));
-  }
-
-  // Reviews accumulate forever otherwise. Removing one leaves the schedule
-  // alone: reviews.lastGeneratedAt is the anchor for "when is the next one
-  // due", so clearing out the newest review doesn't trigger a fresh (paid)
-  // AI generation on the spot.
-  function deleteReview(cadence, index) {
-    persist((prev) => ({
-      ...prev,
-      reviews: {
-        ...prev.reviews,
-        lastGeneratedAt: {
-          ...prev.reviews?.lastGeneratedAt,
-          [cadence]: prev.reviews?.lastGeneratedAt?.[cadence] || reviewPeriodStartAnchorISO(prev.reviews, cadence),
-        },
-        [cadence]: (prev.reviews?.[cadence] || []).filter((r, i) => i !== index),
       },
     }));
   }
@@ -10432,9 +10212,10 @@ export default function App() {
           </div>
         )}
         <div className="app-main-inner">
-          {activeTab === "home" && (state.profile?.notifications || []).length > 0 && !(state.push?.subscriptions || []).length && !state.push?.promptDismissed && (
+          {activeTab === "home" && ((state.profile?.notifications || []).length > 0 || (state.push?.schedules || []).length > 0) && !(state.push?.subscriptions || []).length && !state.push?.promptDismissed && (
             <NotificationPrompt
-              kinds={state.profile.notifications}
+              kinds={state.profile?.notifications || []}
+              schedules={state.push?.schedules || []}
               onEnable={async () => {
                 const sub = await subscribeForPush();
                 persist((prev) => ({
@@ -10471,11 +10252,9 @@ export default function App() {
             <Progress
               state={state} addWeight={addWeight} removeWeight={removeWeight} restoreWeight={restoreWeight}
               onOpenHistory={() => { setHistoryEditorInitialIdx(null); setHistoryEditorOpen(true); }}
-              onMarkReviewSeen={markReviewSeen}
-              onDeleteReview={deleteReview}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetReviewEnabled={setReviewEnabled} onSetPushEnabled={setPushEnabled} onSetWeighInHour={(h) => persist((prev) => ({ ...prev, push: { ...prev.push, weighInHour: h } }))} onSetReminderDays={(days) => persist((prev) => ({ ...prev, push: { ...prev.push, reminderDays: days } }))} onEditQuiz={() => setQuizEditorOpen(true)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetPushEnabled={setPushEnabled} onSetSchedules={setReminderSchedules} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">

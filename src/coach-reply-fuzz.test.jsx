@@ -247,9 +247,7 @@ describe("the Coach survives every kind of bad AI reply", () => {
     render(<App />);
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
     await user.click(screen.getByRole("button", { name: /^Progress$/ }));
-    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
-    expect(screen.getByText("Sleep more.")).toBeInTheDocument();
   }, 20000);
 
   test("a meal estimate with a non-text name doesn't break the Fuel tab", async () => {

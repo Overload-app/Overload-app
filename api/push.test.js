@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex } from "./push-cron.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex, dueFor, reminderSchedules } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -218,5 +218,58 @@ describe("reminders that survive GitHub skipping runs", () => {
     expect(nextDayIndex(days, [{ date: "2026-10-19", dayName: "Push" }, { date: "2026-10-12", dayName: "Legs" }])).toBe(1);
     const s1 = st({ reminders: true }, { logs: { workouts: [{ date: "2026-10-19", dayName: "Push" }], bodyweight: [] } });
     expect(reminderFor(s1, at(18)).body).toContain("Pull");
+  });
+});
+
+// Real ask: "schedule food log reminders at certain times, and how often it
+// repeats, and you should be able to make multiple. same with workout days."
+describe("reminders people schedule themselves", () => {
+  const sub = { endpoint: "https://push.example/1", keys: {} };
+  const st = (schedules, extra = {}) => ({ push: { subscriptions: [sub], tz: "UTC", schedules }, profile: { daysPerWeek: 5 }, targets: { calories: 2400 }, program: { days: [{ name: "Push" }, { name: "Pull" }] }, logs: { workouts: [], bodyweight: [], nutrition: [] }, ...extra });
+  const at = (h) => new Date(Date.UTC(2026, 9, 20, h, 7)); // a Tuesday
+  const food = (id, hour, days) => ({ id, type: "food", hour, days });
+  test("several food reminders a day, each at its own time", () => {
+    const s1 = st([food("f1", 8), food("f2", 12), food("f3", 19)]);
+    expect(notificationsFor(s1, at(8), null).map((n) => n.kind)).toEqual(["food"]);
+    expect(notificationsFor(s1, at(12), null).map((n) => n.kind)).toEqual(["food"]);
+    expect(notificationsFor(s1, at(15), null)).toEqual([]);
+    expect(notificationsFor(s1, at(19), null).map((n) => n.kind)).toEqual(["food"]);
+  });
+  test("each is sent once a day, under its own name", () => {
+    const s1 = st([food("f1", 8), food("f2", 12)]);
+    expect(dueFor(s1, at(8), new Set()).map((d) => d.keys)).toEqual([["f1"]]);
+    expect(dueFor(s1, at(9), new Set(["f1"]))).toEqual([]);
+    expect(dueFor(s1, at(12), new Set(["f1"])).map((d) => d.keys)).toEqual([["f2"]]);
+  });
+  test("a late run that finds two food reminders due sends one notification", () => {
+    const s1 = st([food("f1", 12), food("f2", 13)]);
+    const due = dueFor(s1, at(13), new Set());
+    expect(due).toHaveLength(1);
+    expect(due[0].keys).toEqual(["f1", "f2"]);
+  });
+  test("repeats only on the days picked", () => {
+    expect(notificationsFor(st([food("f1", 12, [1, 3, 5])]), at(12), null)).toEqual([]);
+    expect(notificationsFor(st([food("f1", 12, [2])]), at(12), null)).toHaveLength(1);
+  });
+  test("the food reminder says where they're at today", () => {
+    const today = { date: "2026-10-20", meals: [{ cal: 600 }, { cal: 450.4 }] };
+    expect(notificationsFor(st([food("f1", 12)]), at(12), null)[0].body).toMatch(/Nothing logged yet/);
+    expect(notificationsFor(st([food("f1", 12)], { logs: { workouts: [], bodyweight: [], nutrition: [today] } }), at(12), null)[0].body).toContain("1050 of 2400");
+  });
+  test("several workout reminders, still skipped once they've trained", () => {
+    const s1 = st([{ id: "w1", type: "workout", hour: 7, days: [1, 2, 3] }, { id: "w2", type: "workout", hour: 17 }]);
+    expect(notificationsFor(s1, at(7), null)[0].body).toContain("Push");
+    expect(notificationsFor(s1, at(17), null).map((n) => n.kind)).toEqual(["reminder"]);
+    const trained = st(s1.push.schedules, { logs: { workouts: [{ date: "2026-10-20", dayName: "Push" }], bodyweight: [], nutrition: [] } });
+    expect(notificationsFor(trained, at(17), null)).toEqual([]);
+  });
+  test("a saved list replaces the old single reminder, even an empty one", () => {
+    const old = { reminders: true, weighIn: true, weighInHour: 7, subscriptions: [sub], tz: "UTC" };
+    expect(reminderSchedules(old).map((r) => [r.id, r.type, r.hour])).toEqual([["reminder", "workout", 18], ["weighin", "weighin", 7]]);
+    expect(reminderSchedules({ ...old, schedules: [] })).toEqual([]);
+    expect(notificationsFor(st([], { push: { ...old, schedules: [] } }), at(18), null)).toEqual([]);
+  });
+  test("nothing without a device to send to", () => {
+    expect(notificationsFor({ ...st([food("f1", 12)]), push: { tz: "UTC", schedules: [food("f1", 12)], subscriptions: [] } }, at(12), null)).toEqual([]);
   });
 });

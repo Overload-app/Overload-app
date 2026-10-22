@@ -211,48 +211,6 @@ describe("<ProfileTab /> reset confirmation", () => {
   });
 });
 
-describe("<ProfileTab /> review toggles", () => {
-  const mockState = {
-    profile: {
-      goal: "recomp", currentPhysique: "average", desiredPhysique: "lean and athletic",
-      specificGoals: "", experience: "intermediate", equipment: "full", daysPerWeek: 4,
-      sessionLength: 60, injuries: ["none"], otherInjuries: "", heightIn: 70, weightLb: 180,
-    },
-    targets: { calories: 2400, protein: 180, carbs: 250, fat: 70, tdee: 2600 },
-    reviewsEnabled: { weekly: true, monthly: false },
-  };
-  const account = { name: "Alex", email: "alex@example.com" };
-
-  test("reflects the current on/off state of each toggle", () => {
-    render(
-      <ProfileTab
-        state={mockState} resetAll={vi.fn()} account={account} onLogout={vi.fn()}
-        subscribed={true} trialActive={false} trialDaysLeftCount={0} onOpenSubscribe={vi.fn()} onSetReviewEnabled={vi.fn()}
-      />
-    );
-    expect(screen.getByLabelText("Toggle weekly review")).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByLabelText("Toggle monthly review")).toHaveAttribute("aria-checked", "false");
-  });
-
-  test("clicking a toggle calls onSetReviewEnabled with the flipped value for just that cadence", async () => {
-    const user = userEvent.setup();
-    const onSetReviewEnabled = vi.fn();
-    render(
-      <ProfileTab
-        state={mockState} resetAll={vi.fn()} account={account} onLogout={vi.fn()}
-        subscribed={true} trialActive={false} trialDaysLeftCount={0} onOpenSubscribe={vi.fn()} onSetReviewEnabled={onSetReviewEnabled}
-      />
-    );
-    await user.click(screen.getByLabelText("Toggle weekly review"));
-    expect(onSetReviewEnabled).toHaveBeenCalledWith("weekly", false); // was true
-    await user.click(screen.getByLabelText("Toggle monthly review"));
-    expect(onSetReviewEnabled).toHaveBeenCalledWith("monthly", true); // was false
-  });
-});
-
-/* ============================================================
-   PROGRESS — bodyweight log / delete (built this session)
-============================================================ */
 describe("<Progress />", () => {
   function buildState(bodyweight) {
     return {
@@ -316,113 +274,6 @@ describe("<Progress />", () => {
   test("hides the workout-history entry point when nothing has been logged yet", () => {
     render(<Progress state={buildState([])} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} />);
     expect(screen.queryByText("View & edit workout history")).not.toBeInTheDocument();
-  });
-
-  test("shows no Reviews section at all when no review has ever been generated", () => {
-    render(<Progress state={buildState([])} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    expect(screen.queryByText("Reviews")).not.toBeInTheDocument();
-  });
-
-  test("renders a generated review's overview and advice, and marks it seen", () => {
-    const onMarkReviewSeen = vi.fn();
-    const state = {
-      ...buildState([]),
-      reviews: {
-        weekly: [{ generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 3 }, overview: "Solid week overall.", advice: ["Add a fourth set to bench."], seen: false }],
-        monthly: [],
-      },
-    };
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={onMarkReviewSeen} />);
-    expect(screen.getByText("WEEKLY REVIEW")).toBeInTheDocument();
-    expect(screen.getByText("Solid week overall.")).toBeInTheDocument();
-    expect(screen.getByText("Add a fourth set to bench.")).toBeInTheDocument();
-    expect(onMarkReviewSeen).toHaveBeenCalledWith("weekly", 0);
-  });
-
-  test("falls back to the deterministic workout count when the AI overview is missing (e.g. a failed/offline generation)", () => {
-    const state = {
-      ...buildState([]),
-      reviews: { weekly: [], monthly: [{ generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 2 }, overview: null, advice: [], seen: false }] },
-    };
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    expect(screen.getByText("2 workouts logged this period.")).toBeInTheDocument();
-  });
-
-  function reviewState(entries) {
-    return { ...buildState([]), reviews: { weekly: entries, monthly: [] } };
-  }
-
-  test("an already-seen review starts collapsed, and the header toggles it open and shut", async () => {
-    const user = userEvent.setup();
-    const state = reviewState([
-      { generatedAt: "2026-08-10T00:00:00.000Z", summary: { workoutCount: 3 }, overview: "Solid week overall.", advice: ["Add a set."], seen: true },
-    ]);
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    // Collapsed: the label/date row is there, the write-up isn't.
-    expect(screen.getByText("WEEKLY REVIEW")).toBeInTheDocument();
-    expect(screen.queryByText("Solid week overall.")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
-    expect(screen.getByText("Solid week overall.")).toBeInTheDocument();
-    expect(screen.getByText("Add a set.")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /^Collapse weekly review/ }));
-    expect(screen.queryByText("Solid week overall.")).not.toBeInTheDocument();
-  });
-
-  test("deleting a review needs a confirm, and reports the entry's real index (not its reversed display position)", async () => {
-    const user = userEvent.setup();
-    const onDeleteReview = vi.fn();
-    // Newest renders first, so the top card is index 2 of 3.
-    const state = reviewState([
-      { generatedAt: "2026-07-27T00:00:00.000Z", summary: {}, overview: "Oldest.", advice: [], seen: true },
-      { generatedAt: "2026-08-03T00:00:00.000Z", summary: {}, overview: "Middle.", advice: [], seen: true },
-      { generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Newest.", advice: [], seen: true },
-    ]);
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} onDeleteReview={onDeleteReview} />);
-
-    await user.click(screen.getByRole("button", { name: "Delete weekly review from 2026-08-10" }));
-    // One tap only arms it — nothing deleted yet.
-    expect(onDeleteReview).not.toHaveBeenCalled();
-    expect(screen.getByText("KEEP")).toBeInTheDocument();
-
-    await user.click(screen.getByText("DELETE"));
-    expect(onDeleteReview).toHaveBeenCalledWith("weekly", 2);
-  });
-
-  test("backing out of a delete leaves the review alone", async () => {
-    const user = userEvent.setup();
-    const onDeleteReview = vi.fn();
-    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Keep me.", advice: [], seen: true }]);
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} onDeleteReview={onDeleteReview} />);
-    await user.click(screen.getByRole("button", { name: /^Delete weekly review/ }));
-    await user.click(screen.getByText("KEEP"));
-    expect(onDeleteReview).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: /^Delete weekly review/ })).toBeInTheDocument();
-  });
-
-  test("a brand-new (unseen) review starts open so it actually gets read", () => {
-    const state = reviewState([
-      { generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Read me now.", advice: [], seen: false },
-    ]);
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    expect(screen.getByText("Read me now.")).toBeInTheDocument();
-  });
-
-  test("collapse state survives a parent re-render (the card is not redefined per render)", async () => {
-    const user = userEvent.setup();
-    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "Sticky open.", advice: [], seen: true }]);
-    const { rerender } = render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: /^Expand weekly review/ }));
-    expect(screen.getByText("Sticky open.")).toBeInTheDocument();
-    rerender(<Progress state={{ ...state }} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    expect(screen.getByText("Sticky open.")).toBeInTheDocument();
-  });
-
-  test("no delete control is offered when the screen wasn't given a delete handler", () => {
-    const state = reviewState([{ generatedAt: "2026-08-10T00:00:00.000Z", summary: {}, overview: "x", advice: [], seen: true }]);
-    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} onMarkReviewSeen={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: /^Delete weekly review/ })).not.toBeInTheDocument();
   });
 });
 
@@ -2181,41 +2032,6 @@ describe("<Home /> Coach insight card", () => {
   });
 });
 
-describe("<Home /> review-ready banner", () => {
-  function baseState(overrides = {}) {
-    return {
-      program: { splitName: "Full Body", days: [{ name: "Full Body A", exercises: [{ name: "Back Squat" }] }] },
-      targets: { calories: 2200, protein: 160, carbs: 220, fat: 70 },
-      logs: { workouts: [], nutrition: [] },
-      profile: { daysPerWeek: 3, sessionLength: 45 },
-      reviews: { weekly: [], monthly: [] },
-      ...overrides,
-    };
-  }
-
-  test("shows nothing when there are no reviews at all", () => {
-    render(<Home state={baseState()} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
-    expect(screen.queryByText(/review is ready|reviews are ready/)).not.toBeInTheDocument();
-  });
-
-  test("shows nothing when every generated review has already been seen", () => {
-    const state = baseState({ reviews: { weekly: [{ generatedAt: "2026-08-01", summary: {}, overview: "x", advice: [], seen: true }], monthly: [] } });
-    render(<Home state={state} setActiveTab={vi.fn()} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
-    expect(screen.queryByText(/review is ready/)).not.toBeInTheDocument();
-  });
-
-  test("shows a banner and switches to Progress when an unseen review exists", async () => {
-    const user = userEvent.setup();
-    const setActiveTab = vi.fn();
-    const state = baseState({ reviews: { weekly: [{ generatedAt: "2026-08-01", summary: {}, overview: "x", advice: [], seen: false }], monthly: [] } });
-    render(<Home state={state} setActiveTab={setActiveTab} startWorkout={vi.fn()} onAskCoach={vi.fn()} />);
-    const banner = screen.getByText(/Your weekly review is ready/);
-    expect(banner).toBeInTheDocument();
-    await user.click(banner);
-    expect(setActiveTab).toHaveBeenCalledWith("progress");
-  });
-});
-
 describe("<Onboarding /> injuries step — 'Other' merged in, not a separate question", () => {
   // Clicks through every step ahead of injuries with a minimal valid
   // answer at each — proves there's no longer a separate "any other
@@ -2247,7 +2063,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
   }
 
-  // The two food questions sit between notes and review cadence — see
+  // The two food questions sit between notes and notifications — see
   // QUIZ_STEPS. Both are skippable, so walking past them is two taps.
   async function skipFoodSteps(user) {
     expect(screen.getByText("Any foods you can't or won't eat?")).toBeInTheDocument();
@@ -2288,7 +2104,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     expect(screen.getByPlaceholderText(/Describe in your own words/).value).toBe("");
   });
 
-  test("notes is optional — the next step (review cadence) shows without typing anything", async () => {
+  test("notes is optional — the next steps show without typing anything", async () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} />);
     await goToInjuriesStep(user);
@@ -2297,7 +2113,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     expect(screen.getByText("Anything else your coach should know?")).toBeInTheDocument();
     await user.click(screen.getByText("Next"));
     await skipFoodSteps(user);
-    expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
+    expect(screen.getByText("Set up your reminders")).toBeInTheDocument();
   });
 
   test("notifications is the final step, optional, and says they can change it later", async () => {
@@ -2308,9 +2124,9 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next")); // -> notes
     await user.click(screen.getByText("Next")); // -> food restrictions
     await skipFoodSteps(user);
-    await user.click(screen.getByText("Next")); // review cadence -> notifications
-    expect(screen.getByText("Which notifications do you want?")).toBeInTheDocument();
-    expect(screen.getByText(/change these anytime on the You page/)).toBeInTheDocument();
+    expect(screen.getByText("Set up your reminders")).toBeInTheDocument();
+    expect(screen.getByText(/anytime on the You page, under Notifications/)).toBeInTheDocument();
+    expect(screen.getByText("Set up later (You page → Notifications)")).toBeInTheDocument();
     expect(screen.getByText("Build my plan")).toBeInTheDocument();
   });
 
@@ -2323,13 +2139,41 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next"));
     await user.click(screen.getByText("Next"));
     await skipFoodSteps(user);
-    await user.click(screen.getByText("Next"));
-    await user.click(screen.getByText("Weigh-in reminder"));
-    await user.click(screen.getByText("Workout reminders (6pm)"));
+    // Real ask: several food reminders, each with its own time and days.
+    await user.click(screen.getByRole("button", { name: "Log food" }));
+    await user.click(screen.getByRole("button", { name: "Log food" }));
+    await user.click(screen.getByRole("button", { name: "Workout" }));
+    await user.selectOptions(screen.getByLabelText("Workout reminder time"), "7");
+    await user.click(screen.getByRole("button", { name: "Sunday (workout at 7am)" }));
+    await user.click(screen.getByText("Rest timer alerts"));
     await user.click(screen.getByText("Build my plan"));
     await user.click(await screen.findByText(/I understand Overload uses AI/));
     await user.click(screen.getByText(/Let's go/));
-    expect(onComplete.mock.calls[0][0].profile.notifications).toEqual(["weighIn", "reminders"]);
+    const profile = onComplete.mock.calls[0][0].profile;
+    expect(profile.notifications).toEqual(["restAlerts"]);
+    expect(profile.reminderSchedules.map((r) => [r.type, r.hour, r.days])).toEqual([
+      ["food", 12, [0, 1, 2, 3, 4, 5, 6]],
+      ["food", 19, [0, 1, 2, 3, 4, 5, 6]],
+      ["workout", 7, [1, 2, 3, 4, 5, 6]],
+    ]);
+  });
+
+  test("\"Set up later\" skips straight on and keeps nothing from that step", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    render(<Onboarding onComplete={onComplete} />);
+    await goToInjuriesStep(user);
+    await user.click(screen.getByText("None"));
+    await user.click(screen.getByText("Next"));
+    await user.click(screen.getByText("Next"));
+    await skipFoodSteps(user);
+    await user.click(screen.getByRole("button", { name: "Log food" }));
+    await user.click(screen.getByText("Set up later (You page → Notifications)"));
+    await user.click(await screen.findByText(/I understand Overload uses AI/));
+    await user.click(screen.getByText(/Let's go/));
+    const profile = onComplete.mock.calls[0][0].profile;
+    expect(profile.notifications).toEqual([]);
+    expect(profile.reminderSchedules).toEqual([]);
   });
 
   // Real report: "the AI suggestions for what to eat aren't great" — nothing
@@ -2343,7 +2187,7 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.click(screen.getByText("Next")); // -> food restrictions
     // Nothing selected, nothing typed, and Next is still available on both.
     await skipFoodSteps(user);
-    expect(screen.getByText("Want periodic AI check-ins on your progress?")).toBeInTheDocument();
+    expect(screen.getByText("Set up your reminders")).toBeInTheDocument();
   });
 
   test("the food-restrictions step uses its own 'No restrictions' wording, not 'None'", async () => {
@@ -2385,7 +2229,6 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     await user.type(screen.getByPlaceholderText(/Prefer an upper\/lower split/), "No pull-up bar at my gym");
     await user.click(screen.getByText("Next"));
     await skipFoodSteps(user);
-    await user.click(screen.getByText("Next")); // review cadence
     await user.click(screen.getByText("Build my plan"));
     // Program building falls back to the offline generator in this test
     // env (no real network) and lands on the summary screen next, same as
@@ -2393,19 +2236,6 @@ describe("<Onboarding /> injuries step — 'Other' merged in, not a separate que
     expect(await screen.findByText(/Let's go/)).toBeInTheDocument();
   });
 
-  test("picking weekly and/or monthly review checkboxes doesn't block finishing the quiz", async () => {
-    const user = userEvent.setup();
-    render(<Onboarding onComplete={vi.fn()} />);
-    await goToInjuriesStep(user);
-    await user.click(screen.getByText("None"));
-    await user.click(screen.getByText("Next")); // -> notes
-    await user.click(screen.getByText("Next")); // -> food restrictions
-    await skipFoodSteps(user);
-    await user.click(screen.getByText("Weekly review"));
-    await user.click(screen.getByText("Monthly review"));
-    await user.click(screen.getByText("Next"));
-    expect(screen.getByText("Build my plan")).toBeInTheDocument();
-  });
 });
 
 // Real ask: "make it so it responds and says something like working on that

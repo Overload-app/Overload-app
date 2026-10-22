@@ -74,7 +74,6 @@ import {
   isStaleWorkout,
   whenLabel,
   guardTextFor,
-  reviewFromParsed,
   unwrapToolInput,
   loadsInjury,
   mealSuggestionsFrom,
@@ -154,12 +153,6 @@ import {
   buildCoachSystem,
   buildCoachStaticSystem,
   buildCoachDynamicSystem,
-  reviewPeriodStart,
-  reviewPeriodStartAnchorISO,
-  nextReviewDueAt,
-  isReviewDue,
-  summarizeReviewPeriod,
-  buildReviewSystem,
   OFFLINE_MESSAGE,
   loadState,
   saveState,
@@ -737,104 +730,6 @@ describe("secondsPerExercise / capFor", () => {
   });
 });
 
-// Real ask: periodic (weekly/monthly) AI reviews of training and diet,
-// each independently toggleable from the quiz and Settings.
-describe("periodic review scheduling and summarization", () => {
-  const DAY = 86400000;
-
-  test("the very first weekly review is due 7 days after account creation, not before", () => {
-    const created = new Date("2026-08-01T00:00:00Z").toISOString();
-    expect(isReviewDue({ weekly: [] }, created, "weekly", new Date("2026-08-06T00:00:00Z"))).toBe(false);
-    expect(isReviewDue({ weekly: [] }, created, "weekly", new Date("2026-08-08T00:00:00Z"))).toBe(true);
-  });
-
-  test("the very first monthly review is due 30 days after account creation", () => {
-    const created = new Date("2026-08-01T00:00:00Z").toISOString();
-    expect(isReviewDue({ monthly: [] }, created, "monthly", new Date("2026-08-20T00:00:00Z"))).toBe(false);
-    expect(isReviewDue({ monthly: [] }, created, "monthly", new Date("2026-08-31T00:00:00Z"))).toBe(true);
-  });
-
-  test("after a review has been generated, the next one is due one period after THAT one, not account creation", () => {
-    const created = new Date("2026-01-01T00:00:00Z").toISOString();
-    const reviews = { weekly: [{ generatedAt: new Date("2026-08-01T00:00:00Z").toISOString() }] };
-    expect(isReviewDue(reviews, created, "weekly", new Date("2026-08-05T00:00:00Z"))).toBe(false);
-    expect(isReviewDue(reviews, created, "weekly", new Date("2026-08-09T00:00:00Z"))).toBe(true);
-  });
-
-  test("reviewPeriodStart anchors to the last review when one exists, else account creation", () => {
-    const created = new Date("2026-01-01T00:00:00Z").toISOString();
-    expect(reviewPeriodStart({ weekly: [] }, created, "weekly")).toBe(new Date(created).getTime());
-    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
-    expect(reviewPeriodStart({ weekly: [{ generatedAt: lastGen }] }, created, "weekly")).toBe(new Date(lastGen).getTime());
-  });
-
-  test("deleting reviews does not pull the next one's due date earlier — the anchor outlives the list", () => {
-    const created = new Date("2026-01-01T00:00:00Z").toISOString();
-    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
-    // Every review deleted, but the anchor stands: still not due until a
-    // full period after the last generation, so no surprise (paid) AI run.
-    const emptied = { weekly: [], lastGeneratedAt: { weekly: lastGen } };
-    expect(reviewPeriodStart(emptied, created, "weekly")).toBe(new Date(lastGen).getTime());
-    expect(isReviewDue(emptied, created, "weekly", new Date("2026-06-05T00:00:00Z"))).toBe(false);
-    expect(isReviewDue(emptied, created, "weekly", new Date("2026-06-09T00:00:00Z"))).toBe(true);
-  });
-
-  test("reviewPeriodStart takes whichever is later, the anchor or the newest entry", () => {
-    const created = new Date("2026-01-01T00:00:00Z").toISOString();
-    const stale = new Date("2026-05-01T00:00:00Z").toISOString();
-    const newer = new Date("2026-06-01T00:00:00Z").toISOString();
-    expect(reviewPeriodStart({ weekly: [{ generatedAt: newer }], lastGeneratedAt: { weekly: stale } }, created, "weekly")).toBe(new Date(newer).getTime());
-    expect(reviewPeriodStart({ weekly: [{ generatedAt: stale }], lastGeneratedAt: { weekly: newer } }, created, "weekly")).toBe(new Date(newer).getTime());
-  });
-
-  test("reviewPeriodStartAnchorISO captures the date an anchor-less account is implicitly running on", () => {
-    const lastGen = new Date("2026-06-01T00:00:00Z").toISOString();
-    expect(reviewPeriodStartAnchorISO({ weekly: [{ generatedAt: "2026-05-01" }, { generatedAt: lastGen }] }, "weekly")).toBe(lastGen);
-    expect(reviewPeriodStartAnchorISO({ weekly: [] }, "weekly")).toBe(null);
-  });
-
-  test("summarizeReviewPeriod only counts workouts/weigh-ins actually inside the period", () => {
-    const logs = {
-      workouts: [
-        { date: "2026-07-25", durationSec: 2400 }, // before the period
-        { date: "2026-08-02", durationSec: 3000 },
-        { date: "2026-08-05", durationSec: 3600 },
-      ],
-      bodyweight: [
-        { date: "2026-07-20", weight: 200 }, // before the period
-        { date: "2026-08-01", weight: 180 },
-        { date: "2026-08-07", weight: 178 },
-      ],
-    };
-    const start = new Date("2026-08-01T00:00:00Z").getTime();
-    const end = new Date("2026-08-08T00:00:00Z").getTime();
-    const summary = summarizeReviewPeriod(logs, start, end);
-    expect(summary.workoutCount).toBe(2);
-    expect(summary.avgDurationSec).toBe(3300); // (3000+3600)/2
-    expect(summary.weightChange).toBe(-2); // 178 - 180
-  });
-
-  test("summarizeReviewPeriod reports null weightChange with fewer than 2 weigh-ins in the period", () => {
-    const logs = { workouts: [], bodyweight: [{ date: "2026-08-01", weight: 180 }] };
-    const summary = summarizeReviewPeriod(logs, new Date("2026-08-01").getTime(), new Date("2026-08-08").getTime());
-    expect(summary.weightChange).toBeNull();
-  });
-
-  test("buildReviewSystem includes the real logged stats and asks for honest, non-inflated feedback when nothing was logged", () => {
-    const summary = { workoutCount: 0, avgDurationSec: null, weightChange: null, startWeight: null, endWeight: null };
-    const system = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 4 }, "weekly", summary);
-    expect(system).toContain("0 workout(s) logged");
-    expect(system.toLowerCase()).toContain("nothing");
-  });
-
-  test("buildReviewSystem reports a weight trend when one exists", () => {
-    const summary = { workoutCount: 3, avgDurationSec: 2700, weightChange: -2, startWeight: 180, endWeight: 178 };
-    const system = buildReviewSystem({ goal: "lose", experience: "beginner", daysPerWeek: 3 }, "monthly", summary);
-    expect(system).toContain("180lb to 178lb");
-    expect(system).toContain("-2lb");
-  });
-});
-
 // Real ask: a free-text "anything else your coach should know?" quiz step
 // (preferred split, disliked exercises, missing gym equipment, etc.) that
 // actually reaches both AI prompts, not just gets collected and ignored.
@@ -1369,15 +1264,6 @@ describe("foodPreferenceText", () => {
     expect(staticBlock).toContain("never moralize about it");
     // And explicitly barred from the generic answer this exists to replace.
     expect(staticBlock).toContain('"Grilled chicken, rice and vegetables" is the generic answer this rule exists to stop');
-  });
-
-  test("periodic reviews give diet advice too, so they get the food preferences as well", () => {
-    const withFood = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 3, diet: ["vegetarian"], foodPrefs: "love pizza and pasta" }, "weekly", { workoutCount: 3, avgDurationSec: 2700, weightChange: 1.2, startWeight: 165, endWeight: 166.2 });
-    expect(withFood).toContain("love pizza and pasta");
-    expect(withFood).toContain("adapt it");
-    // Someone who skipped the questions adds nothing to that prompt.
-    const without = buildReviewSystem({ goal: "build", experience: "intermediate", daysPerWeek: 3 }, "weekly", { workoutCount: 3, avgDurationSec: null, weightChange: null });
-    expect(without).not.toContain("food preferences");
   });
 
   test("it reaches the Coach's prompt, with the rules for using it in the cached half", () => {
@@ -5116,13 +5002,6 @@ describe("fixes from the live AI-features test", () => {
     expect(msg).toContain('"cal":0');
     expect(msg).not.toMatch(/-\d/);
     expect(msg).toMatch(/already reached today's calorie target/);
-  });
-  test("advice tucked inside the overview is pulled back out", () => {
-    const r = reviewFromParsed({ overview: 'Close to on track.</advice> <advice>["Hit the 4th session", "Keep logging weight"]' });
-    expect(r.overview).toBe("Close to on track.");
-    expect(r.advice).toEqual(["Hit the 4th session", "Keep logging weight"]);
-    expect(reviewFromParsed({ overview: "Good.", advice: '["a","b"]' }).advice).toEqual(["a", "b"]);
-    expect(reviewFromParsed({ overview: "Good.", advice: ["a", 3, null] }).advice).toEqual(["a", "3"]);
   });
 });
 

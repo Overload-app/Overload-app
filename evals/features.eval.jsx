@@ -8,7 +8,6 @@
 //   - a program built from the quiz (onboarding, and editing quiz answers)
 //   - "describe what you ate" estimates
 //   - "suggest meals for what's left today"
-//   - weekly / monthly reviews
 //   - exercise alternatives (the server endpoint itself)
 //
 // Costs real money, so it is NOT part of `npm test`:
@@ -83,8 +82,8 @@ const App = await import("../src/App.jsx");
 const {
   claudeChat, parseJSONLoose, acceptGeneratedProgram, buildProgramGenSystem, calcTargets, gentlePlan,
   MEAL_TEXT_SYSTEM, cleanAiMeal, mealNameFromDescription, buildMealSuggestionSystem, mealSuggestionUserMessage,
-  mealSuggestionsFrom, buildReviewSystem, summarizeReviewPeriod, inferMuscleGroup, dayFocusGroups, INJURY_EXCLUDES,
-  usesOnly, isSameCoreExercise, reviewFromParsed, generateProgramWithRetry,
+  mealSuggestionsFrom, inferMuscleGroup, dayFocusGroups, INJURY_EXCLUDES,
+  usesOnly, isSameCoreExercise, generateProgramWithRetry,
 } = App;
 const { default: alternativesHandler } = await import("../api/exercise-alternatives.js");
 alternativesHandlerRef.current = alternativesHandler;
@@ -199,22 +198,6 @@ const SUGGEST = [
   ["suggest-over-target", baseProfile(), { cal: -150, protein: 10, carb: -20, fat: -5 }, null],
 ];
 
-// ---- 4. reviews ------------------------------------------------------------------
-function reviewLogs(workouts, weights) {
-  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-  return {
-    workouts: Array.from({ length: workouts }, (_, i) => ({ date: day(1 + i), dayName: "Push", durationSec: 2700, exercises: [] })),
-    bodyweight: weights.map((w, i) => ({ date: day(weights.length - i), weight: w })),
-    nutrition: [],
-  };
-}
-const REVIEWS = [
-  ["review-good-week", "weekly", baseProfile(), reviewLogs(4, [180, 179.4])],
-  ["review-no-workouts", "weekly", baseProfile({ goal: "lose" }), reviewLogs(0, [])],
-  ["review-cut-month", "monthly", baseProfile({ goal: "lose", diet: ["vegetarian"], foodPrefs: "pasta" }), reviewLogs(14, [200, 197, 195])],
-  ["review-minor", "weekly", baseProfile({ age: 15, weightLb: 130, goal: "build" }), reviewLogs(3, [130, 131])],
-];
-
 // ---- 5. exercise alternatives -------------------------------------------------------
 const ALTS = [
   ["alt-bench-full", "Barbell Bench Press", "full", "", "chest"], // a weighted dip is a fair chest swap; checked by name below
@@ -264,28 +247,6 @@ run("every AI feature, against the real model", () => {
           list.some((m) => m.cal >= 150 && macroGap(m) > 0.3) && "macros don't add up",
         ],
         detail: text || String(raw).slice(0, 500),
-      };
-    })));
-  }, 300000);
-
-  test("reviews", async () => {
-    await Promise.all(REVIEWS.map(([id, cadence, profile, logs]) => check(id, `${cadence} review`, async () => {
-      const periodStart = Date.now() - (cadence === "weekly" ? 7 : 30) * 86400000;
-      const summary = summarizeReviewPeriod(logs, periodStart, Date.now());
-      const raw = await claudeChat({ system: buildReviewSystem(profile, cadence, summary), messages: [{ role: "user", content: "Write my review now." }] });
-      const r = reviewFromParsed(parseJSONLoose(raw));
-      const overview = r.overview || "";
-      const advice = r.advice;
-      const all = `${overview} ${advice.join(" ")}`;
-      return {
-        failures: [
-          !overview && "no overview",
-          (advice.length < 2 || advice.length > 6) && `${advice.length} pieces of advice`,
-          summary.workoutCount > 0 && !all.includes(String(summary.workoutCount)) && !/\d(\.\d)? (sessions|workouts)/i.test(all) && `doesn't mention how many workouts`,
-          profile.diet.includes("vegetarian") && /\b(chicken|beef|steak|pork|turkey|fish|salmon|tuna)\b/i.test(all) && "meat advice to a vegetarian",
-          /\b(I don't have|no data|can't see)\b/i.test(all) && summary.workoutCount > 0 && "claims it has no data",
-        ],
-        detail: all.slice(0, 700),
       };
     })));
   }, 300000);
