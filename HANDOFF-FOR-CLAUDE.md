@@ -41,9 +41,9 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 - **Quiz → program:** onboarding asks about goal, experience, equipment, days per week, session length, injuries, diet and favourite foods. The AI builds a personalized program (there's a rule-based fallback if the AI fails), plus calorie and macro targets. Quiz answers can be edited later without losing progress.
 - **Train:** start a workout and log sets; checking off a set starts a rest timer with a chime/buzz. It shows last time's numbers and PRs, a History & PR line graph per exercise, exercise demo videos (WorkoutX GIFs), swaps/alternatives, and a share card when you finish. It keeps running in the background and resumes after the app is closed.
 - **Fuel:** log meals by photo (AI estimate, with a "Not right? tell me what it is" fix box), by describing them ("2 eggs and toast"), or manually. "Suggest meals for what's left today" uses diet rules and favourite foods. Undo after a delete. Resets at local midnight.
-- **Progress:** weigh-ins with a chart, lift charts, editable workout history, and AI weekly/monthly reviews.
+- **Progress:** weigh-ins with a chart, lift charts (pick 1 · workout, then 2 · exercise), editable workout history. (The weekly/monthly AI reviews were removed on 2026-10-21; old ones stay saved in people's data but aren't shown.)
 - **Coach:** an AI chat that can answer questions or change the program (permanent change to one day, a whole new program, or a one-time change for the next session of a day). It also does nutrition targets, undo/restore, and reads all the user's logs. Replies stream in, typed out letter by letter.
-- **You (Profile):** settings, review toggles, notification switches (workout reminders at 6pm local time, rest alerts with the app closed), subscription management, edit quiz answers, reset.
+- **You (Profile):** settings, notifications (scheduled reminders — workout, log food, weigh-in — each with its own time and repeat days, as many as you like; plus rest-alert and forgot-to-finish switches), subscription management, edit quiz answers, reset.
 - **Paywall:** 7-day free trial, then Stripe subscription ($7.99/month or $59.99/year; promo codes allowed).
 - **Under-18s** get a gentler plan by default (max 3 sets, no 1–5 rep work, higher calorie floor), and the AI tells them. They can ask for the standard plan.
 - **Tester gate (pre-launch):** visitors see "Coming soon". Testers pick "Tester 1–15" and enter their own password. Each password works on up to 2 devices (browser plus the Home Screen app), then locks. My own password also still works. Set `DEV_GATE_ENABLED = false` in `src/DevGate.jsx` at launch.
@@ -71,12 +71,12 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 - `api/gif-proxy.js`: streams GIFs with the WorkoutX key.
 - `api/exercise-alternatives.js`: AI swap suggestions (cached; forced structured answer; the app also filters by injury and equipment).
 - `api/rest-alert.js`: waits until a rest ends, then pushes "Rest's up" (up to 15 minutes, in 4½-minute legs; skipped if the user watched it finish in the app).
-- `api/push-cron.js`: hourly; sends the 6pm local-time workout reminder. Triggered by GitHub Actions (`.github/workflows/push-cron.yml`, authenticated by GitHub's signed token) or by `CRON_SECRET`.
+- `api/push-cron.js`: hourly; sends each person's scheduled reminders (workout / food / weigh-in, at their chosen hour and days, their time zone) and the forgot-to-finish nudge. Triggered by GitHub Actions (`.github/workflows/push-cron.yml`, authenticated by GitHub's signed token) or by `CRON_SECRET`.
 - `api/tester-unlock.js`: checks tester passwords and records devices.
 - `api/create-checkout-session.js`, `api/create-portal-session.js`, `api/stripe-webhook.js`: Stripe (sign-in required).
 - `api/admin-set-gif.js`, `api/sync-exercise-catalog.js`: admin tools behind `ADMIN_SYNC_SECRET`.
 - `supabase-*.sql`: database setup and migrations (run in the Supabase SQL Editor).
-- `evals/coach.eval.jsx` (47 live Coach scenarios), `evals/features.eval.jsx` (45 live checks of programs, meal estimates, suggestions, reviews and alternatives), `evals/run-all.sh`. They cost real API money; run them with my Anthropic key only when I ask.
+- `evals/coach.eval.jsx` (47 live Coach scenarios), `evals/features.eval.jsx` (45 live checks of programs, meal estimates, suggestions and alternatives), `evals/run-all.sh`. They cost real API money; run them with my Anthropic key only when I ask.
 - `ship.sh`: test, build, push, deploy, verify.
 
 ## Where things are in `src/App.jsx` (search by name; line numbers drift)
@@ -101,13 +101,13 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
   - Suggestions: `buildMealSuggestionSystem`, `mealSuggestionUserMessage` (clamps negatives; "light options" once over target), `mealSuggestionsFrom` + `parseLooseList`.
   - `sanitizeMeal`, `mealNumber`, `UndoBar`.
 - **Workout:** PR toast logic is in `toggleDone` inside `WorkoutSession` (uses `exercisePR` + `bestDoneSet`); `ExerciseDetailSheet` takes `todayLogged`. `startWorkout` (inside `App`; a saved workout untouched for 2+ hours asks "Did you forget to finish this one?" — `isStaleWorkout`, `finishStaleWorkout` saves it dated the day it was done), `resumeTiming` (the clock stops at the last action after 2 hours away), `WorkoutSession`, `RestTimer` (marks a rest "seen" when it finishes on screen), `ExerciseDetailSheet` (History & PR graph), `exerciseHistory`, `exercisePR`, `fetchExerciseGif`, `fetchSimilarExercises` (filters by injury and equipment), `GIF_CACHE_VERSION` / `withoutEquipmentGifs`.
-- **Reviews:** `buildReviewSystem`, `summarizeReviewPeriod`, `reviewFromParsed`, `ReviewCard`.
 - **Saving and sync:**
   - `persist` (inside `App`; logs any shrink of meals, weigh-ins or workouts to `error_logs`), `saveState` (queued writes; refreshes an expired sign-in and retries), `loadState`, `fetchNewerState` (picks up another device's saves when the app returns to the front, never over unsaved local changes).
   - Pending-sync flags, `writeLocalState`, `isAuthError`.
   - The yellow banner says "Offline" only when the phone really is offline; otherwise "still syncing".
 - **Quiz:** `QUIZ_STEPS` (age 13–90 and weight 60–500 enforced via `quizNumberProblem`), `Onboarding`, `QuizEditor`.
-- **Other:** `ProfileTab`, `NotificationSettings`, `Progress` (weigh-in validation 60–700 lb), `WorkoutHistoryEditor`, `ErrorBoundary`.
+- **Notifications:** `REMINDER_TYPES`, `reminderSchedules` (same function in api/push-cron.js — change both), `newReminder`, `ReminderList` (used on the You page and in the quiz), `NotificationSettings`, `NotificationPrompt`, `setReminderSchedules` (inside `App`). Server: `scheduledFor`, `dueFor` in api/push-cron.js.
+- **Other:** `ProfileTab`, `Progress` (weigh-in validation 60–700 lb), `WorkoutHistoryEditor`, `ErrorBoundary`.
 
 ## Things I (the owner) still have to do
 
@@ -129,6 +129,8 @@ I edit files in the project folder `~/Downloads/physique-coach-web 25` with a te
 
 ## What happened in the last session (most recent first)
 
+- Scheduled reminders (2026-10-21): people add as many workout, "log food" and weigh-in reminders as they like, each with its own hour and repeat days (day chips + Every day / Weekdays / Weekends), saved as `state.push.schedules` = [{ id, type, hour, days }]. Old accounts' single 6pm workout reminder and weigh-in time carry over automatically (ids "reminder"/"weighin", so nothing double-sends) until their first edit. Food reminders say how many calories are logged so far; workout ones still skip days already trained. If a late hourly run finds two of the same type due, one notification goes out and both are marked sent. The quiz's last step is now "Set up your reminders" (same editor, plus rest alerts / forgot-to-finish), with a "Set up later (You page → Notifications)" link. Weekly/monthly check-ins removed: no quiz step, no toggles, no Progress section or Home banner, no AI calls; old saved reviews are left in the data.
+- Graphs no longer cut off the last date (`CHART_MARGIN`); Progress lift charts are now "1 · Workout" tabs then a "2 · Exercise" list with a titled graph.
 - "Next day" everywhere (Home, Coach, reminders) is now the day after the one trained most recently (`nextDayIndexFor` in App.jsx, `nextDayIndex` in api/push-cron.js), not total-workouts-modulo-days (which drifted when days were done out of order).
 - Reminders survive GitHub skipping runs (only ~40 of ~140 hourly runs happened in 6 days): with the `push_sent` table (supabase-migration-push-sent.sql), a reminder goes out on the first run anywhere in its window (workout 6–11pm, weigh-in hour +4) and is recorded so it's never sent twice; without the table, exact hour only. Workout reminders can be limited to chosen weekdays (`push.reminderDays`, day picker on the You page).
 - Coach rule: it can't see which exercises have videos — it uses exactly the exercise/variation asked for ("Machine Seated Calf Raise") and never claims one has no video (real report: it renamed to "Calf Raise" and said there was no video).
