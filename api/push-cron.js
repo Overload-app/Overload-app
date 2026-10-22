@@ -217,32 +217,53 @@ export function idleWorkoutFor(state, now = new Date()) {
   return { kind: "idle", title: "Still working out?", body: `Nothing's been logged on ${day} for a while — tap to finish it or keep going.`, tag: "idle", url: "/" };
 }
 
-// Everything due for this person now, as { note, keys } (keys empty for the
-// idle nudge, which is never recorded). sentToday: the push_sent names
-// already sent today (a Set) when that table is there — which switches on
-// catch-up; null when it isn't.
+// Everything due for this person now, as { note, keys }. sentToday: the
+// push_sent names already sent today (a Set) when that table is there —
+// which switches on catch-up; null when it isn't. The idle nudge is recorded
+// per paused workout, since checks every few minutes would otherwise send
+// it again on each one inside its 40-100 minute window.
 export function dueFor(state, now = new Date(), sentToday = null) {
   const idle = idleWorkoutFor(state, now);
-  return [...scheduledFor(state, now, sentToday), ...(idle ? [{ note: idle, keys: [] }] : [])];
+  const idleKey = idle ? `idle:${state.inProgressWorkout.savedAt}` : null;
+  const idleDue = idle && !(sentToday instanceof Set && sentToday.has(idleKey));
+  return [...scheduledFor(state, now, sentToday), ...(idleDue ? [{ note: idle, keys: [idleKey] }] : [])];
 }
 export function notificationsFor(state, now = new Date(), sentToday = null) {
   return dueFor(state, now, sentToday).map((d) => d.note);
 }
 
+// Real report: "log food reminder didn't work today at 5." GitHub's
+// "hourly" schedule was only running about every 5 hours (the 5pm check
+// came at 4:59:48pm). The reliable tick is the database's own scheduler
+// (pg_cron, supabase-migration-reminder-ticks.sql), every 5 minutes. Each
+// tick first writes a random one-time ticket into cron_ticks — a table only
+// the server can read — and sends it here; using it up proves the call came
+// from the database, with no shared password stored anywhere.
+export const TICK_MAX_AGE_MS = 10 * 60 * 1000;
+export async function useTick(supabaseAdmin, ticket) {
+  if (!ticket || typeof ticket !== "string" || ticket.length > 100) return false;
+  const since = new Date(Date.now() - TICK_MAX_AGE_MS).toISOString();
+  const { data, error } = await supabaseAdmin.from("cron_ticks").delete().eq("nonce", ticket).gte("created_at", since).select("nonce");
+  return !error && Array.isArray(data) && data.length === 1;
+}
+
 export default async function handler(req, res) {
   const auth = req.headers?.authorization || "";
-  const secret = process.env.CRON_SECRET;
-  const allowed = (secret && auth === `Bearer ${secret}`)
-    || (auth.startsWith("Bearer ") && await verifyGithubToken(auth.slice(7)));
-  if (!allowed) return res.status(401).json({ error: "Not allowed." });
+  const ticket = req.headers?.["x-cron-tick"];
   const privateKey = process.env.VAPID_PRIVATE_KEY;
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secret = process.env.CRON_SECRET;
+  const viaSecretOrGithub = (secret && auth === `Bearer ${secret}`)
+    || (auth.startsWith("Bearer ") && await verifyGithubToken(auth.slice(7)));
+  if (!viaSecretOrGithub && !ticket) return res.status(401).json({ error: "Not allowed." });
   if (!privateKey || !supabaseUrl || !serviceRoleKey) {
     return res.status(500).json({ error: "Server is missing required environment variables." });
   }
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, privateKey);
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+  const viaTick = !viaSecretOrGithub && await useTick(supabaseAdmin, ticket);
+  if (!viaSecretOrGithub && !viaTick) return res.status(401).json({ error: "Not allowed." });
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, privateKey);
   let sent = 0, people = 0;
   for (let from = 0; ; from += 500) {
     const { data, error } = await supabaseAdmin.from("app_state").select("user_id, state")
@@ -255,6 +276,9 @@ export default async function handler(req, res) {
       let sentToday = null;
       const { data: sentRows, error: sentError } = await supabaseAdmin.from("push_sent").select("kind").eq("user_id", row.user_id).eq("day", day);
       if (!sentError) sentToday = new Set((sentRows || []).map((r) => r.kind));
+      // Ticks come every few minutes, so without the sent list every check
+      // in a reminder's hour would send it again. Skip until it's there.
+      else if (viaTick) continue;
       const due = dueFor(row.state, new Date(), sentToday);
       if (due.length === 0) continue;
       people++;
@@ -263,7 +287,7 @@ export default async function handler(req, res) {
         const ok = results.filter((r) => r.status === "fulfilled").length;
         sent += ok;
         if (ok > 0 && sentToday && keys.length > 0) {
-          await supabaseAdmin.from("push_sent").insert(keys.map((kind) => ({ user_id: row.user_id, kind, day })));
+          await supabaseAdmin.from("push_sent").upsert(keys.map((kind) => ({ user_id: row.user_id, kind, day })), { onConflict: "user_id,kind,day", ignoreDuplicates: true });
         }
       }
     }

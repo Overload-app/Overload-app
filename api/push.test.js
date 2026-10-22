@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex, dueFor, reminderSchedules } from "./push-cron.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex, dueFor, reminderSchedules, useTick } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -271,5 +271,57 @@ describe("reminders people schedule themselves", () => {
   });
   test("nothing without a device to send to", () => {
     expect(notificationsFor({ ...st([food("f1", 12)]), push: { tz: "UTC", schedules: [food("f1", 12)], subscriptions: [] } }, at(12), null)).toEqual([]);
+  });
+});
+
+// Real report: "log food reminder didn't work today at 5" — GitHub's hourly
+// check ran at 4:59:48pm and then not again for hours. The database now calls
+// every 5 minutes with a one-time ticket.
+describe("the database's 5-minute tick", () => {
+  const fakeDb = (rows, error = null) => {
+    const calls = [];
+    const q = { delete() { calls.push("delete"); return q; }, eq(c, v) { calls.push(["eq", c, v]); return q; }, gte(c) { calls.push(["gte", c]); return q; }, select: async () => ({ data: rows, error }) };
+    return { db: { from: (t) => { calls.push(["from", t]); return q; } }, calls };
+  };
+  test("a ticket that's in the table is used up and lets the call in", async () => {
+    const { db, calls } = fakeDb([{ nonce: "abc" }]);
+    expect(await useTick(db, "abc")).toBe(true);
+    expect(calls).toContainEqual(["from", "cron_ticks"]);
+    expect(calls).toContain("delete");
+    expect(calls).toContainEqual(["eq", "nonce", "abc"]);
+  });
+  test("an unknown, already-used, missing or silly ticket is refused", async () => {
+    expect(await useTick(fakeDb([]).db, "nope")).toBe(false);
+    expect(await useTick(fakeDb(null, { message: "no table" }).db, "abc")).toBe(false);
+    expect(await useTick(fakeDb([{ nonce: "x" }]).db, "")).toBe(false);
+    expect(await useTick(fakeDb([{ nonce: "x" }]).db, "x".repeat(200))).toBe(false);
+  });
+  test("checks every 5 minutes send each reminder once, at its hour", () => {
+    const sub = { endpoint: "https://push.example/1", keys: {} };
+    const state = { push: { subscriptions: [sub], tz: "America/Halifax", schedules: [{ id: "f5", type: "food", hour: 17, days: [0, 1, 2, 3, 4, 5, 6] }] }, targets: { calories: 2400 }, logs: { workouts: [], bodyweight: [], nutrition: [] } };
+    const sent = new Set();
+    const times = [];
+    // 4:00pm to 7:55pm Atlantic (UTC-3) on 2026-10-22.
+    for (let m = 0; m < 240; m += 5) {
+      const now = new Date(Date.UTC(2026, 9, 22, 19, m));
+      for (const d of dueFor(state, now, sent)) { d.keys.forEach((k) => sent.add(k)); times.push(now.toISOString()); }
+    }
+    expect(times).toEqual(["2026-10-22T20:00:00.000Z"]); // 5:00pm their time
+  });
+  test("a forgotten workout is nudged once, not on every 5-minute check", () => {
+    const sub = { endpoint: "https://push.example/1", keys: {} };
+    const savedAt = "2026-10-22T10:00:00.000Z";
+    const state = { push: { subscriptions: [sub], tz: "UTC", idleWorkout: true }, inProgressWorkout: { dayIdx: 0, savedAt }, program: { days: [{ name: "Push" }] } };
+    const sent = new Set();
+    let n = 0;
+    for (let m = 0; m < 180; m += 5) {
+      for (const d of dueFor(state, new Date(Date.parse(savedAt) + m * 60000), sent)) { d.keys.forEach((k) => sent.add(k)); n++; }
+    }
+    expect(n).toBe(1);
+  });
+  test("a ticket with nothing configured still can't send anything", async () => {
+    const res = mockRes();
+    await cronHandler({ method: "POST", headers: { "x-cron-tick": "abc" } }, res);
+    expect(res.statusCode).not.toBe(200);
   });
 });
