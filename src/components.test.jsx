@@ -1504,7 +1504,7 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     );
     const user = userEvent.setup();
     await user.click(screen.getByText("How to do it"));
-    expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
+    expect(await screen.findByText(/^No demo video/ )).toBeInTheDocument();
     expect(screen.queryByAltText("Calf Raise demonstration")).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled(); // never even attempts a lookup
   });
@@ -1518,7 +1518,7 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
     const user = setup();
 
     await user.click(screen.getByText("How to do it"));
-    expect(await screen.findByText("Instructional video unavailable for this exercise.")).toBeInTheDocument();
+    expect(await screen.findByText(/^No demo video/ )).toBeInTheDocument();
     expect(screen.queryByText("Retry")).not.toBeInTheDocument();
   });
 
@@ -1535,7 +1535,7 @@ describe("<WorkoutSession /> demo GIF lookup", () => {
 
     await user.click(screen.getByText("How to do it"));
     expect(await screen.findByText("Couldn't check for a demo right now.")).toBeInTheDocument();
-    expect(screen.queryByText("Instructional video unavailable for this exercise.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^No demo video/ )).not.toBeInTheDocument();
     expect(onCacheGif).not.toHaveBeenCalled();
   });
 

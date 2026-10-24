@@ -132,6 +132,7 @@ import {
   mergeResumedSets,
   hasCompletedSets,
   seedLoggedSets,
+  dayChangeNote,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -5194,5 +5195,53 @@ describe("the Coach never claims an exercise has no video", () => {
     const ex = (name) => ({ name, sets: 3, reps: "12", rest: 60 });
     const { exercises } = ensureVideoExercises([ex("Machine Seated Calf Raise")], { equipment: "full", message: "make the seated calf raise video a machine seated calf raise" });
     expect(exercises[0].name).toBe("Machine Seated Calf Raise");
+  });
+});
+
+// Real report: "one workout has 3 sets of lat pulldown for 10, the other 4
+// sets for 8 — the 4-set day showed the 3-set day's numbers", and the purple
+// "Last time" didn't match the boxes.
+describe("last time = this workout's last time", () => {
+  const logs = { workouts: [
+    { date: "2026-10-20", dayName: "Pull A", exercises: [{ name: "Lat Pulldown", logged: [{ weight: "120", reps: "8", done: true }, { weight: "120", reps: "8", done: true }, { weight: "125", reps: "7", done: true }, { weight: "125", reps: "6", done: true }] }] },
+    { date: "2026-10-23", dayName: "Pull B", exercises: [{ name: "Lat Pulldown", logged: [{ weight: "105", reps: "10", done: true }, { weight: "105", reps: "10", done: true }, { weight: "105", reps: "10", done: true }] }] },
+  ] };
+  test("the same workout day comes first, even if another day did it more recently", () => {
+    expect(exerciseLastSession(logs, "Lat Pulldown", "Pull A").sets).toHaveLength(4);
+    expect(exerciseLastSession(logs, "Lat Pulldown", "Pull B").sets[0]).toEqual({ weight: 105, reps: 10 });
+    const seeded = seedLoggedSets({ name: "Lat Pulldown", sets: 4 }, logs, "Pull A");
+    expect(seeded.map((l) => `${l.weight}x${l.reps}`)).toEqual(["120x8", "120x8", "125x7", "125x6"]);
+  });
+  test("a day that's never done it uses the most recent time anywhere", () => {
+    expect(exerciseLastSession(logs, "Lat Pulldown", "Back Day").date).toBe("2026-10-23");
+    expect(exerciseLastSession(logs, "Lat Pulldown").date).toBe("2026-10-23");
+  });
+  test("only checked-off sets count (the boxes are pre-filled)", () => {
+    const l = { workouts: [
+      { date: "2026-10-24", dayName: "Pull A", exercises: [{ name: "Lat Pulldown", logged: [{ weight: "200", reps: "1", done: false }] }] },
+      ...logs.workouts,
+    ] };
+    expect(exerciseLastSession(l, "Lat Pulldown", "Pull A").date).toBe("2026-10-20");
+  });
+});
+
+// Real report: the Coach said "swapped in Hammer Curl" (already in the day)
+// but really added Incline Curl, and also replaced the Chest-Supported Row
+// they'd picked themselves because it has no video.
+describe("Coach day edits say what really changed", () => {
+  const before = [{ name: "Lat Pulldown" }, { name: "Chest-Supported Row" }, { name: "Hammer Curl" }, { name: "Rowing Machine Sprints" }];
+  test("a reply that names the wrong exercise gets a plain list of the real changes", () => {
+    const after = [{ name: "Lat Pulldown" }, { name: "Chest-Supported Row" }, { name: "Hammer Curl" }, { name: "Incline Curl" }];
+    expect(dayChangeNote(before, after, "I swapped Rowing Machine Sprints for Hammer Curl.")).toBe("(What actually changed: added Incline Curl; removed Rowing Machine Sprints.)");
+  });
+  test("nothing extra when the reply already says it all", () => {
+    const after = [{ name: "Lat Pulldown" }, { name: "Chest-Supported Row" }, { name: "Hammer Curl" }, { name: "Incline Curl" }];
+    expect(dayChangeNote(before, after, "Swapped Rowing Machine Sprints for Incline Curl.")).toBe("");
+    expect(dayChangeNote(before, before, "No changes.")).toBe("");
+  });
+  test("an exercise already in their program is kept, video or not", () => {
+    const r = ensureVideoExercises([{ name: "Chest-Supported Row" }, { name: "Hammer Curl" }], { gifCache: { "chest supported row": null }, keep: ["Chest-Supported Row"] });
+    expect(r.swapped).toEqual([]);
+    expect(r.exercises[0].name).toBe("Chest-Supported Row");
   });
 });

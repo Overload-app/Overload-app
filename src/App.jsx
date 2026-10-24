@@ -1914,7 +1914,10 @@ export function ensureVideoExercises(exercises, { message = "", gifCache = {}, e
     const cached = gifCache?.[key];
     if (typeof cached === "string" && cached) return;
     if (said && said.includes(key)) return;
-    if (kept.has(key) && cached !== null) return;
+    // Already in their program: their choice, video or not. Real report:
+    // a Coach edit to one exercise also swapped the Chest-Supported Row
+    // they'd picked themselves for a Barbell Row.
+    if (kept.has(key)) return;
     if (VIDEO_VOCABULARY.has(key) && cached !== null) return;
     const group = EXERCISE_TO_GROUP[name] || inferMuscleGroup(name);
     // Prefer a different movement from what the day already has (another
@@ -2464,6 +2467,22 @@ export function dedupeExercises(exercises) {
     seen.add(key);
     return true;
   });
+}
+
+// Real report: the Coach said it swapped in Hammer Curl (already in the day)
+// but actually added Incline Curl. When the reply doesn't name everything
+// that was really added and removed, say it plainly.
+export function dayChangeNote(before, after, reply) {
+  const names = (list) => (list || []).map((e) => String(e?.name || "")).filter(Boolean);
+  const was = names(before);
+  const now = names(after);
+  const added = now.filter((n) => !was.some((w) => w.toLowerCase() === n.toLowerCase()));
+  const removed = was.filter((w) => !now.some((n) => n.toLowerCase() === w.toLowerCase()));
+  const text = String(reply || "").toLowerCase();
+  const unsaid = [...added, ...removed].some((n) => !text.includes(n.toLowerCase()));
+  if (!unsaid || (added.length === 0 && removed.length === 0)) return "";
+  const parts = [added.length && `added ${added.join(", ")}`, removed.length && `removed ${removed.join(", ")}`].filter(Boolean);
+  return `(What actually changed: ${parts.join("; ")}.)`;
 }
 
 export function programTrimNote(sentDays, keptDays, sessionLength) {
@@ -4441,10 +4460,10 @@ function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
   return (
     <div
       style={{
-        // Docked above the "Finish workout" footer button (not on top of
-        // it) — that footer isn't itself position:fixed, so it can't be
-        // measured here; this offset just needs to comfortably clear it.
-        position: "fixed", left: 12, right: 12, bottom: "calc(88px + env(safe-area-inset-bottom, 0px))", zIndex: 60,
+        // Part of the footer, right above "Finish workout". Real report: when
+        // it floated over the screen it sat on top of Finish/Discard and the
+        // last sets, and the workout "got stuck" and couldn't be scrolled.
+        marginBottom: 12,
         background: T.ink, color: "#fff", borderRadius: 16, padding: "10px 14px",
         display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
       }}
@@ -4506,12 +4525,12 @@ export function hasCompletedSets(savedExercise) {
   return (savedExercise?.logged || []).some((l) => l.done);
 }
 
-export function mergeResumedSets(freshExercises, savedSets, logs) {
+export function mergeResumedSets(freshExercises, savedSets, logs, dayName) {
   if (!savedSets) return null;
   const savedByName = new Map(savedSets.map((s) => [s.name, s]));
   const merged = freshExercises.map((ex) => savedByName.get(ex.name) || {
     name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
-    logged: seedLoggedSets(ex, logs),
+    logged: seedLoggedSets(ex, logs, dayName),
   });
   // Real report, and the worst kind: "you just changed my whole workout and
   // lost all my progress that I had already done." Going to the Coach
@@ -4541,8 +4560,8 @@ export function mergeResumedSets(freshExercises, savedSets, logs) {
 // computed and showed this as a "Last time: Xlb x Y" text hint, but still
 // made a person retype it into every single set field. Falls back to blank
 // (exactly the old behavior) when there's no history yet for this exercise.
-export function seedLoggedSets(ex, logs) {
-  const last = logs ? exerciseLastSession(logs, ex.name) : null;
+export function seedLoggedSets(ex, logs, dayName) {
+  const last = logs ? exerciseLastSession(logs, ex.name, dayName) : null;
   return Array.from({ length: ex.sets }, (_, i) => {
     const prior = last?.sets?.[i];
     return prior ? { weight: String(prior.weight), reps: String(prior.reps), done: false } : { weight: "", reps: "", done: false };
@@ -4551,9 +4570,9 @@ export function seedLoggedSets(ex, logs) {
 
 export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote }) {
   const [sets, setSets] = useState(() =>
-    mergeResumedSets(day.exercises, initialSets, logs) || day.exercises.map((ex) => ({
+    mergeResumedSets(day.exercises, initialSets, logs, day.name) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
-      logged: seedLoggedSets(ex, logs),
+      logged: seedLoggedSets(ex, logs, day.name),
     }))
   );
   // {endAt: <absolute ms timestamp>, total: <seconds>} — NOT a countdown
@@ -4841,7 +4860,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         // A different exercise means previously logged weight/reps for the
         // OLD one don't carry over — but if the NEW one has its own
         // history, pre-fill from that instead of starting blank.
-        logged: seedLoggedSets({ name: newName, sets: old.logged.length }, logs),
+        logged: seedLoggedSets({ name: newName, sets: old.logged.length }, logs, day.name),
       };
       return copy;
     });
@@ -5029,7 +5048,16 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
     });
   }
 
+  // Same session the boxes were filled from (exerciseLastSession), so the
+  // two can't disagree — real report: "the last time part in purple doesn't
+  // line up with what it says I did in each set."
   function lastFor(name) {
+    if (logs) {
+      const last = exerciseLastSession(logs, name, day.name);
+      if (!last) return null;
+      const best = last.sets.reduce((max, l) => (l.weight > max.weight || (l.weight === max.weight && l.reps > max.reps) ? l : max), last.sets[0]);
+      return `${best.weight}lb x ${best.reps}`;
+    }
     if (!lastLog) return null;
     // isSameCoreExercise, not exact equality — real report: "some
     // exercises don't show how much you did last time," which a rename
@@ -5052,10 +5080,10 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
   const elapsedLabel = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
 
   return (
-    <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 50, display: "flex", flexDirection: "column" }}>
+    <div className="fullscreen-overlay" style={{ background: T.paper, zIndex: 50, display: "flex", flexDirection: "column", overscrollBehavior: "none" }}>
       <style>{FONT_IMPORT}</style>
       <style>{SHELL_CSS}</style>
-      <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0 }}>
+      <div style={{ background: T.ink, padding: "calc(18px + env(safe-area-inset-top, 0px)) 20px 22px", color: "#fff", flexShrink: 0, touchAction: "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           {/* Real ask: an arrow that drops the workout down so the rest of the
               app can be used — it keeps running and saved, and the Resume
@@ -5083,16 +5111,9 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
           </div>
         )}
       </div>
-      {/* Real report: scrolled to the bottom of a workout mid-rest, and the
-          floating RestTimer sat slightly over the last exercise's set rows.
-          The timer floats at a fixed distance from the viewport bottom (to
-          clear the separate, non-scrolling "Finish workout" footer below
-          it), but this scroll area's own bottom padding never accounted
-          for the timer's height on top of that — only the footer did.
-          Scrolling all the way down put the last card in the exact screen
-          space the timer occupies. Extra bottom padding while resting
-          reserves that space so the last card can scroll clear of it. */}
-      <div style={{ flex: 1, overflowY: "auto", padding: `16px 16px ${rest !== null ? 96 : 16}px` }}>
+      {/* The rest timer lives in the footer below, so nothing floats over
+          the last sets any more. */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "16px 16px 16px" }}>
         {/* Direct answer to real beta-tester confusion: she didn't realize
             the checkmark both logs the set AND starts a rest timer. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.card, border: `1px solid ${T.steel}`, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
@@ -5228,7 +5249,33 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
           </Card>
         ))}
       </div>
-      <div style={{ padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))", background: T.paper, borderTop: `1px solid ${T.steel}`, flexShrink: 0 }}>
+      {/* touchAction none: a swipe on the footer used to drag the whole
+          screen around on iPhone (real report: "the finish and discard
+          workout bar move around when I swipe"). Taps still work. */}
+      <div style={{ padding: "12px 16px calc(12px + env(safe-area-inset-bottom, 0px))", background: T.paper, borderTop: `1px solid ${T.steel}`, flexShrink: 0, touchAction: "none" }}>
+        {rest !== null && (
+          <RestTimer
+            seconds={restSecondsLeft} total={rest.total}
+            onSeenFinish={() => {
+              const r = restRef.current;
+              if (!r || r.seen) return;
+              const next = { ...r, seen: true };
+              setRest(next);
+              saveNow(setsRef.current, next);
+            }}
+            onAdd={() => setRest((r) => {
+              const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
+              saveNow(setsRef.current, next);
+              scheduleRestChime((next.endAt - Date.now()) / 1000);
+              return next;
+            })}
+            onSkip={() => {
+              setRest(null);
+              cancelRestChime();
+              saveNow(setsRef.current, null);
+            }}
+          />
+        )}
         <Btn variant="accent" style={{ width: "100%", padding: 16 }} onClick={() => (sets.some((e) => e.logged.some((l) => l.done)) ? onFinish(sets) : setConfirmEmptyFinish(true))}>
           Finish workout <Check size={18} />
         </Btn>
@@ -5237,29 +5284,6 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         </button>
       </div>
 
-      {rest !== null && (
-        <RestTimer
-          seconds={restSecondsLeft} total={rest.total}
-          onSeenFinish={() => {
-            const r = restRef.current;
-            if (!r || r.seen) return;
-            const next = { ...r, seen: true };
-            setRest(next);
-            saveNow(setsRef.current, next);
-          }}
-          onAdd={() => setRest((r) => {
-            const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
-            saveNow(setsRef.current, next);
-            scheduleRestChime((next.endAt - Date.now()) / 1000);
-            return next;
-          })}
-          onSkip={() => {
-            setRest(null);
-            cancelRestChime();
-            saveNow(setsRef.current, null);
-          }}
-        />
-      )}
 
 
       {timeEdit !== null && (
@@ -5477,8 +5501,10 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                 // exact same name might have a real video for a different,
                 // more specific exercise; showing it here would be
                 // guessing, not confirming.
+                // Real ask: when someone picks their own exercise, say that's
+                // why there's no video, rather than it looking broken.
                 <Card style={{ marginBottom: 14 }}>
-                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Instructional video unavailable for this exercise.</span>
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>No demo video — you added this exercise yourself, so we don't have one for it. The tips below still apply.</span>
                 </Card>
               ) : gifLoading[key] ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: T.steelDark, marginBottom: 14 }}>
@@ -5497,7 +5523,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                 // realistic reason this would resolve differently a few
                 // seconds later.
                 <Card style={{ marginBottom: 14 }}>
-                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>Instructional video unavailable for this exercise.</span>
+                  <span style={{ fontSize: 13, color: T.steelDark, fontStyle: "italic" }}>No demo video for this one — it isn't in our video library. "Find alternative" lists similar exercises that have one.</span>
                 </Card>
               ) : gifTransientError[key] ? (
                 <Card style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -7471,16 +7497,27 @@ export function exerciseHistory(logs, name) {
 // x Y" hint), since the same exercise can appear on more than one day, or a
 // swap can mean the day itself has changed since. Powers the mid-workout
 // exercise detail view's "last time" breakdown.
-export function exerciseLastSession(logs, name) {
-  const matches = logs.workouts
+// dayName: real report — "one workout has 3 sets of lat pulldown for 10,
+// the other 4 sets for 8, and the 4-set day showed the 3-set day's
+// numbers." The last time it was done on this same workout day comes first;
+// any other day only if it's never been done on this one. Only checked-off
+// sets count (the boxes are pre-filled, so typed numbers prove nothing),
+// except in old workouts saved before sets could be checked off.
+export function exerciseLastSession(logs, name, dayName) {
+  const sessions = logs.workouts
     .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
-    .sort((a, b) => (a.date > b.date ? -1 : 1)); // most recent first
-  if (matches.length === 0) return null;
-  const w = matches[0];
-  const ex = findLoggedExercise(w, name);
-  const loggedSets = ex.logged.filter((l) => l.weight && l.reps);
-  if (loggedSets.length === 0) return null;
-  return { date: w.date, sets: loggedSets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) };
+    .sort((a, b) => (a.date > b.date ? -1 : 1)) // most recent first
+    .map((w) => {
+      const ex = findLoggedExercise(w, name);
+      const logged = ex?.logged || [];
+      const hasChecks = logged.some((l) => "done" in (l || {}));
+      const sets = logged.filter((l) => l?.weight && l?.reps && (!hasChecks || l.done));
+      return sets.length > 0 ? { date: w.date, dayName: w.dayName, sets: sets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) } : null;
+    })
+    .filter(Boolean);
+  const day = String(dayName || "").trim().toLowerCase();
+  const pick = (day && sessions.find((x) => String(x.dayName || "").trim().toLowerCase() === day)) || sessions[0];
+  return pick ? { date: pick.date, sets: pick.sets } : null;
 }
 
 // The heaviest set ever logged for this exercise — ties broken by more reps
@@ -9526,7 +9563,12 @@ export default function App() {
           // with extra sets, the session-length limit then quietly cut
           // exercises to fit, and the reply still said it was harder. Say
           // what was cut, so it's never a silent change.
-          const trimmedNote = hasNewProgram ? programTrimNote(parsed.program.days, normalizedProgramDays, p.sessionLength) : "";
+          const lastReply = withReply[withReply.length - 1]?.role === "assistant" ? withReply[withReply.length - 1].text : "";
+          const trimmedNote = hasNewProgram
+            ? programTrimNote(parsed.program.days, normalizedProgramDays, p.sessionLength)
+            : hasDayEdit && !dayEditFailed
+              ? dayChangeNote(prev.program.days[parsed.programDayEdit.dayIndex]?.exercises, normalizedDayEdit, lastReply)
+              : "";
           const finalWithReply = dayEditFailed
             ? trimCoachChat([...withUser, { role: "assistant", text: "Sorry — that edit didn't actually go through on my end. Mind asking again?" }])
             : trimmedNote
