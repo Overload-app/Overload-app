@@ -263,6 +263,44 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   }, 20000);
 
+  // Real ask: "if I log food and the AI is estimating, then switch tabs or
+  // close the app, it should still run in the background … instead of
+  // cancelling."
+  test("a meal estimate keeps going after leaving the Fuel tab, and waits to be saved", async () => {
+    const user = userEvent.setup();
+    let answer;
+    nextResponse = new Promise((resolve) => { answer = resolve; });
+    const mealsBefore = stored.logs.nutrition[0].meals.length;
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Fuel$/ }));
+    await user.click(screen.getByText("Describe"));
+    await user.type(screen.getByPlaceholderText(/What did you eat/), "two eggs on toast");
+    await user.click(screen.getByText("Estimate"));
+    await user.click(screen.getByRole("button", { name: /^Home$/ }));
+    expect(await screen.findByText("Estimating your meal…")).toBeInTheDocument();
+    answer(toolReply({ name: "Eggs on toast", cal: 380, protein: 20, carb: 30, fat: 18, note: "two eggs, one slice" }));
+    await user.click(await screen.findByText(/Your meal estimate is ready/));
+    expect(await screen.findByDisplayValue("Eggs on toast")).toBeInTheDocument();
+    await user.click(screen.getByText("Add to log"));
+    await waitFor(() => expect(stored.logs.nutrition.find((d) => d.meals.some((m) => m.name === "Eggs on toast"))).toBeTruthy());
+    expect(screen.queryByText(/Your meal estimate is ready/)).not.toBeInTheDocument();
+    expect(stored.logs.nutrition[0].meals.length).toBeGreaterThanOrEqual(mealsBefore);
+  }, 20000);
+
+  test("an estimate cut off by closing the app starts again when it reopens", async () => {
+    const user = userEvent.setup();
+    const { writeMealJob } = await import("./App.jsx");
+    writeMealJob("u1", { id: "closed-mid-estimate", kind: "text", text: "a banana", status: "running", startedAt: new Date().toISOString() });
+    nextResponse = toolReply({ name: "Banana", cal: 105, protein: 1, carb: 27, fat: 0, note: "one medium" });
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(await screen.findByText(/Your meal estimate is ready/));
+    expect(await screen.findByDisplayValue("Banana")).toBeInTheDocument();
+    await user.click(screen.getByText("Discard"));
+    expect(screen.queryByDisplayValue("Banana")).not.toBeInTheDocument();
+  }, 20000);
+
   // Real ask: gentler plans for under-18s unless they explicitly ask otherwise.
   test("a teen on the gentle plan is held at the teen calorie floor, and told why", async () => {
     const user = userEvent.setup();

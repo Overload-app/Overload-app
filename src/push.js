@@ -74,13 +74,22 @@ export async function requestRestAlert(endAt) {
 }
 
 // Takes any "Rest's up" alerts off the lock screen / notification list.
-export async function clearRestNotifications() {
+// Takes this kind of notification off the phone's lock screen and
+// notification list. Real ask: "once I weigh in that day, the reminder is off
+// the home screen." Tags: rest, reminder (workout), weighin, food, idle.
+export async function clearNotifications(...tags) {
   try {
     if (typeof navigator === "undefined" || !navigator.serviceWorker?.getRegistration) return;
     const reg = await navigator.serviceWorker.getRegistration();
-    const shown = await reg?.getNotifications?.({ tag: "rest" });
-    (shown || []).forEach((n) => n.close());
+    for (const tag of tags) {
+      const shown = await reg?.getNotifications?.({ tag });
+      (shown || []).forEach((n) => n.close());
+    }
   } catch (e) {
     // Nothing to clear, or not supported — fine either way.
   }
+}
+
+export function clearRestNotifications() {
+  return clearNotifications("rest");
 }

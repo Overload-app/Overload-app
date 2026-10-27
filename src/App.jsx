@@ -12,7 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
-import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert, clearRestNotifications } from "./push.js";
+import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert, clearNotifications } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -6987,6 +6987,123 @@ function UndoBar({ text, onUndo, onDone }) {
   );
 }
 
+/* ============================================================
+   MEAL ESTIMATES THAT KEEP GOING
+   Real ask: "if I log food and the AI is estimating, and then I switch tabs
+   or close the app, it should still run in the background and do the same
+   as if you were still on that screen, instead of cancelling." The estimate
+   used to live inside the Fuel screen, so leaving it threw the answer away.
+   Now one estimate at a time lives here, outside any screen, and is saved on
+   the phone: switching tabs doesn't touch it, and if the app was closed
+   mid-estimate it's started again the next time the app opens. The result
+   waits on the Fuel tab (with a heads-up bar elsewhere) until it's saved or
+   discarded.
+   job: { id, kind: "text" | "photo" | "fix", text, fix, photo: { base64,
+   mediaType }, status: "running" | "ready" | "error", result, error,
+   startedAt }
+============================================================ */
+const mealJobKey = (userId) => `overload_meal_job_${userId}`;
+const mealJobMemory = new Map(); // userId -> job (works even when localStorage doesn't)
+const mealJobListeners = new Set();
+const mealJobsInFlight = new Set(); // job ids with a request running in this page
+export const MEAL_JOB_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function readMealJob(userId) {
+  if (mealJobMemory.has(userId)) return mealJobMemory.get(userId);
+  let job = null;
+  try { job = JSON.parse(localStorage.getItem(mealJobKey(userId)) || "null"); } catch (e) { job = null; }
+  mealJobMemory.set(userId, job);
+  return job;
+}
+
+export function writeMealJob(userId, job) {
+  mealJobMemory.set(userId, job || null);
+  try {
+    if (job) localStorage.setItem(mealJobKey(userId), JSON.stringify(job));
+    else localStorage.removeItem(mealJobKey(userId));
+  } catch (e) {
+    // Full storage: keep it without the photo rather than not at all.
+    try { if (job) localStorage.setItem(mealJobKey(userId), JSON.stringify({ ...job, photo: null })); } catch (e2) { /* memory copy still works */ }
+  }
+  mealJobListeners.forEach((fn) => fn());
+}
+
+export function updateMealJobResult(userId, result) {
+  const job = readMealJob(userId);
+  if (job?.status === "ready") writeMealJob(userId, { ...job, result });
+}
+
+function mealJobRequest(job) {
+  if (job.kind === "text") return { system: MEAL_TEXT_SYSTEM, messages: [{ role: "user", content: job.text }] };
+  if (job.kind === "fix") return { system: MEAL_PHOTO_SYSTEM, messages: photoFixMessages(job.photo, job.fix) };
+  return { system: MEAL_PHOTO_SYSTEM, messages: [{ role: "user", content: [
+    { type: "image", source: { type: "base64", media_type: job.photo.mediaType, data: job.photo.base64 } },
+    { type: "text", text: "Identify this meal and estimate its calories and macros." },
+  ] }] };
+}
+
+function mealJobErrorText(job, err) {
+  if (err?.offline) return OFFLINE_MESSAGE;
+  if (err?.timeout) return TIMEOUT_MESSAGE;
+  if (err?.budgetExceeded) return err.message;
+  if (job.kind === "text") return "Couldn't estimate that meal — try again or add manually.";
+  if (job.kind === "fix") return "Couldn't re-check that photo — try again, or fix the name and numbers yourself.";
+  return "Couldn't analyze that photo — try again or add manually.";
+}
+
+// Starts (or restarts) an estimate. onOffline(job) is for a photo that
+// can't be sent right now — the Fuel screen saves it to analyze later.
+export async function runMealJob(userId, fields, { onOffline } = {}) {
+  const job = { id: fields.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`, startedAt: fields.startedAt || new Date().toISOString(), ...fields, status: "running", result: null, error: null };
+  writeMealJob(userId, job);
+  mealJobsInFlight.add(job.id);
+  // Going to the background can kill a request that's in flight on iPhone;
+  // if that happened, it's tried once more instead of showing an error.
+  let wentHidden = false;
+  const onHide = () => { if (typeof document !== "undefined" && document.visibilityState === "hidden") wentHidden = true; };
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", onHide);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const raw = await claudeChat({ ...mealJobRequest(job), model: LIGHT_MODEL });
+        const fallbackName = job.kind === "text" ? mealNameFromDescription(job.text) : job.kind === "fix" ? mealNameFromDescription(job.fix) : "";
+        const result = cleanAiMeal(parseJSONLoose(raw), fallbackName);
+        if (readMealJob(userId)?.id === job.id) writeMealJob(userId, { ...job, status: "ready", result });
+        return;
+      } catch (err) {
+        if (readMealJob(userId)?.id !== job.id) return; // discarded meanwhile
+        if (err?.offline && job.kind === "photo" && onOffline) { onOffline(job); writeMealJob(userId, null); return; }
+        if (attempt === 0 && wentHidden && !err?.budgetExceeded) { wentHidden = false; continue; }
+        writeMealJob(userId, { ...job, status: "error", error: mealJobErrorText(job, err) });
+        return;
+      }
+    }
+  } finally {
+    mealJobsInFlight.delete(job.id);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onHide);
+  }
+}
+
+// On opening the app: an estimate that was running when the app closed is
+// started again (a stale one, over an hour old, is dropped).
+export function resumeMealJob(userId, options) {
+  const job = readMealJob(userId);
+  if (!job || job.status !== "running" || mealJobsInFlight.has(job.id)) return;
+  if (Date.now() - new Date(job.startedAt).getTime() > MEAL_JOB_MAX_AGE_MS) { writeMealJob(userId, null); return; }
+  if (job.kind !== "text" && !job.photo) { writeMealJob(userId, { ...job, status: "error", error: "That photo estimate was interrupted — take the photo again." }); return; }
+  runMealJob(userId, job, options);
+}
+
+export function useMealJob(userId) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const fn = () => setTick((t) => t + 1);
+    mealJobListeners.add(fn);
+    return () => mealJobListeners.delete(fn);
+  }, []);
+  return userId ? readMealJob(userId) : null;
+}
+
 function Fuel({ state, addMeal, removeMeal, userId }) {
   const { targets, logs, profile } = state;
   const today = todayISO();
@@ -7004,20 +7121,31 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   // photoError rather than duplicating that whole UI for a second time.
   const [showDescribe, setShowDescribe] = useState(false);
   const [describeText, setDescribeText] = useState("");
-  const [describeLoading, setDescribeLoading] = useState(false);
 
   const [suggestions, setSuggestions] = useState(null);
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestError, setSuggestError] = useState(null);
 
-  const [photoResult, setPhotoResult] = useState(null);
-  const [photoLoading, setPhotoLoading] = useState(false);
-  const [photoError, setPhotoError] = useState(null);
+  // The estimate itself lives outside this screen (see runMealJob), so
+  // switching tabs or closing the app doesn't cancel it.
+  const job = useMealJob(userId);
+  const running = job?.status === "running";
+  const describeLoading = running && job.kind === "text";
+  const photoLoading = running && job.kind !== "text";
+  const photoResult = job?.status === "ready" ? job.result : null;
+  const setPhotoResult = (result) => updateMealJobResult(userId, result);
+  const [localError, setLocalError] = useState(null); // e.g. a photo that couldn't be read
+  const photoError = job?.status === "error" ? job.error : localError;
   // The photo behind the current estimate, kept so it can be re-checked with
   // what the person says it actually is. Real report: a photo of greek
   // yogurt was logged as sour cream, with no way to say so.
-  const [lastPhoto, setLastPhoto] = useState(null); // { base64, mediaType }
+  const lastPhoto = job?.status === "ready" && job.kind !== "text" ? job.photo : null;
+  const clearJob = () => { writeMealJob(userId, null); setLocalError(null); };
   const [photoFix, setPhotoFix] = useState("");
+  // A described meal that's come back closes the describe box.
+  useEffect(() => {
+    if (job?.kind === "text" && job.status === "ready") { setShowDescribe(false); setDescribeText(""); }
+  }, [job?.id, job?.status]);
   const [pendingPhotos, setPendingPhotos] = useState(() => readPendingPhotos(userId));
   const [processingQueue, setProcessingQueue] = useState(false);
   const fileInputRef = useRef(null);
@@ -7080,31 +7208,13 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     setShowForm(false);
   }
 
-  async function handleDescribe() {
+  // No offline-queue path for a description (unlike a photo) — it costs
+  // nothing to just send again once back online.
+  function handleDescribe() {
     const text = describeText.trim();
-    if (!text) return;
-    setPhotoError(null);
-    setPhotoResult(null);
-    setLastPhoto(null);
-    setDescribeLoading(true);
-    try {
-      const raw = await claudeChat({
-        system: MEAL_TEXT_SYSTEM,
-        model: LIGHT_MODEL,
-        messages: [{ role: "user", content: text }],
-      });
-      const parsed = parseJSONLoose(raw);
-      setPhotoResult(cleanAiMeal(parsed, mealNameFromDescription(text)));
-      setDescribeText("");
-      setShowDescribe(false);
-    } catch (err) {
-      // No offline-queue path here (unlike the photo flow) — there's
-      // nothing to defer-and-retry the same way a saved photo can be;
-      // a text description costs nothing to just resend once back online.
-      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : "Couldn't estimate that meal — try again or add manually.");
-    } finally {
-      setDescribeLoading(false);
-    }
+    if (!text || running) return;
+    setLocalError(null);
+    runMealJob(userId, { kind: "text", text });
   }
 
   async function getSuggestions() {
@@ -7129,74 +7239,37 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     }
   }
 
-  async function fixPhotoEstimate() {
+  function fixPhotoEstimate() {
     const what = photoFix.trim();
     if (!what || !lastPhoto) return;
-    setPhotoError(null);
-    setPhotoLoading(true);
-    try {
-      const raw = await claudeChat({
-        system: MEAL_PHOTO_SYSTEM,
-        model: LIGHT_MODEL,
-        messages: photoFixMessages(lastPhoto, what),
-      });
-      setPhotoResult(cleanAiMeal(parseJSONLoose(raw), mealNameFromDescription(what)));
-      setPhotoFix("");
-    } catch (err) {
-      setPhotoError(err.offline ? OFFLINE_MESSAGE : err.timeout ? TIMEOUT_MESSAGE : err.budgetExceeded ? err.message : "Couldn't re-check that photo — try again, or fix the name and numbers yourself.");
-    } finally {
-      setPhotoLoading(false);
-    }
+    setLocalError(null);
+    setPhotoFix("");
+    runMealJob(userId, { kind: "fix", fix: what, photo: lastPhoto });
   }
 
   async function handlePhoto(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setPhotoError(null);
-    setPhotoResult(null);
-    setLastPhoto(null);
+    clearJob();
     let base64, mediaType;
     try {
       base64 = await compressImageToBase64(file);
       mediaType = "image/jpeg"; // compression always re-encodes to JPEG
     } catch (err) {
-      setPhotoError("Couldn't read that photo — try again.");
+      setLocalError("Couldn't read that photo — try again.");
       e.target.value = "";
       return;
     }
+    e.target.value = "";
 
     if (!navigator.onLine) {
       queuePhoto(base64, mediaType);
-      e.target.value = "";
       return;
     }
-
-    setPhotoLoading(true);
-    try {
-      const raw = await claudeChat({
-        system: MEAL_PHOTO_SYSTEM,
-        model: LIGHT_MODEL,
-        messages: [{ role: "user", content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-          { type: "text", text: "Identify this meal and estimate its calories and macros." },
-        ] }],
-      });
-      const parsed = parseJSONLoose(raw);
-      setPhotoResult(cleanAiMeal(parsed));
-      setLastPhoto({ base64, mediaType });
-      setPhotoFix("");
-    } catch (err) {
-      if (err.offline) {
-        // Connectivity dropped between the check above and the request
-        // actually going out — same graceful fallback as being offline from the start.
-        queuePhoto(base64, mediaType);
-      } else {
-        setPhotoError("Couldn't analyze that photo — try again or add manually.");
-      }
-    } finally {
-      setPhotoLoading(false);
-      e.target.value = "";
-    }
+    setPhotoFix("");
+    // Connectivity dropping between the check above and the request going
+    // out gets the same fallback as being offline from the start.
+    runMealJob(userId, { kind: "photo", photo: { base64, mediaType } }, { onOffline: (j) => queuePhoto(j.photo.base64, j.photo.mediaType) });
   }
 
   return (
@@ -7308,9 +7381,9 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       )}
       <input ref={fileInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handlePhoto} />
 
-      {photoLoading && (
+      {running && (
         <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>Analyzing your photo…</span>
+          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>{job.kind === "text" ? "Estimating your meal…" : "Analyzing your photo…"} You can leave this screen — it keeps going.</span>
         </Card>
       )}
       {pendingPhotos.length > 0 && (
@@ -7323,7 +7396,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       )}
       {photoError && (
         <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, borderColor: T.warn }}>
-          <AlertCircle size={16} color={T.warn} /> <span style={{ fontSize: 13, color: T.ink }}>{photoError}</span>
+          <AlertCircle size={16} color={T.warn} /> <span style={{ fontSize: 13, color: T.ink, flex: 1 }}>{photoError}</span>
+          <button onClick={clearJob} aria-label="Dismiss" style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: T.steelDark, display: "flex" }}><X size={14} /></button>
         </Card>
       )}
       {photoResult && (
@@ -7368,8 +7442,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
             ))}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="ghost" style={{ flex: 1 }} onClick={() => { setPhotoResult(null); setLastPhoto(null); }}>Discard</Btn>
-            <Btn variant="accent" style={{ flex: 1 }} onClick={() => { addMeal({ name: photoResult.name, cal: photoResult.cal, protein: photoResult.protein, carb: photoResult.carb, fat: photoResult.fat }); setPhotoResult(null); setLastPhoto(null); }}>
+            <Btn variant="ghost" style={{ flex: 1 }} onClick={clearJob}>Discard</Btn>
+            <Btn variant="accent" style={{ flex: 1 }} onClick={() => { addMeal({ name: photoResult.name, cal: photoResult.cal, protein: photoResult.protein, carb: photoResult.carb, fat: photoResult.fat }); clearJob(); }}>
               Add to log
             </Btn>
           </div>
@@ -8843,6 +8917,18 @@ export default function App() {
   }, [account]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("home");
+  const mealJob = useMealJob(account?.id);
+  // Done already (maybe on another device): take that reminder off the phone.
+  const weighedToday = !!state?.logs?.bodyweight?.some((w) => w.date === todayISO());
+  const trainedToday = !!state?.logs?.workouts?.some((w) => w.date === todayISO());
+  useEffect(() => {
+    const done = [weighedToday && "weighin", trainedToday && "reminder"].filter(Boolean);
+    if (done.length > 0) clearNotifications(...done);
+  }, [weighedToday, trainedToday]);
+  // A meal estimate that was running when the app was closed carries on.
+  useEffect(() => {
+    if (account?.id) resumeMealJob(account.id);
+  }, [account?.id]);
   const [session, setSession] = useState(null);
   const lastRestAlertRef = useRef(null);
   // Food, "today's workout" and the rest all read todayISO() when they draw.
@@ -9862,7 +9948,8 @@ export default function App() {
     if (rest?.endAt && rest.endAt !== lastRestAlertRef.current) {
       // A new rest: the last one's lock-screen alert is old news. Real
       // report: 25+ "Rest's up" alerts piled up by the end of a workout.
-      clearRestNotifications();
+      // They're clearly still going, too, so "Still working out?" goes.
+      clearNotifications("rest", "idle");
       if (state?.push?.restAlerts) {
         lastRestAlertRef.current = rest.endAt;
         requestRestAlert(rest.endAt);
@@ -9914,7 +10001,7 @@ export default function App() {
     const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
     // Judged against the workouts logged BEFORE this one, for its PRs.
     setFinishedSummary(workoutSummary(entry, state.logs));
-    clearRestNotifications();
+    clearNotifications("rest", "reminder", "idle");
     // See overrideUsedUpBy: only the workout a one-time change was for uses it up.
     const finishedDayIdx = session.dayIdx;
     persist((prev) => {
@@ -9938,7 +10025,7 @@ export default function App() {
     if (!saved || !day) { setStaleWorkoutIdx(null); return; }
     const entry = { date: dateToISO(new Date(saved.savedAt)), dayName: day.name, exercises: saved.sets, durationSec: saved.activeSeconds || 0 };
     setFinishedSummary(workoutSummary(entry, state.logs));
-    clearRestNotifications();
+    clearNotifications("rest", "idle");
     persist((prev) => {
       const usedUp = overrideUsedUpBy(prev, saved.dayIdx);
       return {
@@ -9961,6 +10048,7 @@ export default function App() {
   function addMeal(rawMeal, dateISO) {
     const meal = sanitizeMeal(rawMeal);
     const date = dateISO || todayISO();
+    if (date === todayISO()) clearNotifications("food");
     persist((prev) => {
       const nutrition = [...prev.logs.nutrition];
       const idx = nutrition.findIndex((d) => d.date === date);
@@ -9979,6 +10067,7 @@ export default function App() {
   }
 
   function addWeight(weight) {
+    clearNotifications("weighin");
     persist((prev) => ({ ...prev, logs: { ...prev.logs, bodyweight: [...prev.logs.bodyweight, { date: todayISO(), weight }] } }));
   }
 
@@ -10254,6 +10343,16 @@ export default function App() {
           </div>
         )}
         <div className="app-main-inner">
+          {activeTab !== "fuel" && (mealJob?.status === "running" || mealJob?.status === "ready") && (
+            <button
+              onClick={() => setActiveTab("fuel")}
+              style={{ display: "flex", alignItems: "center", gap: 10, width: "calc(100% - 32px)", margin: "12px 16px 0", background: T.ink, color: "#fff", border: "none", borderRadius: 12, padding: "11px 14px", cursor: "pointer", textAlign: "left" }}
+            >
+              {mealJob.status === "running" ? <Loader2 size={16} className="spin" color={T.charge} /> : <Utensils size={16} color={T.charge} />}
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{mealJob.status === "running" ? "Estimating your meal…" : "Your meal estimate is ready — tap to review and save"}</span>
+              <ChevronRight size={16} color="#B9BEC6" />
+            </button>
+          )}
           {activeTab === "home" && ((state.profile?.notifications || []).length > 0 || (state.push?.schedules || []).length > 0) && !(state.push?.subscriptions || []).length && !state.push?.promptDismissed && (
             <NotificationPrompt
               kinds={state.profile?.notifications || []}

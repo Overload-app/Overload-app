@@ -283,7 +283,7 @@ export default async function handler(req, res) {
       if (due.length === 0) continue;
       people++;
       for (const { note, keys } of due) {
-        const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600 })));
+        const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600, urgency: "high" })));
         const ok = results.filter((r) => r.status === "fulfilled").length;
         sent += ok;
         if (ok > 0 && sentToday && keys.length > 0) {

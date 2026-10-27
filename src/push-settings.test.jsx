@@ -193,3 +193,33 @@ describe("notification switches", () => {
     expect(stored.push.schedules.find((r) => r.type === "weighin")).toMatchObject({ id: "weighin", hour: 7 });
   }, 20000);
 });
+
+// Real ask: "once I weigh in that day, the reminder is off the home screen."
+describe("done reminders come off the phone", () => {
+  test("clearNotifications closes only the kinds asked for", async () => {
+    const { clearNotifications } = await import("./push.js");
+    const shown = { weighin: [{ close: vi.fn() }], food: [{ close: vi.fn() }] };
+    const reg = { getNotifications: vi.fn(async ({ tag }) => shown[tag] || []) };
+    Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => reg }, configurable: true });
+    await clearNotifications("weighin");
+    expect(shown.weighin[0].close).toHaveBeenCalled();
+    expect(shown.food[0].close).not.toHaveBeenCalled();
+    delete navigator.serviceWorker;
+  });
+  test("logging today's weight on the Progress tab clears the weigh-in reminder", async () => {
+    const closed = [];
+    const reg = { getNotifications: vi.fn(async ({ tag }) => [{ close: () => closed.push(tag) }]) };
+    Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => reg }, configurable: true });
+    stored = storedState();
+    try { localStorage.clear(); localStorage.setItem("overload_tester_unlocked", "1"); } catch (e) {}
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^Progress$/ }));
+    closed.length = 0;
+    await user.type(screen.getByPlaceholderText(/lb/i), "174");
+    await user.click(screen.getByRole("button", { name: /^Log$/ }));
+    await vi.waitFor(() => expect(closed).toContain("weighin"));
+    delete navigator.serviceWorker;
+  }, 20000);
+});
