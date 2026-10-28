@@ -24,16 +24,47 @@ export function setRestChimeMuted(muted) {
 export function cancelRestChime() {
   pending.forEach((osc) => { try { osc.stop(); } catch (e) {} });
   pending = [];
+  chimeEndAt = null;
 }
+
+// Back in the app mid-rest: set the chime up again for the time that's left.
+export function rescheduleRestChime() {
+  if (chimeEndAt === null) return;
+  const left = (chimeEndAt - Date.now()) / 1000;
+  if (left > 0.5) scheduleRestChime(left);
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") rescheduleRestChime();
+  });
+}
+
+// Real report: "the rest timer is inconsistent whether it dings or not."
+// iPhone puts the sound in an "interrupted" state after a call, a video, Siri
+// or switching apps — not "suspended", which was the only one woken up — so
+// one interruption silenced every rest after it. Anything but "running" is
+// woken now, and a closed one is replaced.
+function liveContext() {
+  const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+  if (!AC) return null;
+  if (!ctx || ctx.state === "closed") ctx = new AC();
+  if (ctx.state !== "running") { try { ctx.resume(); } catch (e) {} }
+  return ctx;
+}
+
+// The end time of the chime that's set up, so it can be set up again after
+// the app comes back from the background (the sound clock stops while it's
+// away, which can lose or delay what was set up before).
+let chimeEndAt = null;
 
 export function scheduleRestChime(secondsFromNow) {
   cancelRestChime();
+  chimeEndAt = Date.now() + Math.max(0, Number(secondsFromNow) || 0) * 1000;
   if (isRestChimeMuted()) return;
   try {
-    const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
-    if (!AC) return;
-    if (!ctx) ctx = new AC();
-    if (ctx.state === "suspended") ctx.resume();
+    const ctx = liveContext();
+    if (!ctx) return;
     const at = ctx.currentTime + Math.max(0, Number(secondsFromNow) || 0);
     // Two short rising notes — noticeable over gym music, not alarming.
     [[0, 880], [0.18, 1175]].forEach(([offset, freq]) => {
@@ -57,6 +88,13 @@ export function scheduleRestChime(secondsFromNow) {
 
 // A buzz as well, where the phone supports it (Android; iPhones don't let
 // websites vibrate). Called when the countdown actually reaches zero.
+// Also the backstop for the chime: if the sound was asleep when the rest
+// ended (so what was set up never played), it's woken and played now.
 export function buzzRestDone() {
   try { if (!isRestChimeMuted() && typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate([180, 90, 180]); } catch (e) {}
+  try {
+    if (!isRestChimeMuted() && ctx && ctx.state !== "running") {
+      Promise.resolve(ctx.resume()).then(() => { if (ctx.state === "running") scheduleRestChime(0); }).catch(() => {});
+    }
+  } catch (e) {}
 }

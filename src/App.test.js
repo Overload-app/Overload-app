@@ -133,6 +133,8 @@ import {
   hasCompletedSets,
   seedLoggedSets,
   dayChangeNote,
+  workoutGroupName,
+  exercisesByMuscle,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -5243,5 +5245,34 @@ describe("Coach day edits say what really changed", () => {
     const r = ensureVideoExercises([{ name: "Chest-Supported Row" }, { name: "Hammer Curl" }], { gifCache: { "chest supported row": null }, keep: ["Chest-Supported Row"] });
     expect(r.swapped).toEqual([]);
     expect(r.exercises[0].name).toBe("Chest-Supported Row");
+  });
+});
+
+// Real asks: see one-time (e.g. all-dumbbell) versions of a workout in
+// Progress, and an easy-to-find overall view of one exercise across every
+// workout ("just my overall lat pulldown progress").
+describe("Progress by workout, one-time versions, and all workouts", () => {
+  const set = (w, r) => ({ weight: String(w), reps: String(r), done: true });
+  const logs = { workouts: [
+    { date: "2026-10-01", dayName: "Pull", exercises: [{ name: "Lat Pulldown", logged: [set(100, 10)] }, { name: "Barbell Row", logged: [set(135, 8)] }] },
+    { date: "2026-10-05", dayName: "Back & Arms", exercises: [{ name: "Lat Pulldown", logged: [set(110, 8)] }, { name: "Barbell Curl", logged: [set(60, 10)] }] },
+    { date: "2026-10-08", dayName: "Pull", oneTime: true, exercises: [{ name: "Dumbbell Row", logged: [set(60, 10)] }] },
+    { date: "2026-10-12", dayName: "Pull", exercises: [{ name: "Lat Pulldown", logged: [set(105, 10)] }] },
+  ] };
+  const program = { days: [{ name: "Pull" }, { name: "Back & Arms" }] };
+  test("a one-time version is its own group, right after the regular one", () => {
+    expect(workoutGroupName(logs.workouts[2])).toBe("Pull · one-time");
+    expect(exerciseGroupsByDay(logs, program).map((g) => g.day)).toEqual(["Pull", "Pull · one-time", "Back & Arms"]);
+    expect(exerciseGroupsByDay(logs, program)[1].exercises).toEqual(["Dumbbell Row"]);
+  });
+  test("a workout's graph shows only that workout; all workouts shows every session", () => {
+    expect(exerciseHistory(logs, "Lat Pulldown", "Pull").map((h) => h.weight)).toEqual([100, 105]);
+    expect(exerciseHistory(logs, "Lat Pulldown", "Back & Arms").map((h) => h.weight)).toEqual([110]);
+    expect(exerciseHistory(logs, "Lat Pulldown").map((h) => h.weight)).toEqual([100, 110, 105]);
+  });
+  test("all workouts lists each exercise once, sorted into muscle groups", () => {
+    const groups = exercisesByMuscle(logs, program);
+    expect(groups.map((g) => g.label)).toEqual(["Back", "Biceps"]);
+    expect(groups[0].exercises).toEqual(["Barbell Row", "Dumbbell Row", "Lat Pulldown"]);
   });
 });

@@ -45,6 +45,24 @@ export async function subscribeForPush() {
   return sub.toJSON();
 }
 
+// This phone's current link for notifications, without asking anything —
+// only when permission was already given. iPhone can replace the link (after
+// an update, or re-adding the app to the Home Screen), and reminders sent to
+// the old one go nowhere, so the app re-saves it every time it opens.
+export async function currentPushSubscription() {
+  try {
+    if (pushUnavailableReason() || Notification.permission !== "granted") return null;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+    return sub ? sub.toJSON() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Adds this device to the saved list (one entry per device).
 export function withSubscription(push, sub) {
   const others = (push?.subscriptions || []).filter((s) => s?.endpoint !== sub?.endpoint);

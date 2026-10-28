@@ -219,6 +219,28 @@ describe("<Progress />", () => {
     };
   }
 
+  test("All workouts comes first, sorted by muscle; a workout tab shows only that workout", async () => {
+    const user = userEvent.setup();
+    const set = (w, r) => ({ weight: String(w), reps: String(r), done: true });
+    const state = { profile: { weightLb: 180 }, program: { days: [{ name: "Pull" }, { name: "Back & Arms" }] }, logs: { bodyweight: [], nutrition: [], workouts: [
+      { date: "2026-10-01", dayName: "Pull", exercises: [{ name: "Lat Pulldown", logged: [set(100, 10)] }] },
+      { date: "2026-10-05", dayName: "Back & Arms", exercises: [{ name: "Lat Pulldown", logged: [set(110, 8)] }, { name: "Barbell Curl", logged: [set(60, 10)] }] },
+      { date: "2026-10-08", dayName: "Pull", oneTime: true, exercises: [{ name: "Dumbbell Row", logged: [set(60, 10)] }] },
+    ] } };
+    render(<Progress state={state} addWeight={vi.fn()} removeWeight={vi.fn()} onOpenHistory={vi.fn()} />);
+    expect(screen.getByRole("tab", { name: "All workouts" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Back")).toBeInTheDocument();
+    expect(screen.getByText("Biceps")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Lat Pulldown/ }));
+    expect(screen.getByText(/top set each session, all workouts/)).toBeInTheDocument();
+    expect(screen.getByText("+10lb")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Pull · one-time" }));
+    expect(screen.getByRole("button", { name: /Dumbbell Row/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Pull" }));
+    expect(screen.getByText(/top set each session, Pull/)).toBeInTheDocument();
+    expect(screen.queryByText("+10lb")).not.toBeInTheDocument();
+  });
+
   test("logging a weight calls addWeight with the numeric value and clears the input", async () => {
     const user = userEvent.setup();
     const addWeight = vi.fn();
@@ -2520,7 +2542,7 @@ describe("<WorkoutSession /> History & PR", () => {
       />
     );
     await user.click(screen.getByText(/History & PR/));
-    expect(screen.getByText("Top set over time")).toBeInTheDocument();
+    expect(screen.getByText("Top set over time · all workouts")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /Top set over time for Bench Press/ })).toBeInTheDocument();
     expect(screen.getByText("+20lb since first log")).toBeInTheDocument();
     expect(screen.getByText("First: 135lb × 8")).toBeInTheDocument();

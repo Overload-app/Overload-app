@@ -286,6 +286,17 @@ export default async function handler(req, res) {
         const results = await Promise.allSettled(row.state.push.subscriptions.map((sub) => webpush.sendNotification(sub, JSON.stringify(note), { TTL: 3600, urgency: "high" })));
         const ok = results.filter((r) => r.status === "fulfilled").length;
         sent += ok;
+        // A send Apple/Google refused is recorded, so a reminder that never
+        // arrived can be traced (404/410 = that phone's link has expired;
+        // the app links the phone again the next time it's opened).
+        const failed = results.filter((r) => r.status === "rejected");
+        if (failed.length > 0) {
+          await Promise.resolve(supabaseAdmin.from("error_logs").insert({
+            user_id: row.user_id,
+            message: `Reminder "${note.kind}" refused by ${failed.length} of ${results.length} device(s)`,
+            context: { type: "push-failed", kind: note.kind, codes: failed.map((r) => r.reason?.statusCode || null), bodies: failed.map((r) => String(r.reason?.body || r.reason?.message || "").slice(0, 200)) },
+          })).catch(() => {});
+        }
         if (ok > 0 && sentToday && keys.length > 0) {
           await supabaseAdmin.from("push_sent").upsert(keys.map((kind) => ({ user_id: row.user_id, kind, day })), { onConflict: "user_id,kind,day", ignoreDuplicates: true });
         }

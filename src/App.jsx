@@ -12,7 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
-import { subscribeForPush, withSubscription, deviceTimeZone, requestRestAlert, clearNotifications } from "./push.js";
+import { subscribeForPush, currentPushSubscription, withSubscription, deviceTimeZone, requestRestAlert, clearNotifications } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -5473,7 +5473,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         );
       })()}
 
-      {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} todayLogged={(sets.find((e) => e.name === detailFor) || {}).logged} onClose={() => setDetailFor(null)} />}
+      {detailFor && <ExerciseDetailSheet name={detailFor} logs={logs} dayName={day.name} todayLogged={(sets.find((e) => e.name === detailFor) || {}).logged} onClose={() => setDetailFor(null)} />}
 
       {exerciseInfoIdx !== null && sets[exerciseInfoIdx] && (() => {
         const ex = sets[exerciseInfoIdx];
@@ -5577,9 +5577,11 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
 // long scrollable session-by-session log like most lifting-tracker apps'
 // exercise history — the goal here is "what do I need to beat today," at a
 // glance, mid-set, not a full log to read.
-function ExerciseDetailSheet({ name, logs, todayLogged, onClose }) {
+// dayName: real report — "it says I did 4 sets last time, but this workout is
+// only 3 sets." Last time on this same workout, like the boxes.
+function ExerciseDetailSheet({ name, logs, todayLogged, dayName, onClose }) {
   const pr = exercisePR(logs, name);
-  const lastSession = exerciseLastSession(logs, name);
+  const lastSession = exerciseLastSession(logs, name, dayName);
   // Every session, oldest -> newest, drawn as the same line graph as the
   // Progress tab's lift chart. Real ask: "make the history and PR in the
   // workout a graph, same as the weight one" (it was six small bars).
@@ -5620,7 +5622,7 @@ function ExerciseDetailSheet({ name, logs, todayLogged, onClose }) {
 
             {lastSession && (
               <>
-                <TickRule label={`Last time · ${lastSession.date}`} />
+                <TickRule label={`Last time${lastSession.dayName ? ` on ${lastSession.dayName}` : ""} · ${lastSession.date}`} />
                 <Card style={{ marginBottom: 12 }}>
                   {lastSession.sets.map((s, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
@@ -5634,7 +5636,7 @@ function ExerciseDetailSheet({ name, logs, todayLogged, onClose }) {
 
             {trend.length >= 1 && (
               <>
-                <TickRule label="Top set over time" />
+                <TickRule label="Top set over time · all workouts" />
                 <Card>
                   <div aria-label={`Top set over time for ${name}`} role="img">
                     <ResponsiveContainer width="100%" height={180}>
@@ -7545,8 +7547,19 @@ export function findLoggedExercise(workout, name) {
     || exercises.find((e) => isSameCoreExercise(e.name, name));
 }
 
-export function exerciseHistory(logs, name) {
+// The name a logged workout is grouped under in Progress. A one-time
+// version (real ask: "if I switch my workout to all dumbbell for one day, I
+// should be able to look at it") gets its own group next to the regular one.
+export function workoutGroupName(w) {
+  const day = w?.dayName || "Other";
+  return w?.oneTime ? `${day} · one-time` : day;
+}
+
+// group: only sessions of that workout (see workoutGroupName); none = every
+// workout it was ever done in.
+export function exerciseHistory(logs, name, group) {
   return logs.workouts
+    .filter((w) => !group || workoutGroupName(w) === group)
     .filter((w) => w.exercises.some((e) => isSameCoreExercise(e.name, name)))
     .map((w) => {
       const ex = findLoggedExercise(w, name);
@@ -7591,7 +7604,7 @@ export function exerciseLastSession(logs, name, dayName) {
     .filter(Boolean);
   const day = String(dayName || "").trim().toLowerCase();
   const pick = (day && sessions.find((x) => String(x.dayName || "").trim().toLowerCase() === day)) || sessions[0];
-  return pick ? { date: pick.date, sets: pick.sets } : null;
+  return pick ? { date: pick.date, dayName: pick.dayName, sets: pick.sets } : null;
 }
 
 // The heaviest set ever logged for this exercise — ties broken by more reps
@@ -7816,7 +7829,7 @@ export function exerciseGroupsByDay(logs, program) {
   const order = (program?.days || []).map((d) => d.name);
   const byDay = new Map();
   for (const w of [...(logs?.workouts || [])].reverse()) { // newest first, so the newest name wins
-    const day = w.dayName || "Other";
+    const day = workoutGroupName(w);
     if (!byDay.has(day)) byDay.set(day, []);
     const list = byDay.get(day);
     for (const e of w.exercises || []) {
@@ -7827,18 +7840,46 @@ export function exerciseGroupsByDay(logs, program) {
   }
   const days = [...byDay.keys()].filter((d) => byDay.get(d).length > 0)
     .sort((a, b) => {
-      const ia = order.indexOf(a), ib = order.indexOf(b);
-      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      const rank = (d) => {
+        const base = d.replace(/ · one-time$/, "");
+        const i = order.indexOf(base);
+        return (i === -1 ? 999 : i) * 2 + (d === base ? 0 : 1);
+      };
+      return rank(a) - rank(b);
     });
   return days.map((day) => ({ day, exercises: byDay.get(day) }));
 }
 
+// Every exercise ever logged, across all workouts, sorted into muscle
+// groups. Real ask: "a spot that shows your total for that specific
+// exercise across all of the days … easy to find and categorized — I want
+// to see just my overall lat pulldown progress."
+export const PROGRESS_MUSCLES = [["chest", "Chest"], ["back", "Back"], ["shoulders", "Shoulders"], ["legs", "Legs"], ["biceps", "Biceps"], ["triceps", "Triceps"], ["core", "Core"], ["other", "Other"]];
+export function exercisesByMuscle(logs, program) {
+  const all = [];
+  for (const g of exerciseGroupsByDay(logs, program)) {
+    for (const n of g.exercises) if (!all.some((x) => isSameCoreExercise(x, n))) all.push(n);
+  }
+  const groups = new Map();
+  for (const n of all) {
+    const m = EXERCISE_TO_GROUP[n] || inferMuscleGroup(n) || "other";
+    const key = PROGRESS_MUSCLES.some(([k]) => k === m) ? m : "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(n);
+  }
+  return PROGRESS_MUSCLES.filter(([k]) => groups.has(k)).map(([k, label]) => ({ muscle: k, label, exercises: groups.get(k).sort((a, b) => a.localeCompare(b)) }));
+}
+
+export const ALL_WORKOUTS = "All workouts";
 function ExerciseProgress({ logs, program }) {
-  const groups = exerciseGroupsByDay(logs, program);
+  const dayGroups = exerciseGroupsByDay(logs, program);
+  const muscles = exercisesByMuscle(logs, program);
+  const groups = dayGroups.length > 0 ? [{ day: ALL_WORKOUTS, exercises: muscles.flatMap((m) => m.exercises) }, ...dayGroups] : [];
   const [day, setDay] = useState(groups[0]?.day || "");
   const group = groups.find((g) => g.day === day) || groups[0];
   const [selected, setSelected] = useState(group?.exercises[0] || "");
   const exercise = group?.exercises.includes(selected) ? selected : group?.exercises[0];
+  const isAll = group?.day === ALL_WORKOUTS;
 
   if (groups.length === 0) {
     return (
@@ -7851,7 +7892,7 @@ function ExerciseProgress({ logs, program }) {
     );
   }
 
-  const history = exerciseHistory(logs, exercise);
+  const history = exerciseHistory(logs, exercise, isAll ? undefined : group.day);
   const first = history[0];
   const latest = history[history.length - 1];
   const delta = first && latest ? latest.weight - first.weight : 0;
@@ -7876,7 +7917,9 @@ function ExerciseProgress({ logs, program }) {
       <div style={{ borderTop: `1px solid ${T.steel}`, margin: "10px 0 12px" }} />
       <p style={stepLabel}>2 · EXERCISE</p>
       <div aria-label="Exercise" style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
-        {group.exercises.map((n) => (
+        {(isAll ? muscles : [{ muscle: "", label: "", exercises: group.exercises }]).flatMap((m) => [
+          ...(m.label ? [<div key={`h-${m.muscle}`} style={{ fontSize: 11, fontWeight: 700, color: T.steelDark, margin: "8px 0 2px" }}>{m.label}</div>] : []),
+          ...m.exercises.map((n) => (
           <button
             key={n} aria-pressed={n === exercise} onClick={() => setSelected(n)}
             style={{
@@ -7889,10 +7932,11 @@ function ExerciseProgress({ logs, program }) {
             <span>{n}</span>
             {n === exercise ? <TrendingUp size={14} /> : <ChevronRight size={14} color={T.steelDark} />}
           </button>
-        ))}
+          )),
+        ])}
       </div>
       <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 4 }}>
-        {exercise} <span style={{ color: T.steelDark, fontWeight: 500 }}>· top set each session</span>
+        {exercise} <span style={{ color: T.steelDark, fontWeight: 500 }}>· top set each session, {isAll ? "all workouts" : group.day}</span>
       </div>
       {history.length >= 1 ? (
         <>
@@ -8929,6 +8973,25 @@ export default function App() {
   useEffect(() => {
     if (account?.id) resumeMealJob(account.id);
   }, [account?.id]);
+  // Re-links this phone for notifications each time the app opens (see
+  // currentPushSubscription), and keeps the time zone current for travel.
+  const stateLoaded = !!state;
+  useEffect(() => {
+    if (!account?.id || !stateLoaded) return;
+    const push = state.push || {};
+    const wantsAny = push.restAlerts || push.idleWorkout || push.reminders || push.weighIn || (push.schedules || []).length > 0;
+    if (!wantsAny) return;
+    let cancelled = false;
+    currentPushSubscription().then((sub) => {
+      if (cancelled || !sub?.endpoint) return;
+      const tz = deviceTimeZone();
+      const known = (push.subscriptions || []).some((x) => x?.endpoint === sub.endpoint);
+      if (known && push.tz === tz) return;
+      persist((prev) => ({ ...prev, push: { ...prev.push, subscriptions: withSubscription(prev.push, sub), tz } }));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.id, stateLoaded]);
   const [session, setSession] = useState(null);
   const lastRestAlertRef = useRef(null);
   // Food, "today's workout" and the rest all read todayISO() when they draw.
@@ -9998,7 +10061,7 @@ export default function App() {
     // startWorkout comment describes fixing for autosave — the fix just never
     // reached this line. The frozen baseline is the only correct "prior".
     const durationSec = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec };
+    const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec, ...(overrideAppliesTo(state, session.dayIdx) ? { oneTime: true } : {}) };
     // Judged against the workouts logged BEFORE this one, for its PRs.
     setFinishedSummary(workoutSummary(entry, state.logs));
     clearNotifications("rest", "reminder", "idle");
