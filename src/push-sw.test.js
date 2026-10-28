@@ -24,12 +24,33 @@ test("a food reminder doesn't remove the weigh-in reminder that came at the same
   const w = loadWorker([]);
   await w.push({ title: "Weigh-in time", tag: "weighin" });
   await w.push({ title: "Log your food", tag: "food" });
-  expect(w.shown.filter((n) => !n.closed).map((n) => n.tag)).toEqual(["weighin", "food"]);
+  expect(w.shown.filter((n) => !n.closed).map((n) => n.tag.split(":")[0])).toEqual(["weighin", "food"]);
 });
 
 test("a new rest alert still replaces the last one", async () => {
   const w = loadWorker([]);
   await w.push({ title: "Rest's up", tag: "rest" });
   await w.push({ title: "Rest's up", tag: "rest" });
+  expect(w.shown.filter((n) => !n.closed)).toHaveLength(1);
+});
+
+// Real report: "rest notifications only sometimes buzz, although they show up
+// on the home screen." One that replaces another with the same tag shows up
+// silently on iPhone, so every notification gets a tag of its own.
+test("every notification is new to the phone, so it buzzes", async () => {
+  const w = loadWorker([]);
+  await w.push({ title: "Rest's up", tag: "rest" });
+  await new Promise((r) => setTimeout(r, 2));
+  await w.push({ title: "Rest's up", tag: "rest" });
+  const tags = w.shown.map((n) => n.tag);
+  expect(new Set(tags).size).toBe(2);
+  expect(tags.every((t) => t.startsWith("rest:"))).toBe(true);
+});
+
+test("yesterday's food reminder is cleared, not quietly updated", async () => {
+  const old = { tag: "food", close() { this.closed = true; } };
+  const w = loadWorker([old]);
+  await w.push({ title: "Log your food", tag: "food" });
+  expect(old.closed).toBe(true);
   expect(w.shown.filter((n) => !n.closed)).toHaveLength(1);
 });

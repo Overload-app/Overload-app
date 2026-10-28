@@ -6,16 +6,19 @@ self.addEventListener("push", (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) { data = {}; }
   const title = data.title || "Overload";
-  const tag = data.tag || "overload";
-  // One alert per kind at a time: the previous rest alert is replaced, not
-  // stacked (real report: 25+ of them by the end of a workout).
-  // Checked by tag here as well: if a phone ignores the tag in the request
-  // and hands back every notification, closing them all would let a 7am
-  // food reminder silently remove the 7am weigh-in reminder.
-  event.waitUntil(self.registration.getNotifications({ tag }).then((old) => old.filter((n) => n.tag === tag).forEach((n) => n.close())).catch(() => {}).then(() => self.registration.showNotification(title, {
+  const kind = data.tag || "overload";
+  // Real report: "rest notifications only sometimes buzz, although they
+  // show up on the home screen" (same for weigh-in and food). Every one of a
+  // kind used to share one tag, and a notification that replaces one with the
+  // same tag is shown silently on iPhone (Safari ignores renotify). Each now
+  // gets its own tag, so every one buzzes; the older ones of the same kind
+  // are still cleared first so rest alerts don't pile up (real report: 25+
+  // by the end of a workout). Matched by kind here, not by asking the phone
+  // to filter, since some phones hand back every notification.
+  const sameKind = (n) => n.tag === kind || String(n.tag || "").startsWith(`${kind}:`);
+  event.waitUntil(self.registration.getNotifications().then((old) => old.filter(sameKind).forEach((n) => n.close())).catch(() => {}).then(() => self.registration.showNotification(title, {
     body: data.body || "",
-    tag,
-    renotify: true,
+    tag: `${kind}:${Date.now()}`,
     icon: "/icon-192.png",
     badge: "/icon-192.png",
     data: { url: data.url || "/" },

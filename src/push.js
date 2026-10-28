@@ -100,9 +100,10 @@ export async function clearNotifications(...tags) {
     if (typeof navigator === "undefined" || !navigator.serviceWorker?.getRegistration) return;
     const reg = await navigator.serviceWorker.getRegistration();
     for (const tag of tags) {
-      const shown = await reg?.getNotifications?.({ tag });
-      // Checked by tag here too, in case a phone returns every notification.
-      (shown || []).filter((n) => n.tag === tag).forEach((n) => n.close());
+      const shown = await reg?.getNotifications?.();
+      // Each notification's tag is "<kind>:<time>" (see public/push-sw.js),
+      // so they're matched by kind here rather than by asking the phone.
+      (shown || []).filter((n) => n.tag === tag || String(n.tag || "").startsWith(`${tag}:`)).forEach((n) => n.close());
     }
   } catch (e) {
     // Nothing to clear, or not supported — fine either way.

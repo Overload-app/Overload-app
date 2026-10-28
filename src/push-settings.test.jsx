@@ -209,7 +209,8 @@ describe("done reminders come off the phone", () => {
   });
   test("logging today's weight on the Progress tab clears the weigh-in reminder", async () => {
     const closed = [];
-    const reg = { getNotifications: vi.fn(async ({ tag }) => [{ tag, close: () => closed.push(tag) }]) };
+    const kinds = ["weighin:1", "food:2", "rest:3"];
+    const reg = { getNotifications: vi.fn(async () => kinds.map((tag) => ({ tag, close: () => closed.push(tag.split(":")[0]) }))) };
     Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => reg }, configurable: true });
     stored = storedState();
     try { localStorage.clear(); localStorage.setItem("overload_tester_unlocked", "1"); } catch (e) {}
@@ -223,4 +224,38 @@ describe("done reminders come off the phone", () => {
     await vi.waitFor(() => expect(closed).toContain("weighin"));
     delete navigator.serviceWorker;
   }, 20000);
+});
+
+// Real ask: "my knees were sore for leg day today, and I wanted to put that at
+// the top of the workout so I knew why my numbers were low."
+describe("a note for the whole workout", () => {
+  beforeEach(() => {
+    stored = storedState();
+    try { localStorage.clear(); localStorage.setItem("overload_tester_unlocked", "1"); } catch (e) {}
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  test("is saved with the workout, and shows the next time that workout comes round", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    await user.click(screen.getAllByText("Legs")[0]);
+    await user.click(await screen.findByText("Add a note for this workout"));
+    await user.type(screen.getByLabelText("Note for this workout"), "knees sore today");
+    await user.click((await screen.findAllByLabelText(/Mark set 1 done/))[0]);
+    await user.click(screen.getByText(/Finish workout/));
+    await screen.findByText("WORKOUT COMPLETE");
+    const saved = stored.logs.workouts[stored.logs.workouts.length - 1];
+    expect(saved.dayName).toBe("Legs");
+    expect(saved.note).toBe("knees sore today");
+    expect(stored.workoutNoteDraft).toBeNull();
+    unmount();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    await user.click(screen.getAllByText("Legs")[0]);
+    expect(await screen.findByText(/knees sore today/)).toBeInTheDocument();
+  }, 30000);
 });

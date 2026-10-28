@@ -27,7 +27,7 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         // Workout reminders and rest alerts (public/push-sw.js).
         // Versioned so phones fetch the new copy when it changes.
-        importScripts: ["push-sw.js?v=2"],
+        importScripts: ["push-sw.js?v=3"],
         runtimeCaching: [
           {
             // Supabase reads: try the network first (fresh data when

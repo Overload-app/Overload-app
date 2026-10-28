@@ -4568,7 +4568,50 @@ export function seedLoggedSets(ex, logs, dayName) {
   });
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote }) {
+// A note for the whole workout. Real ask: "my knees were sore for leg day
+// today, and I wanted to put that at the top so I knew why my numbers were
+// low." Saved with the workout when it's finished; the last one written for
+// this workout shows here the next time it comes round.
+export function WorkoutNoteBox({ day, logs, value, onChange }) {
+  const [open, setOpen] = useState(!!value);
+  const [text, setText] = useState(value || "");
+  const timer = useRef(null);
+  useEffect(() => () => { if (timer.current) { clearTimeout(timer.current); } }, []);
+  const lastNote = [...(logs?.workouts || [])].reverse().find((w) => w.dayName === day?.name && w.note);
+  const change = (v) => {
+    setText(v);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => { timer.current = null; onChange(v.trim() ? v : ""); }, 500);
+  };
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {lastNote && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: T.steelDark, background: T.card, border: `1px solid ${T.steel}`, borderRadius: 10, padding: "8px 12px", marginBottom: 8 }}>
+          <FileText size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span><b style={{ color: T.ink }}>Last time ({lastNote.date}):</b> {lastNote.note}</span>
+        </div>
+      )}
+      {open ? (
+        <textarea
+          aria-label="Note for this workout"
+          placeholder="Note for this workout — e.g. knees sore today, short on sleep"
+          value={text}
+          maxLength={500}
+          rows={2}
+          onChange={(e) => change(e.target.value)}
+          onBlur={() => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } onChange(text.trim() ? text : ""); }}
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${T.steel}`, fontFamily: "'Inter', sans-serif", fontSize: 14, boxSizing: "border-box", resize: "vertical", background: "#fff" }}
+        />
+      ) : (
+        <button onClick={() => setOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: `1.5px dashed ${T.steel}`, borderRadius: 10, padding: "9px 12px", width: "100%", cursor: "pointer", fontSize: 13, fontWeight: 600, color: T.steelDark }}>
+          <Pencil size={13} /> Add a note for this workout
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote, workoutNote = "", onWorkoutNote }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs, day.name) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
@@ -5114,6 +5157,7 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       {/* The rest timer lives in the footer below, so nothing floats over
           the last sets any more. */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "16px 16px 16px" }}>
+        {onWorkoutNote && <WorkoutNoteBox day={day} logs={logs} value={workoutNote} onChange={onWorkoutNote} />}
         {/* Direct answer to real beta-tester confusion: she didn't realize
             the checkmark both logs the set AND starts a rest timer. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.card, border: `1px solid ${T.steel}`, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
@@ -5624,6 +5668,7 @@ function ExerciseDetailSheet({ name, logs, todayLogged, dayName, onClose }) {
               <>
                 <TickRule label={`Last time${lastSession.dayName ? ` on ${lastSession.dayName}` : ""} · ${lastSession.date}`} />
                 <Card style={{ marginBottom: 12 }}>
+                  {lastSession.note && <div style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic", paddingBottom: 6 }}>Workout note: “{lastSession.note}”</div>}
                   {lastSession.sets.map((s, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.steel}` : "none" }}>
                       <span style={{ fontSize: 11, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>SET {i + 1}</span>
@@ -7385,7 +7430,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
 
       {running && (
         <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>{job.kind === "text" ? "Estimating your meal…" : "Analyzing your photo…"} You can leave this screen — it keeps going.</span>
+          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>{job.kind === "text" ? "Estimating your meal…" : "Analyzing your photo…"}</span>
         </Card>
       )}
       {pendingPhotos.length > 0 && (
@@ -7599,12 +7644,12 @@ export function exerciseLastSession(logs, name, dayName) {
       const logged = ex?.logged || [];
       const hasChecks = logged.some((l) => "done" in (l || {}));
       const sets = logged.filter((l) => l?.weight && l?.reps && (!hasChecks || l.done));
-      return sets.length > 0 ? { date: w.date, dayName: w.dayName, sets: sets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) } : null;
+      return sets.length > 0 ? { date: w.date, dayName: w.dayName, note: w.note, sets: sets.map((l) => ({ weight: Number(l.weight), reps: Number(l.reps) })) } : null;
     })
     .filter(Boolean);
   const day = String(dayName || "").trim().toLowerCase();
   const pick = (day && sessions.find((x) => String(x.dayName || "").trim().toLowerCase() === day)) || sessions[0];
-  return pick ? { date: pick.date, dayName: pick.dayName, sets: pick.sets } : null;
+  return pick ? { date: pick.date, dayName: pick.dayName, ...(pick.note ? { note: pick.note } : {}), sets: pick.sets } : null;
 }
 
 // The heaviest set ever logged for this exercise — ties broken by more reps
@@ -8150,6 +8195,12 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
           <button onClick={closeDetail} aria-label="Close workout detail" style={{ background: "none", border: "none", color: "#B9BEC6", cursor: "pointer" }}><X size={22} /></button>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {entry.note && (
+            <Card style={{ marginBottom: 10, display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <FileText size={16} color={T.steelDark} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span style={{ fontSize: 13, color: T.ink }}>{entry.note}</span>
+            </Card>
+          )}
           {/* Real report: a workout discarded halfway through still
               recorded whatever partial time had elapsed (18 min), with no
               way to fix it afterward. */}
@@ -8257,6 +8308,7 @@ export function WorkoutHistoryEditor({ workouts, onClose, onDelete, onUpdate, in
                   <div style={{ fontSize: 11, color: T.steelDark }}>
                     {w.date}{w.durationSec ? ` · ${formatDuration(w.durationSec)}` : ""} · {(w.exercises || []).length} exercises
                   </div>
+                  {w.note && <div style={{ fontSize: 12, color: T.steelDark, fontStyle: "italic", marginTop: 2 }}>“{w.note}”</div>}
                 </div>
                 <ChevronRight size={16} color={T.steelDark} />
               </Card>
@@ -10046,7 +10098,7 @@ export default function App() {
   }
 
   function discardWorkoutProgress() {
-    persist((prev) => ({ ...prev, inProgressWorkout: null }));
+    persist((prev) => ({ ...prev, inProgressWorkout: null, workoutNoteDraft: null }));
     setSession(null);
   }
 
@@ -10061,7 +10113,8 @@ export default function App() {
     // startWorkout comment describes fixing for autosave — the fix just never
     // reached this line. The frozen baseline is the only correct "prior".
     const durationSec = accumulateActiveSeconds(session.baselineActiveSeconds, session.resumedAt, Date.now());
-    const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec, ...(overrideAppliesTo(state, session.dayIdx) ? { oneTime: true } : {}) };
+    const draft = state.workoutNoteDraft?.dayIdx === session.dayIdx ? state.workoutNoteDraft.text : "";
+    const entry = { date: todayISO(), dayName: day.name, exercises: sets, durationSec, ...(overrideAppliesTo(state, session.dayIdx) ? { oneTime: true } : {}), ...(draft ? { note: draft } : {}) };
     // Judged against the workouts logged BEFORE this one, for its PRs.
     setFinishedSummary(workoutSummary(entry, state.logs));
     clearNotifications("rest", "reminder", "idle");
@@ -10073,6 +10126,7 @@ export default function App() {
         ...prev,
         logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry] },
         inProgressWorkout: null,
+        workoutNoteDraft: null,
         ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null, lastCoachChange: null } : {}),
       };
     });
@@ -10086,7 +10140,8 @@ export default function App() {
     const saved = state.inProgressWorkout;
     const day = saved ? state.program.days[saved.dayIdx] : null;
     if (!saved || !day) { setStaleWorkoutIdx(null); return; }
-    const entry = { date: dateToISO(new Date(saved.savedAt)), dayName: day.name, exercises: saved.sets, durationSec: saved.activeSeconds || 0 };
+    const draft = state.workoutNoteDraft?.dayIdx === saved.dayIdx ? state.workoutNoteDraft.text : "";
+    const entry = { date: dateToISO(new Date(saved.savedAt)), dayName: day.name, exercises: saved.sets, durationSec: saved.activeSeconds || 0, ...(draft ? { note: draft } : {}) };
     setFinishedSummary(workoutSummary(entry, state.logs));
     clearNotifications("rest", "idle");
     persist((prev) => {
@@ -10095,6 +10150,7 @@ export default function App() {
         ...prev,
         logs: { ...prev.logs, workouts: [...prev.logs.workouts, entry].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0)) },
         inProgressWorkout: null,
+        workoutNoteDraft: null,
         ...(usedUp ? { todayOverride: null, todayOverrideDayIdx: null, lastCoachChange: null } : {}),
       };
     });
@@ -10607,6 +10663,8 @@ export default function App() {
             if (text) notes[normalizeGifKey(name)] = text; else delete notes[normalizeGifKey(name)];
             return { ...prev, exerciseNotes: notes };
           })}
+          workoutNote={state.workoutNoteDraft?.dayIdx === session.dayIdx ? state.workoutNoteDraft.text : ""}
+          onWorkoutNote={(text) => persist((prev) => ({ ...prev, workoutNoteDraft: text ? { dayIdx: session.dayIdx, text } : null }))}
           initialSets={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.sets : null}
           initialRest={session.resume && state.inProgressWorkout && state.inProgressWorkout.dayIdx === session.dayIdx ? state.inProgressWorkout.rest : null}
           onFinish={finishWorkout}
