@@ -84,9 +84,11 @@ describe("workout reminders", () => {
   test("nothing once they've trained today", () => {
     expect(reminderFor(state({ logs: { workouts: [{ date: "2026-10-08" }] } }), now)).toBeNull();
   });
-  test("nothing once the week's sessions are done", () => {
+  // Real report: a 3-day-a-week tester's every-day reminder skipped Saturday
+  // and Sunday because 3 workouts in the last 7 days counted as "done".
+  test("still comes when this week's sessions are already done", () => {
     const workouts = ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-07"].map((date) => ({ date }));
-    expect(reminderFor(state({ logs: { workouts } }), now)).toBeNull();
+    expect(reminderFor(state({ logs: { workouts } }), now)).not.toBeNull();
   });
   test("nothing when switched off, no device, or no program", () => {
     expect(reminderFor(state({ push: { reminders: false, subscriptions: [sub] } }), now)).toBeNull();

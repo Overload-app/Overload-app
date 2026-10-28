@@ -136,11 +136,11 @@ function reminderMessage(type, state, now) {
     if (days.length === 0) return null;
     const workouts = state?.logs?.workouts || [];
     if (workouts.some((w) => w.date === today)) return null;
-    // Already done this week's sessions (last 7 days, today included): no nag.
-    const weekAgo = localDateISO(push.tz, new Date(now.getTime() - 6 * 86400000));
-    const thisWeek = workouts.filter((w) => w.date >= weekAgo && w.date <= today).length;
-    const perWeek = Number(state?.profile?.daysPerWeek) || days.length;
-    if (thisWeek >= perWeek) return null;
+    // There used to be a "done this week's sessions already, so skip" rule
+    // here. Real report: a tester's every-day 6pm reminder came Monday and
+    // Tuesday but not Saturday or Sunday — three workouts in the last 7 days
+    // silently switched it off. It now goes out on every day they picked,
+    // unless they've already trained that day.
     const next = days[nextDayIndex(days, workouts)];
     return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
   }

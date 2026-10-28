@@ -8583,7 +8583,7 @@ export const NOTIFICATION_KINDS = [
 // to 6. api/push-cron.js sends them; it keeps its own copy of
 // reminderSchedules() below, so change both together.
 export const REMINDER_TYPES = [
-  ["workout", "Workout", "Skipped on days you've already trained."],
+  ["workout", "Workout", "Comes on the days you pick, unless you've already trained."],
   ["food", "Log food", "A nudge to log what you've eaten."],
   ["weighin", "Weigh-in", "Skipped once you've weighed in that day."],
 ];

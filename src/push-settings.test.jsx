@@ -198,8 +198,9 @@ describe("notification switches", () => {
 describe("done reminders come off the phone", () => {
   test("clearNotifications closes only the kinds asked for", async () => {
     const { clearNotifications } = await import("./push.js");
-    const shown = { weighin: [{ close: vi.fn() }], food: [{ close: vi.fn() }] };
-    const reg = { getNotifications: vi.fn(async ({ tag }) => shown[tag] || []) };
+    const shown = { weighin: [{ tag: "weighin", close: vi.fn() }], food: [{ tag: "food", close: vi.fn() }] };
+    // Like a phone that ignores the tag and returns everything.
+    const reg = { getNotifications: vi.fn(async () => [...shown.weighin, ...shown.food]) };
     Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => reg }, configurable: true });
     await clearNotifications("weighin");
     expect(shown.weighin[0].close).toHaveBeenCalled();
@@ -208,7 +209,7 @@ describe("done reminders come off the phone", () => {
   });
   test("logging today's weight on the Progress tab clears the weigh-in reminder", async () => {
     const closed = [];
-    const reg = { getNotifications: vi.fn(async ({ tag }) => [{ close: () => closed.push(tag) }]) };
+    const reg = { getNotifications: vi.fn(async ({ tag }) => [{ tag, close: () => closed.push(tag) }]) };
     Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => reg }, configurable: true });
     stored = storedState();
     try { localStorage.clear(); localStorage.setItem("overload_tester_unlocked", "1"); } catch (e) {}

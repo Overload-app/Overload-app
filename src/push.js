@@ -101,7 +101,8 @@ export async function clearNotifications(...tags) {
     const reg = await navigator.serviceWorker.getRegistration();
     for (const tag of tags) {
       const shown = await reg?.getNotifications?.({ tag });
-      (shown || []).forEach((n) => n.close());
+      // Checked by tag here too, in case a phone returns every notification.
+      (shown || []).filter((n) => n.tag === tag).forEach((n) => n.close());
     }
   } catch (e) {
     // Nothing to clear, or not supported — fine either way.
