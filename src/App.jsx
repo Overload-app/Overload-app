@@ -12,7 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
-import { subscribeForPush, currentPushSubscription, withSubscription, deviceTimeZone, requestRestAlert, clearNotifications } from "./push.js";
+import { subscribeForPush, currentPushSubscription, withSubscription, deviceTimeZone, requestTestNotification, requestRestAlert, clearNotifications } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -8783,9 +8783,24 @@ function NotificationPrompt({ kinds, schedules, onEnable, onDismiss }) {
   );
 }
 
-function NotificationSettings({ push, onSetPushEnabled, onSetSchedules }) {
+function NotificationSettings({ push, onSetPushEnabled, onSetSchedules, onLinkPhone }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
+  const [testNote, setTestNote] = useState("");
+  // Real ask: make notifications dependable — this lets anyone check their
+  // phone gets them, any time, instead of waiting for the next reminder.
+  async function sendTest() {
+    setError(""); setTestNote(""); setBusy("test");
+    try {
+      if (onLinkPhone) await onLinkPhone();
+      await requestTestNotification(10);
+      setTestNote("Sent — lock your phone now. It should buzz in about 10 seconds.");
+    } catch (e) {
+      setError(e?.message || "Couldn't send a test.");
+    } finally {
+      setBusy(null);
+    }
+  }
   async function toggle(kind) {
     setError("");
     setBusy(kind);
@@ -8837,13 +8852,17 @@ function NotificationSettings({ push, onSetPushEnabled, onSetSchedules }) {
             </button>
           </div>
         ))}
+        <div style={{ borderTop: `1px solid ${T.steel}`, marginTop: 10, paddingTop: 10 }}>
+          <Btn variant="ghost" disabled={busy !== null} onClick={sendTest} style={{ width: "100%" }}><Bell size={14} /> Send a test notification</Btn>
+          {testNote && <p style={{ fontSize: 12, color: T.good, margin: "8px 0 0" }}>{testNote}</p>}
+        </div>
         {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "8px 0 0" }}>{error}</p>}
       </Card>
     </>
   );
 }
 
-export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetPushEnabled, onSetSchedules, onEditQuiz }) {
+export function ProfileTab({ state, resetAll, account, onLogout, subscribed, trialActive, trialDaysLeftCount, onOpenSubscribe, onSetPushEnabled, onSetSchedules, onLinkPhone, onEditQuiz }) {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -8951,7 +8970,7 @@ export function ProfileTab({ state, resetAll, account, onLogout, subscribed, tri
         ))}
       </Card>
 
-      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetSchedules={onSetSchedules} />}
+      {onSetPushEnabled && <NotificationSettings push={state.push} onSetPushEnabled={onSetPushEnabled} onSetSchedules={onSetSchedules} onLinkPhone={onLinkPhone} />}
 
       <TickRule label="Support & legal" />
       <Card>
@@ -10278,6 +10297,15 @@ export default function App() {
   // Workout reminders / rest alerts. Turning one on asks for notification
   // permission and saves this device with the account; turning it off just
   // stops sending (the device stays saved for the other switch).
+  // Makes sure this phone is the one saved for notifications (asking for
+  // permission if it hasn't been given) before a test is sent to it.
+  async function linkThisPhone() {
+    const sub = await subscribeForPush();
+    persist((prev) => ({ ...prev, push: { ...prev.push, subscriptions: withSubscription(prev.push, sub), tz: deviceTimeZone() } }));
+    // Give the save a moment to reach the server, which reads it to send.
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
   // Saves the reminder list. Adding one asks for notification permission
   // (if it hasn't been given) and saves this device, like a switch does.
   async function setReminderSchedules(next) {
@@ -10514,7 +10542,7 @@ export default function App() {
               onOpenHistory={() => { setHistoryEditorInitialIdx(null); setHistoryEditorOpen(true); }}
             />
           )}
-          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetPushEnabled={setPushEnabled} onSetSchedules={setReminderSchedules} onEditQuiz={() => setQuizEditorOpen(true)} />}
+          {activeTab === "profile" && <ProfileTab state={state} resetAll={resetAll} account={account} onLogout={handleLogout} subscribed={subscribed} trialActive={trialActive} trialDaysLeftCount={trialDaysLeft(trialStartedAt)} onOpenSubscribe={() => setShowSubscribeOverlay(true)} onSetPushEnabled={setPushEnabled} onSetSchedules={setReminderSchedules} onLinkPhone={linkThisPhone} onEditQuiz={() => setQuizEditorOpen(true)} />}
         </div>
 
         <div className="bottom-nav">

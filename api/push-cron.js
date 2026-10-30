@@ -226,7 +226,22 @@ export function dueFor(state, now = new Date(), sentToday = null) {
   const idle = idleWorkoutFor(state, now);
   const idleKey = idle ? `idle:${state.inProgressWorkout.savedAt}` : null;
   const idleDue = idle && !(sentToday instanceof Set && sentToday.has(idleKey));
-  return [...scheduledFor(state, now, sentToday), ...(idleDue ? [{ note: idle, keys: [idleKey] }] : [])];
+  return [...combineReminders(scheduledFor(state, now, sentToday)), ...(idleDue ? [{ note: idle, keys: [idleKey] }] : [])];
+}
+
+// Real report: the 7am weigh-in and 7am food reminders never arrived on two
+// days running, while the 5pm food reminder (alone) always did — the two
+// were sent to the phone in the same second. Reminders due together now go
+// as one notification.
+export function combineReminders(due) {
+  if (due.length < 2) return due;
+  const short = { reminder: "train", weighin: "weigh in", food: "log your food" };
+  const what = due.map((d) => short[d.note.kind] || d.note.title);
+  const list = what.length === 2 ? what.join(" and ") : `${what.slice(0, -1).join(", ")} and ${what[what.length - 1]}`;
+  return [{
+    note: { kind: "reminders", title: `Time to ${list} ⏰`, body: due.map((d) => d.note.body).join(" "), tag: "reminders", url: "/" },
+    keys: due.flatMap((d) => d.keys),
+  }];
 }
 export function notificationsFor(state, now = new Date(), sentToday = null) {
   return dueFor(state, now, sentToday).map((d) => d.note);

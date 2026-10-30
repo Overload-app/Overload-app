@@ -89,6 +89,20 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: "Not signed in." });
     }
   }
+  // "Send a test notification" on the You page: one buzz a few seconds from
+  // now (time to lock the phone), to everything this account has linked.
+  if (req.body?.test === true) {
+    const delay = Math.min(Math.max(Number(req.body.delaySeconds) || 0, 0), 30) * 1000;
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, privateKey);
+    waitUntil((async () => {
+      await sleep(delay);
+      const { data } = await supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle();
+      const subs = data?.state?.push?.subscriptions || [];
+      await sendToSubscriptions(subs, { kind: "test", title: "Test notification ✅", body: "If you can see and hear this, Overload's reminders will reach you.", tag: "test", url: "/" },
+        (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 300, urgency: "high" }));
+    })().catch(() => {}));
+    return res.status(202).json({ scheduled: true });
+  }
   const alert = validRestAlert(req.body, Date.now());
   if (!alert) return res.status(400).json({ error: "Rest must end within the next 15 minutes." });
 

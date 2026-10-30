@@ -83,6 +83,25 @@ describe("notification switches", () => {
     expect(screen.getByRole("switch", { name: /rest alerts/i })).toHaveAttribute("aria-checked", "false");
   }, 20000);
 
+  test("Send a test notification links this phone and asks the server for one", async () => {
+    const sub = { endpoint: "https://push.example/t", keys: {} };
+    const reg = { pushManager: { getSubscription: vi.fn(async () => ({ toJSON: () => sub })), subscribe: vi.fn() } };
+    Object.defineProperty(navigator, "serviceWorker", { value: { ready: Promise.resolve(reg) }, configurable: true });
+    window.PushManager = function () {};
+    window.Notification = { permission: "granted", requestPermission: vi.fn(async () => "granted") };
+    globalThis.fetch.mockImplementation(async () => ({ ok: true, status: 202, json: async () => ({}) }));
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: /^You$/ }));
+    await user.click(screen.getByRole("button", { name: /Send a test notification/ }));
+    expect(await screen.findByText(/lock your phone now/, {}, { timeout: 4000 })).toBeInTheDocument();
+    const call = globalThis.fetch.mock.calls.find(([u, o]) => String(u).includes("/api/rest-alert") && JSON.parse(o.body).test === true);
+    expect(call).toBeTruthy();
+    expect(stored.push.subscriptions).toContainEqual(sub);
+    delete navigator.serviceWorker; delete window.PushManager; delete window.Notification;
+  }, 20000);
+
   test("an iPhone in Safari is told to add it to the Home Screen first", async () => {
     const ua = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1");
     const user = userEvent.setup();

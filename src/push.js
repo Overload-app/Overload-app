@@ -75,6 +75,20 @@ export function deviceTimeZone() {
 
 // Ask the server to buzz this phone when the rest ends. Fire-and-forget:
 // the in-app chime still works without it.
+// A test notification, delaySeconds from now (time to lock the phone).
+// Throws a message fit to show if it couldn't be asked for.
+export async function requestTestNotification(delaySeconds = 10) {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+  if (!token) throw new Error("Sign in again, then try that.");
+  const res = await fetch("/api/rest-alert", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ test: true, delaySeconds }),
+  });
+  if (!res.ok) throw new Error("Couldn't send a test right now — try again in a minute.");
+}
+
 export async function requestRestAlert(endAt) {
   try {
     const { data } = await supabase.auth.getSession();

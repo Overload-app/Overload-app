@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 import restHandler, { validRestAlert, shouldSendRestAlert, sendToSubscriptions, internalCaller, MAX_REST_SECONDS } from "./rest-alert.js";
-import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex, dueFor, reminderSchedules, useTick } from "./push-cron.js";
+import cronHandler, { reminderFor, localDateISO, localHour, verifyGithubToken, GITHUB_REPO, OIDC_AUDIENCE, weighInFor, idleWorkoutFor, notificationsFor, localWeekday, nextDayIndex, dueFor, reminderSchedules, useTick, combineReminders } from "./push-cron.js";
 
 const mockRes = () => ({ statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
 
@@ -187,7 +187,9 @@ describe("weigh-in and forgotten-workout notifications", () => {
   test("each kind can be on or off on its own", () => {
     const at18 = new Date("2026-10-17T18:07:00Z");
     const st = base({ reminders: true, weighIn: true, weighInHour: 18 });
-    expect(notificationsFor(st, at18).map((n) => n.kind)).toEqual(["reminder", "weighin"]);
+    // Both due at once: one notification for the two (see the 7am test below).
+    expect(notificationsFor(st, at18).map((n) => n.kind)).toEqual(["reminders"]);
+    expect(notificationsFor(st, at18)[0].title).toBe("Time to train and weigh in ⏰");
     expect(notificationsFor(base({ reminders: false, weighIn: true, weighInHour: 18 }), at18).map((n) => n.kind)).toEqual(["weighin"]);
   });
 });
@@ -325,5 +327,35 @@ describe("the database's 5-minute tick", () => {
     const res = mockRes();
     await cronHandler({ method: "POST", headers: { "x-cron-tick": "abc" } }, res);
     expect(res.statusCode).not.toBe(200);
+  });
+});
+
+// Real report: the 7am weigh-in and 7am food reminders never arrived two days
+// running; the 5pm food reminder (alone) always did. The 7am pair went to the
+// phone in the same second.
+describe("reminders due at the same time", () => {
+  const sub = { endpoint: "https://push.example/1", keys: {} };
+  const st = { push: { subscriptions: [sub], tz: "America/Halifax", schedules: [
+    { id: "weighin", type: "weighin", hour: 7, days: [0, 1, 2, 3, 4, 5, 6] },
+    { id: "food-am", type: "food", hour: 7, days: [0, 1, 2, 3, 4, 5, 6] },
+    { id: "food-pm", type: "food", hour: 17, days: [0, 1, 2, 3, 4, 5, 6] },
+  ] }, targets: { calories: 2400 }, logs: { workouts: [], bodyweight: [], nutrition: [] } };
+  test("go as one notification, and every one is marked sent", () => {
+    const due = dueFor(st, new Date("2026-10-29T10:00:30Z"), new Set()); // 7:00am Halifax
+    expect(due).toHaveLength(1);
+    expect(due[0].note.title).toBe("Time to weigh in and log your food ⏰");
+    expect(due[0].note.body).toContain("Step on the scale");
+    expect(due[0].note.body).toContain("Nothing logged yet");
+    expect(due[0].keys.sort()).toEqual(["food-am", "weighin"]);
+  });
+  test("one on its own is unchanged", () => {
+    const due = dueFor(st, new Date("2026-10-29T20:00:30Z"), new Set()); // 5:00pm Halifax
+    expect(due).toHaveLength(1);
+    expect(due[0].note.kind).toBe("food");
+    expect(due[0].keys).toEqual(["food-pm"]);
+  });
+  test("three at once read naturally", () => {
+    const fake = (kind) => ({ note: { kind, title: kind, body: `${kind}.` }, keys: [kind] });
+    expect(combineReminders([fake("reminder"), fake("weighin"), fake("food")])[0].note.title).toBe("Time to train, weigh in and log your food ⏰");
   });
 });
