@@ -52,6 +52,18 @@ describe("rest-timer chime", () => {
     expect(secs).toBeLessThanOrEqual(105);
   });
 
+  // Real ask: "add a -15 seconds to the rest timer."
+  test("−15s brings the chime earlier, and never past now", () => {
+    open();
+    fireEvent.click(screen.getByLabelText("Mark set 1 done and start rest timer"));
+    fireEvent.click(screen.getByLabelText("Take 15 seconds off rest"));
+    const [secs] = chime.scheduleRestChime.mock.calls.at(-1);
+    expect(secs).toBeGreaterThan(70);
+    expect(secs).toBeLessThanOrEqual(75);
+    for (let i = 0; i < 6; i++) { const b = screen.queryByLabelText("Take 15 seconds off rest"); if (b) fireEvent.click(b); }
+    expect(chime.scheduleRestChime.mock.calls.at(-1)[0]).toBeGreaterThanOrEqual(0);
+  });
+
   test("skipping the rest cancels the chime", () => {
     open();
     fireEvent.click(screen.getByLabelText("Mark set 1 done and start rest timer"));

@@ -472,7 +472,10 @@ export async function readCoachStream(body, onPartialReply) {
   return { toolJson, usage };
 }
 
-export async function claudeChat({ system, messages, onPartialReply, model }) {
+// schema: the exact shape the answer must have, for callers with a fixed
+// one (meal estimates — see MEAL_SCHEMA). Without it the answer's shape comes
+// from the system prompt alone.
+export async function claudeChat({ system, messages, onPartialReply, model, schema }) {
   if (aiBudgetContext?.isTrialUnsubscribed && !budgetAllows(aiBudgetContext.aiUsage)) {
     throw budgetExceededError();
   }
@@ -540,7 +543,7 @@ export async function claudeChat({ system, messages, onPartialReply, model }) {
   const JSON_RESPONSE_TOOL = {
     name: "respond",
     description: "Submit your response. Its shape is defined by the system prompt's instructions, not by this schema.",
-    input_schema: { type: "object" },
+    input_schema: schema || { type: "object" },
   };  // Real report: "Coach takes too long to respond sometimes" — with no
   // timeout at all, a stalled request (a dropped connection that never
   // formally errors, a slow upstream) could just hang indefinitely with
@@ -4441,7 +4444,7 @@ export function OnboardingSummary({ profile, program, targets, onContinue }) {
 // instead, so the exercise list underneath stays fully scrollable and
 // tappable (checking another set, opening "How to do it", swapping an
 // exercise) while the countdown keeps running alongside it.
-function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
+function RestTimer({ seconds, total, onAdd, onSubtract, onSkip, onSeenFinish }) {
   const pct = Math.max(0, seconds / total);
   const done = seconds <= 0;
   const [muted, setMuted] = useState(() => isRestChimeMuted());
@@ -4457,6 +4460,15 @@ function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
     }
     wasDone.current = done;
   }, [done]);
+  // Back in the app after the rest ended: they've seen it now, so the
+  // follow-up "your rest is over" nudges stop (see api/rest-alert.js).
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const seen = () => { if (done && document.visibilityState === "visible") onSeenFinish?.(); };
+    seen();
+    document.addEventListener("visibilitychange", seen);
+    return () => document.removeEventListener("visibilitychange", seen);
+  }, [done]);
   return (
     <div
       style={{
@@ -4464,19 +4476,23 @@ function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
         // it floated over the screen it sat on top of Finish/Discard and the
         // last sets, and the workout "got stuck" and couldn't be scrolled.
         marginBottom: 12,
-        background: T.ink, color: "#fff", borderRadius: 16, padding: "10px 14px",
+        background: done ? T.good : T.ink,
+        // Real report: "when it goes off I don't notice it sometimes" (ringer
+        // off, so no sound in the app). The bar turns green and pulses.
+        animation: done ? "restDonePulse 0.9s ease-in-out infinite" : "none", color: "#fff", borderRadius: 16, padding: "10px 14px",
         display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
       }}
     >
       <div style={{ flexShrink: 0 }}>
-        <Ring value={pct} max={1} size={44} stroke={4} color={done ? T.good : T.charge}>
+        <Ring value={pct} max={1} size={44} stroke={4} color={done ? "#fff" : T.charge}>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
         </Ring>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: 1.5, fontWeight: 700, color: done ? T.good : T.charge }}>
-          {done ? "REST COMPLETE" : "RESTING"}
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: 1.5, fontWeight: 700, color: done ? "#fff" : T.charge }}>
+          {done ? "REST'S UP — NEXT SET" : "RESTING"}
         </div>
+        <style>{`@keyframes restDonePulse { 0%, 100% { transform: scale(1); box-shadow: 0 8px 24px rgba(18,22,28,0.4); } 50% { transform: scale(1.03); box-shadow: 0 0 0 6px rgba(34,197,94,0.35); } }`}</style>
       </div>
       <button
         onClick={() => { setRestChimeMuted(!muted); setMuted(!muted); }}
@@ -4485,6 +4501,14 @@ function RestTimer({ seconds, total, onAdd, onSkip, onSeenFinish }) {
       >
         {muted ? <BellOff size={16} /> : <Bell size={16} />}
       </button>
+      {!done && onSubtract && (
+        <button
+          onClick={onSubtract} aria-label="Take 15 seconds off rest"
+          style={{ background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+        >
+          −15s
+        </button>
+      )}
       {!done && (
         <button
           onClick={onAdd} aria-label="Add 15 seconds to rest"
@@ -5309,6 +5333,15 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
             }}
             onAdd={() => setRest((r) => {
               const next = { ...r, endAt: r.endAt + 15000, total: r.total + 15 };
+              saveNow(setsRef.current, next);
+              scheduleRestChime((next.endAt - Date.now()) / 1000);
+              return next;
+            })}
+            // Real ask: "add a -15 seconds to the rest timer." Never past
+            // "now" — that's just the rest being over.
+            onSubtract={() => setRest((r) => {
+              const endAt = Math.max(Date.now(), r.endAt - 15000);
+              const next = { ...r, endAt, total: Math.max(1, r.total - Math.round((r.endAt - endAt) / 1000)) };
               saveNow(setsRef.current, next);
               scheduleRestChime((next.endAt - Date.now()) / 1000);
               return next;
@@ -6248,7 +6281,7 @@ export function photoFixMessages(photo, what) {
   const said = String(what || "").replace(/"/g, "'").trim().slice(0, 200);
   return [{ role: "user", content: [
     { type: "image", source: { type: "base64", media_type: photo.mediaType, data: photo.base64 } },
-    { type: "text", text: `Identify this meal and estimate its calories and macros. The person who ate it says: "${said}". Trust what they say about what the food is and how much over how it looks in the photo, and name the meal accordingly.` },
+    { type: "text", text: `Identify this meal and estimate its calories and macros. The person who ate it corrects you: "${said}". Their word beats how it looks — but it's a correction to the meal in the photo, not a new meal: estimate the WHOLE meal you see, with the portion sizes you can see, changing only what they corrected. Name the whole meal (a burger they say is fish is a "Fish burger", not "Fish"), and give real numbers for everything.` },
   ] }];
 }
 
@@ -6279,19 +6312,42 @@ export function unwrapToolInput(input) {
 // the review card and addMeal expect. The model sometimes nests the meal
 // ({"meal": {...}}) or calls the name something else ("food", "mealName"),
 // which used to leave it as "Meal"; fallbackName is what they typed.
+// Real reports: "sometimes I take a picture and it just says meal with no
+// numbers", and a fish burger corrected to "fish" came back named "Fish"
+// with no numbers. The answer had its numbers under other names
+// ("calories", "carbohydrates", "fats"), as text ("450 kcal"), or inside a
+// "nutrition"/"macros" section — all read now. MEAL_SCHEMA asks for the
+// exact fields in the first place.
 export function cleanAiMeal(raw, fallbackName = "") {
-  const m = raw?.meal && typeof raw.meal === "object" && !Array.isArray(raw.meal) ? { ...raw.meal, ...raw } : raw;
+  const nests = ["meal", "nutrition", "macros", "estimate", "nutrients", "totals"];
+  let m = raw && typeof raw === "object" ? { ...raw } : {};
+  for (const k of nests) if (m[k] && typeof m[k] === "object" && !Array.isArray(m[k])) m = { ...m[k], ...m };
+  const pick = (...keys) => keys.map((k) => m?.[k]).find((v) => mealNumber(v) > 0);
   const named = [m?.name, m?.mealName, m?.meal_name, m?.food, m?.title, typeof m?.meal === "string" ? m.meal : null]
     .map(asText).find(Boolean);
   return {
     name: named || asText(fallbackName) || "Meal",
     note: asText(m?.note),
-    cal: Math.round(mealNumber(m?.cal)),
-    protein: Math.round(mealNumber(m?.protein)),
-    carb: Math.round(mealNumber(m?.carb)),
-    fat: Math.round(mealNumber(m?.fat)),
+    cal: Math.round(mealNumber(pick("cal", "calories", "kcal", "energy", "cals"))),
+    protein: Math.round(mealNumber(pick("protein", "protein_g", "proteins"))),
+    carb: Math.round(mealNumber(pick("carb", "carbs", "carbohydrates", "carbohydrate", "carbs_g"))),
+    fat: Math.round(mealNumber(pick("fat", "fats", "fat_g", "total_fat"))),
   };
 }
+
+// The exact answer every meal estimate must give (see claudeChat's schema).
+export const MEAL_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string", description: "Short meal name, like a menu item, e.g. 'Fish burger'." },
+    cal: { type: "number", description: "Total calories." },
+    protein: { type: "number", description: "Grams of protein." },
+    carb: { type: "number", description: "Grams of carbohydrate." },
+    fat: { type: "number", description: "Grams of fat." },
+    note: { type: "string", description: "One short caveat about the estimate and the portion assumed." },
+  },
+  required: ["name", "cal", "protein", "carb", "fat", "note"],
+};
 
 // A meal's calories or a macro as a real number. Found while testing: the
 // meal-photo review card lets someone clear a box, which saved "" — and an AI
@@ -6299,7 +6355,9 @@ export function cleanAiMeal(raw, fallbackName = "") {
 // such value turned a sum into stuck-together text ("0" + 500 -> "0500").
 // Used by every total, so values already saved that way read correctly too.
 export function mealNumber(v) {
-  const n = Number(v);
+  let n = Number(v);
+  // "450 kcal", "~30g", "30.5 g" — the number at the front.
+  if (!Number.isFinite(n) && typeof v === "string") n = parseFloat(v.replace(/^[^\d.]+/, ""));
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -7112,9 +7170,16 @@ export async function runMealJob(userId, fields, { onOffline } = {}) {
   try {
     for (let attempt = 0; ; attempt++) {
       try {
-        const raw = await claudeChat({ ...mealJobRequest(job), model: LIGHT_MODEL });
-        const fallbackName = job.kind === "text" ? mealNameFromDescription(job.text) : job.kind === "fix" ? mealNameFromDescription(job.fix) : "";
+        // An answer with no numbers is tried once more on the main model
+        // before it's an error — never an empty card to fill in by hand.
+        const model = attempt === 0 ? LIGHT_MODEL : undefined; // undefined = the main model
+        const raw = await claudeChat({ ...mealJobRequest(job), model, schema: MEAL_SCHEMA });
+        const fallbackName = job.kind === "text" ? mealNameFromDescription(job.text) : job.kind === "fix" ? (job.prevName || mealNameFromDescription(job.fix)) : "";
         const result = cleanAiMeal(parseJSONLoose(raw), fallbackName);
+        if (!(result.cal > 0)) {
+          if (attempt === 0) continue;
+          throw new Error("no numbers");
+        }
         if (readMealJob(userId)?.id === job.id) writeMealJob(userId, { ...job, status: "ready", result });
         return;
       } catch (err) {
@@ -7219,7 +7284,8 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
         try {
           const raw = await claudeChat({
             system: MEAL_PHOTO_SYSTEM,
-        model: LIGHT_MODEL,
+            model: LIGHT_MODEL,
+            schema: MEAL_SCHEMA,
             messages: [{ role: "user", content: [
               { type: "image", source: { type: "base64", media_type: item.mediaType, data: item.base64 } },
               { type: "text", text: "Identify this meal and estimate its calories and macros." },
@@ -7291,7 +7357,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     if (!what || !lastPhoto) return;
     setLocalError(null);
     setPhotoFix("");
-    runMealJob(userId, { kind: "fix", fix: what, photo: lastPhoto });
+    runMealJob(userId, { kind: "fix", fix: what, photo: lastPhoto, prevName: photoResult?.name });
   }
 
   async function handlePhoto(e) {
@@ -7430,7 +7496,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
 
       {running && (
         <Card style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>{job.kind === "text" ? "Estimating your meal…" : "Analyzing your photo…"}</span>
+          <Loader2 size={16} className="spin" /> <span style={{ fontSize: 13, color: T.steelDark }}>{job.kind === "text" ? "Estimating your meal…" : job.kind === "fix" ? `Re-checking your photo with “${job.fix}”…` : "Analyzing your photo…"}</span>
         </Card>
       )}
       {pendingPhotos.length > 0 && (
@@ -7449,11 +7515,17 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
       )}
       {photoResult && (
         <Card style={{ marginTop: 12 }}>
-          <input
+          {/* Real ask: "the whole title should be seen if it's a lot of
+              writing, so you can read it all before you hit log." Wraps
+              onto as many lines as it needs instead of cutting off. */}
+          <textarea
             value={photoResult.name} aria-label="Meal name"
-            onChange={(e) => setPhotoResult({ ...photoResult, name: e.target.value })}
-            style={{ width: "100%", fontWeight: 700, fontSize: 15, color: T.ink, border: "none", borderBottom: `1px dashed ${T.steel}`, padding: "2px 0", background: "transparent", fontFamily: "'Inter', sans-serif", boxSizing: "border-box" }}
+            rows={1}
+            ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }}
+            onChange={(e) => setPhotoResult({ ...photoResult, name: e.target.value.replace(/\n/g, " ") })}
+            style={{ width: "100%", fontWeight: 700, fontSize: 15, color: T.ink, border: "none", borderBottom: `1px dashed ${T.steel}`, padding: "2px 0", background: "transparent", fontFamily: "'Inter', sans-serif", boxSizing: "border-box", resize: "none", overflow: "hidden", lineHeight: 1.35, display: "block" }}
           />
+          {job?.kind === "fix" && <div style={{ fontSize: 12, color: T.chargeDeep, marginTop: 4 }}>Re-checked from your photo, with your correction: “{job.fix}”. Portions are from the photo.</div>}
           {photoResult.note && <div style={{ fontSize: 12, color: T.steelDark, marginTop: 2 }}>{photoResult.note}</div>}
           {lastPhoto && (
             <div style={{ marginTop: 10 }}>
@@ -7925,6 +7997,17 @@ function ExerciseProgress({ logs, program }) {
   const [selected, setSelected] = useState(group?.exercises[0] || "");
   const exercise = group?.exercises.includes(selected) ? selected : group?.exercises[0];
   const isAll = group?.day === ALL_WORKOUTS;
+  // Real report: "when I choose the top workout I have to scroll all the way
+  // down to see the graph." In All workouts each muscle group folds up (only
+  // the one being looked at is open), and picking an exercise brings its
+  // graph into view.
+  const [openMuscle, setOpenMuscle] = useState(null);
+  const shownMuscle = openMuscle ?? (muscles.find((m) => m.exercises.includes(exercise))?.muscle || null);
+  const graphRef = useRef(null);
+  const pick = (n) => {
+    setSelected(n);
+    setTimeout(() => graphRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" }), 50);
+  };
 
   if (groups.length === 0) {
     return (
@@ -7963,10 +8046,19 @@ function ExerciseProgress({ logs, program }) {
       <p style={stepLabel}>2 · EXERCISE</p>
       <div aria-label="Exercise" style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
         {(isAll ? muscles : [{ muscle: "", label: "", exercises: group.exercises }]).flatMap((m) => [
-          ...(m.label ? [<div key={`h-${m.muscle}`} style={{ fontSize: 11, fontWeight: 700, color: T.steelDark, margin: "8px 0 2px" }}>{m.label}</div>] : []),
-          ...m.exercises.map((n) => (
+          ...(m.label ? [
+            <button
+              key={`h-${m.muscle}`} aria-expanded={shownMuscle === m.muscle}
+              onClick={() => setOpenMuscle(shownMuscle === m.muscle ? "" : m.muscle)}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "none", border: "none", borderTop: `1px solid ${T.steel}`, padding: "10px 2px", cursor: "pointer", fontSize: 13, fontWeight: 700, color: T.ink }}
+            >
+              <span>{m.label} <span style={{ color: T.steelDark, fontWeight: 500 }}>· {m.exercises.length}</span></span>
+              <ChevronDown size={16} color={T.steelDark} style={{ transform: shownMuscle === m.muscle ? "rotate(180deg)" : "none" }} />
+            </button>,
+          ] : []),
+          ...(m.label && shownMuscle !== m.muscle ? [] : m.exercises).map((n) => (
           <button
-            key={n} aria-pressed={n === exercise} onClick={() => setSelected(n)}
+            key={n} aria-pressed={n === exercise} onClick={() => pick(n)}
             style={{
               display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", textAlign: "left",
               padding: "10px 12px", borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600,
@@ -7980,7 +8072,7 @@ function ExerciseProgress({ logs, program }) {
           )),
         ])}
       </div>
-      <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 4 }}>
+      <div ref={graphRef} style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 4, scrollMarginTop: 80 }}>
         {exercise} <span style={{ color: T.steelDark, fontWeight: 500 }}>· top set each session, {isAll ? "all workouts" : group.day}</span>
       </div>
       {history.length >= 1 ? (

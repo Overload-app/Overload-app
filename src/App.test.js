@@ -133,6 +133,7 @@ import {
   hasCompletedSets,
   seedLoggedSets,
   dayChangeNote,
+  MEAL_SCHEMA,
   workoutGroupName,
   exercisesByMuscle,
   accumulateActiveSeconds,
@@ -4886,7 +4887,10 @@ describe("re-checking a photo with what it actually is", () => {
     const [msg] = photoFixMessages({ base64: "abc", mediaType: "image/jpeg" }, 'greek yogurt, not sour cream — "about a cup"');
     expect(msg.content[0]).toEqual({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "abc" } });
     expect(msg.content[1].text).toContain("greek yogurt, not sour cream — 'about a cup'");
-    expect(msg.content[1].text).toMatch(/Trust what they say/);
+    expect(msg.content[1].text).toMatch(/Their word beats how it looks/);
+    // Real worry: "I'm not sure it still uses the portions from the photo."
+    expect(msg.content[1].text).toMatch(/portion sizes you can see/);
+    expect(msg.content[1].text).toMatch(/Fish burger/);
   });
   test("the corrected name comes from their words if the AI gives none", () => {
     expect(cleanAiMeal({ cal: 150, protein: 20 }, mealNameFromDescription("greek yogurt (plain, 2%)")).name).toBe("Greek yogurt");
@@ -5274,5 +5278,20 @@ describe("Progress by workout, one-time versions, and all workouts", () => {
     const groups = exercisesByMuscle(logs, program);
     expect(groups.map((g) => g.label)).toEqual(["Back", "Biceps"]);
     expect(groups[0].exercises).toEqual(["Barbell Row", "Dumbbell Row", "Lat Pulldown"]);
+  });
+});
+
+// Real reports: a photo "just says meal with no numbers", and a fish burger
+// corrected to "fish" came back named "Fish" with no numbers.
+describe("meal estimates whatever shape the answer comes in", () => {
+  test("other names for the numbers, numbers written as text, and nested sections are all read", () => {
+    expect(cleanAiMeal({ name: "Fish burger", calories: "520 kcal", carbohydrates: 48, fats: "22g", protein_g: 28 })).toMatchObject({ name: "Fish burger", cal: 520, carb: 48, fat: 22, protein: 28 });
+    expect(cleanAiMeal({ name: "Greek yogurt", nutrition: { calories: 150, protein: 20, carbs: 9, fat: 4 } })).toMatchObject({ cal: 150, protein: 20, carb: 9, fat: 4 });
+    expect(cleanAiMeal({ meal: { name: "Oats", macros: { kcal: 300, protein: 10, carb: 50, fat: 6 } } })).toMatchObject({ name: "Oats", cal: 300, protein: 10 });
+    expect(mealNumber("~30.5 g")).toBe(30.5);
+    expect(mealNumber("none")).toBe(0);
+  });
+  test("every meal estimate asks for the exact fields", () => {
+    expect(MEAL_SCHEMA.required).toEqual(["name", "cal", "protein", "carb", "fat", "note"]);
   });
 });

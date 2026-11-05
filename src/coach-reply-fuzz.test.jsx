@@ -288,6 +288,30 @@ describe("the Coach survives every kind of bad AI reply", () => {
     expect(stored.logs.nutrition[0].meals.length).toBeGreaterThanOrEqual(mealsBefore);
   }, 20000);
 
+  // Real report: "sometimes it just says meal with no numbers."
+  test("an estimate with no numbers is retried on the main model, with the exact fields required", async () => {
+    const user = userEvent.setup();
+    const answers = [toolReply({ name: "Fish burger" }), toolReply({ name: "Fish burger", cal: 520, protein: 28, carb: 48, fat: 22, note: "one burger" })];
+    const bodies = [];
+    globalThis.fetch.mockImplementation(async (url, opts) => {
+      if (String(url).includes("/api/claude")) { bodies.push(JSON.parse(opts.body)); return answers.shift() || toolReply({}); }
+      return { ok: false, status: 503, json: async () => ({}) };
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Fuel$/ }));
+    await user.click(screen.getByText("Describe"));
+    await user.type(screen.getByPlaceholderText(/What did you eat/), "a fish burger");
+    await user.click(screen.getByText("Estimate"));
+    expect(await screen.findByDisplayValue("Fish burger")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("520")).toBeInTheDocument();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].model).toBe("claude-haiku-5-5");
+    expect(bodies[1].model).toBe("claude-sonnet-5");
+    expect(bodies[0].tools[0].input_schema.required).toContain("cal");
+    await user.click(screen.getByText("Discard"));
+  }, 20000);
+
   test("an estimate cut off by closing the app starts again when it reopens", async () => {
     const user = userEvent.setup();
     const { writeMealJob } = await import("./App.jsx");

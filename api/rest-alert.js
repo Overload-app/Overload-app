@@ -17,7 +17,13 @@ export const MAX_REST_SECONDS = 15 * 60;
 // One function can only run 5 minutes on Hobby. A longer rest is waited out
 // in legs: each one waits up to this long, checks the rest is still on, and
 // hands the remainder to a fresh call of this same endpoint.
-export const LEG_MS = 270 * 1000;
+export const LEG_MS = 220 * 1000;
+// Real report: "when it goes off I don't notice it sometimes, as it's just a
+// small buzz since I have ringer off." If the rest is still the current one
+// and they haven't come back to the app, it buzzes again, twice. Each check
+// re-reads their workout, so the next set, Skip or opening the app stops it.
+// Fits in one call with the last leg (220s + 3s + 50s < 300s).
+export const FOLLOW_UPS_MS = [20000, 50000];
 export const SELF_URL = "https://www.overload-app.com/api/rest-alert";
 // A little after the rest ends, so an app that's open and already cleared
 // the alert has had time to save that.
@@ -121,13 +127,16 @@ export default async function handler(req, res) {
       });
       return;
     }
-    await sendToSubscriptions(state.push.subscriptions, {
-      kind: "rest",
-      title: "Rest's up",
-      body: "Time for your next set 💪",
-      tag: "rest",
-      url: "/",
-    }, (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 60, urgency: "high" }));
+    const send = (subs, body) => sendToSubscriptions(subs, { kind: "rest", title: "Rest's up", body, tag: "rest", url: "/" },
+      (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 60, urgency: "high" }));
+    await send(state.push.subscriptions, "Time for your next set 💪");
+    const sentAt = Date.now();
+    for (const after of FOLLOW_UPS_MS) {
+      await sleep(sentAt + after - Date.now());
+      const { data: again } = await supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle();
+      if (!shouldSendRestAlert(again?.state, alert.endAt)) return;
+      await send(again.state.push.subscriptions, `Your rest ended ${Math.round((Date.now() - alert.endAt) / 1000)}s ago — next set!`);
+    }
   })().catch(() => {}));
   return res.status(202).json({ scheduled: true });
 }
