@@ -4469,61 +4469,74 @@ function RestTimer({ seconds, total, onAdd, onSubtract, onSkip, onSeenFinish }) 
     document.addEventListener("visibilitychange", seen);
     return () => document.removeEventListener("visibilitychange", seen);
   }, [done]);
+  const smallBtn = { background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 0", fontSize: 13, fontWeight: 700, cursor: "pointer", flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 4 };
   return (
-    <div
-      style={{
-        // Part of the footer, right above "Finish workout". Real report: when
-        // it floated over the screen it sat on top of Finish/Discard and the
-        // last sets, and the workout "got stuck" and couldn't be scrolled.
-        marginBottom: 12,
-        background: done ? T.good : T.ink,
-        // Real report: "when it goes off I don't notice it sometimes" (ringer
-        // off, so no sound in the app). The bar turns green and pulses.
-        animation: done ? "restDonePulse 0.9s ease-in-out infinite" : "none", color: "#fff", borderRadius: 16, padding: "10px 14px",
-        display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
-      }}
-    >
-      <div style={{ flexShrink: 0 }}>
-        <Ring value={pct} max={1} size={44} stroke={4} color={done ? "#fff" : T.charge}>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
-        </Ring>
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: 1.5, fontWeight: 700, color: done ? "#fff" : T.charge }}>
-          {done ? "REST'S UP — NEXT SET" : "RESTING"}
+    <>
+      <style>{`@keyframes restDonePulse { 0%, 100% { transform: scale(1); box-shadow: 0 8px 24px rgba(18,22,28,0.4); } 50% { transform: scale(1.03); box-shadow: 0 0 0 6px rgba(34,197,94,0.35); } }
+@keyframes restDoneFlash { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }`}</style>
+      {done && (
+        // Real report: "it still isn't obvious" when the rest ends. The whole
+        // screen gets a flashing green frame and a big banner at the top
+        // (iPhone web apps can't vibrate, so this has to be seen). Tapping
+        // the banner carries on, same as Continue.
+        <>
+          <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 60, pointerEvents: "none", boxShadow: `inset 0 0 0 8px ${T.good}, inset 0 0 60px rgba(34,197,94,0.55)`, animation: "restDoneFlash 0.8s ease-in-out infinite" }} />
+          <button
+            onClick={onSkip}
+            style={{ position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 12px)", left: 16, right: 16, zIndex: 61, background: T.good, color: "#fff", border: "none", borderRadius: 16, padding: "16px 14px", fontSize: 20, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.35)", animation: "restDonePulse 0.9s ease-in-out infinite" }}
+          >
+            REST'S UP — NEXT SET 💪
+          </button>
+        </>
+      )}
+      <div
+        style={{
+          // Part of the footer, right above "Finish workout". Real report: when
+          // it floated over the screen it sat on top of Finish/Discard and the
+          // last sets, and the workout "got stuck" and couldn't be scrolled.
+          marginBottom: 12,
+          background: done ? T.good : T.ink,
+          animation: done ? "restDonePulse 0.9s ease-in-out infinite" : "none", color: "#fff", borderRadius: 16, padding: "10px 14px",
+          boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
+        }}
+      >
+        {/* Two rows. Real report: on one row the "RESTING" label ran into the
+            sound button once the −15s button was added. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flexShrink: 0 }}>
+            <Ring value={pct} max={1} size={44} stroke={4} color={done ? "#fff" : T.charge}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
+            </Ring>
+          </div>
+          <div style={{ flex: 1, minWidth: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 1.5, fontWeight: 700, color: done ? "#fff" : T.charge }}>
+            {done ? "REST'S UP — NEXT SET" : "RESTING"}
+          </div>
+          <button
+            onClick={() => { setRestChimeMuted(!muted); setMuted(!muted); }}
+            aria-label={muted ? "Turn rest sound on" : "Turn rest sound off"}
+            style={{ background: "none", border: "none", color: muted ? "#5B6470" : "#B9BEC6", padding: 6, cursor: "pointer", flexShrink: 0, lineHeight: 0 }}
+          >
+            {muted ? <BellOff size={18} /> : <Bell size={18} />}
+          </button>
         </div>
-        <style>{`@keyframes restDonePulse { 0%, 100% { transform: scale(1); box-shadow: 0 8px 24px rgba(18,22,28,0.4); } 50% { transform: scale(1.03); box-shadow: 0 0 0 6px rgba(34,197,94,0.35); } }`}</style>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          {!done && onSubtract && (
+            <button onClick={onSubtract} aria-label="Take 15 seconds off rest" style={smallBtn}>−15s</button>
+          )}
+          {!done && (
+            <button onClick={onAdd} aria-label="Add 15 seconds to rest" style={smallBtn}>
+              <PlusCircle size={14} /> 15s
+            </button>
+          )}
+          <button
+            onClick={onSkip}
+            style={{ ...smallBtn, border: "none", background: done ? "#fff" : T.charge, color: done ? T.good : "#fff" }}
+          >
+            {done ? "Continue" : <>Skip <SkipForward size={14} /></>}
+          </button>
+        </div>
       </div>
-      <button
-        onClick={() => { setRestChimeMuted(!muted); setMuted(!muted); }}
-        aria-label={muted ? "Turn rest sound on" : "Turn rest sound off"}
-        style={{ background: "none", border: "none", color: muted ? "#5B6470" : "#B9BEC6", padding: 6, cursor: "pointer", flexShrink: 0, lineHeight: 0 }}
-      >
-        {muted ? <BellOff size={16} /> : <Bell size={16} />}
-      </button>
-      {!done && onSubtract && (
-        <button
-          onClick={onSubtract} aria-label="Take 15 seconds off rest"
-          style={{ background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
-        >
-          −15s
-        </button>
-      )}
-      {!done && (
-        <button
-          onClick={onAdd} aria-label="Add 15 seconds to rest"
-          style={{ background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}
-        >
-          <PlusCircle size={14} /> 15s
-        </button>
-      )}
-      <button
-        onClick={onSkip}
-        style={{ background: T.charge, border: "none", borderRadius: 8, color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}
-      >
-        {done ? "Continue" : <>Skip <SkipForward size={14} /></>}
-      </button>
-    </div>
+    </>
   );
 }
 
@@ -7971,6 +7984,26 @@ export function exerciseGroupsByDay(logs, program) {
 // groups. Real ask: "a spot that shows your total for that specific
 // exercise across all of the days … easy to find and categorized — I want
 // to see just my overall lat pulldown progress."
+// Real report: "why is the leg extension in the other category?" The shared
+// guesser only knows a few exact wordings, and the AI writes names like
+// "Quad Extension" or "Lying Hamstring Curl" (which it would even call
+// biceps). For Progress only, check the leg words first and fall back to
+// broad body-part words, so almost nothing lands in Other.
+export function progressMuscleFor(name) {
+  if (EXERCISE_TO_GROUP[name]) return EXERCISE_TO_GROUP[name];
+  const n = (name || "").toLowerCase();
+  if (/quad|hamstring|knee extension|leg ext|hip thrust|adduct|abduct|glute|calf|calves|nordic|good ?morning|hack squat|sissy|rdl|leg curl|leg press/.test(n)) return "legs";
+  if (/upright row|delt|shoulder/.test(n)) return "shoulders";
+  if (/shrug|back extension|hyperextension|\blats?\b|lat pull|chin|t-?bar/.test(n)) return "back";
+  const guess = inferMuscleGroup(name);
+  if (guess) return guess;
+  if (/chest|pec/.test(n)) return "chest";
+  if (/bicep|preacher/.test(n)) return "biceps";
+  if (/tricep/.test(n)) return "triceps";
+  if (/\babs?\b|oblique|core|hollow|dead ?bug|pallof|wood ?chop|v-?up|hanging knee/.test(n)) return "core";
+  if (/\blegs?\b|squat|lunge/.test(n)) return "legs";
+  return "other";
+}
 export const PROGRESS_MUSCLES = [["chest", "Chest"], ["back", "Back"], ["shoulders", "Shoulders"], ["legs", "Legs"], ["biceps", "Biceps"], ["triceps", "Triceps"], ["core", "Core"], ["other", "Other"]];
 export function exercisesByMuscle(logs, program) {
   const all = [];
@@ -7979,7 +8012,7 @@ export function exercisesByMuscle(logs, program) {
   }
   const groups = new Map();
   for (const n of all) {
-    const m = EXERCISE_TO_GROUP[n] || inferMuscleGroup(n) || "other";
+    const m = progressMuscleFor(n);
     const key = PROGRESS_MUSCLES.some(([k]) => k === m) ? m : "other";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(n);

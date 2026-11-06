@@ -23,7 +23,10 @@ export const LEG_MS = 220 * 1000;
 // and they haven't come back to the app, it buzzes again, twice. Each check
 // re-reads their workout, so the next set, Skip or opening the app stops it.
 // Fits in one call with the last leg (220s + 3s + 50s < 300s).
-export const FOLLOW_UPS_MS = [20000, 50000];
+// Real report: "I don't notice the rest timer because of the way it buzzes."
+// An iPhone gives one short tap per notification, so there are more of them,
+// closer together. 220s (longest wait) + 45s stays under maxDuration.
+export const FOLLOW_UPS_MS = [10000, 25000, 45000];
 export const SELF_URL = "https://www.overload-app.com/api/rest-alert";
 // A little after the rest ends, so an app that's open and already cleared
 // the alert has had time to save that.

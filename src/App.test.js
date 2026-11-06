@@ -136,6 +136,7 @@ import {
   MEAL_SCHEMA,
   workoutGroupName,
   exercisesByMuscle,
+  progressMuscleFor,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -5293,5 +5294,21 @@ describe("meal estimates whatever shape the answer comes in", () => {
   });
   test("every meal estimate asks for the exact fields", () => {
     expect(MEAL_SCHEMA.required).toEqual(["name", "cal", "protein", "carb", "fat", "note"]);
+  });
+});
+
+describe("Progress muscle groups — AI-written names", () => {
+  // Real report: "why is the leg extension in the other category?"
+  test.each([
+    ["Leg Extension", "legs"], ["Leg Extensions", "legs"], ["Quad Extension", "legs"],
+    ["Machine Quad Extensions", "legs"], ["Seated Leg Extension (Machine)", "legs"],
+    ["Lying Hamstring Curl", "legs"], ["Seated Hamstring Curl", "legs"], ["Hip Thrust", "legs"],
+    ["Hip Adduction Machine", "legs"], ["Upright Row", "shoulders"], ["Cable Lateral Raise", "shoulders"],
+    ["Barbell Shrug", "back"], ["Lat Pulldown", "back"], ["Back Extension", "back"],
+    ["Preacher Curl", "biceps"], ["Bicep Curl", "biceps"], ["Pec Deck", "chest"],
+    ["Incline Dumbbell Press", "chest"], ["Rope Tricep Extension", "triceps"],
+    ["Hanging Knee Raise", "core"], ["Cable Woodchop", "core"], ["Farmer's Carry", "other"],
+  ])("%s → %s", (name, muscle) => {
+    expect(progressMuscleFor(name)).toBe(muscle);
   });
 });

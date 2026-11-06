@@ -30,7 +30,7 @@ describe("rest chime on iPhone", () => {
     ctx.state = "interrupted";
     chime.scheduleRestChime(60);
     expect(ctx.resumed).toBe(1);
-    expect(ctx.started.at(-2)).toBe(160);
+    expect(ctx.started.at(-6)).toBe(160);
   });
 
   test("a closed sound is replaced rather than left silent", () => {
@@ -38,7 +38,7 @@ describe("rest chime on iPhone", () => {
     made[0].state = "closed";
     chime.scheduleRestChime(30);
     expect(made).toHaveLength(2);
-    expect(made[1].started.length).toBe(2);
+    expect(made[1].started.length).toBe(6);
   });
 
   test("coming back to the app mid-rest sets the chime up again for the time left", () => {
@@ -49,8 +49,8 @@ describe("rest chime on iPhone", () => {
     vi.setSystemTime(new Date("2026-10-27T12:00:30Z"));
     Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(made[0].started.length).toBe(before + 2);
-    expect(made[0].started.at(-2)).toBeCloseTo(160, 0);
+    expect(made[0].started.length).toBe(before + 6);
+    expect(made[0].started.at(-6)).toBeCloseTo(160, 0);
     vi.useRealTimers();
   });
 
@@ -67,7 +67,7 @@ describe("rest chime on iPhone", () => {
     made[0].state = "interrupted";
     chime.buzzRestDone();
     await new Promise((r) => setTimeout(r, 0));
-    expect(made[0].started.at(-2)).toBe(100);
+    expect(made[0].started.at(-6)).toBe(100);
   });
 
   test("muted stays muted", () => {

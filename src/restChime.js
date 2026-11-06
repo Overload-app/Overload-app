@@ -66,14 +66,16 @@ export function scheduleRestChime(secondsFromNow) {
     const ctx = liveContext();
     if (!ctx) return;
     const at = ctx.currentTime + Math.max(0, Number(secondsFromNow) || 0);
-    // Two short rising notes — noticeable over gym music, not alarming.
-    [[0, 880], [0.18, 1175]].forEach(([offset, freq]) => {
+    // Real report: "I don't notice the rest timer." Two short notes were easy
+    // to miss over gym music, so they're louder and played three times
+    // (about two seconds in all).
+    [0, 0.7, 1.4].flatMap((r) => [[r, 880], [r + 0.18, 1175]]).forEach(([offset, freq]) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
       osc.frequency.value = freq;
       gain.gain.setValueAtTime(0.0001, at + offset);
-      gain.gain.exponentialRampToValueAtTime(0.3, at + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.6, at + offset + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, at + offset + 0.28);
       osc.connect(gain);
       gain.connect(ctx.destination);
