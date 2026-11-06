@@ -233,7 +233,11 @@ describe("<Progress />", () => {
     expect(screen.getByText("Biceps")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Lat Pulldown/ }));
     expect(screen.getByText(/top set each session, all workouts/)).toBeInTheDocument();
-    expect(screen.getByText("+10lb")).toBeInTheDocument();
+    // In two workouts: one row each, so it's clear which weight was which day.
+    const byWorkout = screen.getByLabelText("By workout");
+    expect(within(byWorkout).getByText(/^Pull/)).toBeInTheDocument();
+    expect(within(byWorkout).getByText(/^Back & Arms/)).toBeInTheDocument();
+    expect(within(byWorkout).getByText(/Latest 110lb × 8/)).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Pull · one-time" }));
     expect(screen.getByRole("button", { name: /Dumbbell Row/ })).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Pull" }));

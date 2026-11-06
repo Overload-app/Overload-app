@@ -137,6 +137,7 @@ import {
   workoutGroupName,
   exercisesByMuscle,
   progressMuscleFor,
+  historyByWorkout,
   accumulateActiveSeconds,
   formatDuration,
   recentProgressHighlights,
@@ -3779,7 +3780,7 @@ describe("exercisePR", () => {
   };
 
   test("returns the heaviest set ever logged, across all workouts, not just the most recent", () => {
-    expect(exercisePR(logs, "Back Squat")).toEqual({ date: "2026-01-08", dateLabel: "01-08", weight: 165, reps: 5 });
+    expect(exercisePR(logs, "Back Squat")).toMatchObject({ date: "2026-01-08", dateLabel: "01-08", weight: 165, reps: 5 });
   });
 
   test("ties on weight are broken by more reps — that's the harder set to have actually beaten", () => {
@@ -5310,5 +5311,25 @@ describe("Progress muscle groups — AI-written names", () => {
     ["Hanging Knee Raise", "core"], ["Cable Woodchop", "core"], ["Farmer's Carry", "other"],
   ])("%s → %s", (name, muscle) => {
     expect(progressMuscleFor(name)).toBe(muscle);
+  });
+});
+
+describe("Progress — same exercise in two workouts", () => {
+  // Real report: incline dumbbell press in two workouts with different reps
+  // made it confusing which weights were from which day.
+  const ex = (reps, weight, r) => ({ name: "Incline Dumbbell Press", reps, logged: [{ weight, reps: r, done: true }] });
+  const logs = { workouts: [
+    { date: "2026-10-01", dayName: "Push A", exercises: [ex("6-8", 60, 8)] },
+    { date: "2026-10-03", dayName: "Upper B", exercises: [ex("10-12", 45, 12)] },
+    { date: "2026-10-08", dayName: "Push A", exercises: [ex("6-8", 65, 7)] },
+    { date: "2026-10-10", dayName: "Upper B", exercises: [ex("10-12", 50, 10)] },
+  ] };
+  test("each workout gets its own line, rep target and first → latest", () => {
+    const per = historyByWorkout(exerciseHistory(logs, "Incline Dumbbell Press"));
+    expect(per.map((w) => [w.day, w.target, w.first.weight, w.latest.weight, w.delta])).toEqual([
+      ["Push A", "6-8", 60, 65, 5],
+      ["Upper B", "10-12", 45, 50, 5],
+    ]);
+    expect(new Set(per.map((w) => w.color)).size).toBe(2);
   });
 });

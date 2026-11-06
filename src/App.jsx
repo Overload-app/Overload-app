@@ -4472,31 +4472,15 @@ function RestTimer({ seconds, total, onAdd, onSubtract, onSkip, onSeenFinish }) 
   const smallBtn = { background: "none", border: "1px solid #3A4048", borderRadius: 8, color: "#fff", padding: "8px 0", fontSize: 13, fontWeight: 700, cursor: "pointer", flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 4 };
   return (
     <>
-      <style>{`@keyframes restDonePulse { 0%, 100% { transform: scale(1); box-shadow: 0 8px 24px rgba(18,22,28,0.4); } 50% { transform: scale(1.03); box-shadow: 0 0 0 6px rgba(34,197,94,0.35); } }
-@keyframes restDoneFlash { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }`}</style>
-      {done && (
-        // Real report: "it still isn't obvious" when the rest ends. The whole
-        // screen gets a flashing green frame and a big banner at the top
-        // (iPhone web apps can't vibrate, so this has to be seen). Tapping
-        // the banner carries on, same as Continue.
-        <>
-          <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 60, pointerEvents: "none", boxShadow: `inset 0 0 0 8px ${T.good}, inset 0 0 60px rgba(34,197,94,0.55)`, animation: "restDoneFlash 0.8s ease-in-out infinite" }} />
-          <button
-            onClick={onSkip}
-            style={{ position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 12px)", left: 16, right: 16, zIndex: 61, background: T.good, color: "#fff", border: "none", borderRadius: 16, padding: "16px 14px", fontSize: 20, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.35)", animation: "restDonePulse 0.9s ease-in-out infinite" }}
-          >
-            REST'S UP — NEXT SET 💪
-          </button>
-        </>
-      )}
       <div
         style={{
           // Part of the footer, right above "Finish workout". Real report: when
           // it floated over the screen it sat on top of Finish/Discard and the
           // last sets, and the workout "got stuck" and couldn't be scrolled.
           marginBottom: 12,
-          background: done ? T.good : T.ink,
-          animation: done ? "restDonePulse 0.9s ease-in-out infinite" : "none", color: "#fff", borderRadius: 16, padding: "10px 14px",
+          // Real ask: "get rid of the green after the rest, go back to how it
+          // normally is — it doesn't buzz enough" (that's the notification).
+          background: T.ink, color: "#fff", borderRadius: 16, padding: "10px 14px",
           boxShadow: "0 8px 24px rgba(18,22,28,0.4)",
         }}
       >
@@ -4504,11 +4488,11 @@ function RestTimer({ seconds, total, onAdd, onSubtract, onSkip, onSeenFinish }) 
             sound button once the −15s button was added. */}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flexShrink: 0 }}>
-            <Ring value={pct} max={1} size={44} stroke={4} color={done ? "#fff" : T.charge}>
+            <Ring value={pct} max={1} size={44} stroke={4} color={T.charge}>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 700 }}>{Math.max(0, seconds)}</span>
             </Ring>
           </div>
-          <div style={{ flex: 1, minWidth: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 1.5, fontWeight: 700, color: done ? "#fff" : T.charge }}>
+          <div style={{ flex: 1, minWidth: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: 1.5, fontWeight: 700, color: T.charge }}>
             {done ? "REST'S UP — NEXT SET" : "RESTING"}
           </div>
           <button
@@ -4530,7 +4514,7 @@ function RestTimer({ seconds, total, onAdd, onSubtract, onSkip, onSeenFinish }) 
           )}
           <button
             onClick={onSkip}
-            style={{ ...smallBtn, border: "none", background: done ? "#fff" : T.charge, color: done ? T.good : "#fff" }}
+            style={{ ...smallBtn, border: "none", background: T.charge, color: "#fff" }}
           >
             {done ? "Continue" : <>Skip <SkipForward size={14} /></>}
           </button>
@@ -7702,7 +7686,7 @@ export function exerciseHistory(logs, name, group) {
       // Heaviest set; on a tie, the one with more reps. Real report: 30x10,
       // 30x10, 30x10, 30x12 showed the record as 30lb x 10.
       const top = withWeight.reduce((max, l) => (Number(l.weight) > Number(max.weight) || (Number(l.weight) === Number(max.weight) && Number(l.reps) > Number(max.reps)) ? l : max), withWeight[0]);
-      return { date: w.date, dateLabel: w.date.slice(5), weight: Number(top.weight), reps: Number(top.reps) };
+      return { date: w.date, dateLabel: w.date.slice(5), weight: Number(top.weight), reps: Number(top.reps), day: workoutGroupName(w), target: ex.reps || "" };
     })
     .filter(Boolean)
     .sort((a, b) => (a.date > b.date ? 1 : -1));
@@ -8021,6 +8005,21 @@ export function exercisesByMuscle(logs, program) {
 }
 
 export const ALL_WORKOUTS = "All workouts";
+// Real report: "I have incline dumbbell press in two of my workouts, and it's
+// confusing when I did what weights and what days, because the two days are
+// a different amount of reps." In All workouts, each workout gets its own
+// colored line and its own first → latest, with its rep target.
+export const DAY_LINE_COLORS = ["#6C5CE7", "#F59E0B", "#0EA5E9", "#EC4899", "#10B981"];
+export function historyByWorkout(history) {
+  const days = [];
+  for (const h of history) if (!days.includes(h.day)) days.push(h.day);
+  return days.map((day, i) => {
+    const rows = history.filter((h) => h.day === day);
+    const first = rows[0];
+    const latest = rows[rows.length - 1];
+    return { day, key: `d${i}`, color: DAY_LINE_COLORS[i % DAY_LINE_COLORS.length], target: latest.target, first, latest, delta: latest.weight - first.weight, sessions: rows.length };
+  });
+}
 function ExerciseProgress({ logs, program }) {
   const dayGroups = exerciseGroupsByDay(logs, program);
   const muscles = exercisesByMuscle(logs, program);
@@ -8057,6 +8056,14 @@ function ExerciseProgress({ logs, program }) {
   const first = history[0];
   const latest = history[history.length - 1];
   const delta = first && latest ? latest.weight - first.weight : 0;
+  const perWorkout = isAll ? historyByWorkout(history) : [];
+  const split = perWorkout.length > 1;
+  const chartData = split
+    ? history.map((h) => {
+        const w = perWorkout.find((p) => p.day === h.day);
+        return { dateLabel: h.dateLabel, [w.key]: h.weight, [`${w.key}r`]: h.reps };
+      })
+    : history;
   const chip = (active) => ({
     flexShrink: 0, padding: "7px 12px", borderRadius: 999, border: `1.5px solid ${active ? T.charge : T.steel}`,
     background: active ? T.charge : "#fff", color: active ? "#fff" : T.ink, fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
@@ -8111,14 +8118,48 @@ function ExerciseProgress({ logs, program }) {
       {history.length >= 1 ? (
         <>
           <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={history} margin={CHART_MARGIN}>
+            <LineChart data={chartData} margin={CHART_MARGIN}>
               <CartesianGrid stroke={T.steel} strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="dateLabel" tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} />
               <YAxis tick={{ fontSize: 10, fontFamily: "JetBrains Mono" }} stroke={T.steelDark} domain={["dataMin - 5", "dataMax + 5"]} width={36} />
-              <Tooltip contentStyle={{ fontFamily: "Inter", fontSize: 12, borderRadius: 8 }} formatter={(v, k, p) => [`${v} lb × ${p.payload.reps}`, "Top set"]} />
-              <Line type="monotone" dataKey="weight" stroke={T.charge} strokeWidth={3} dot={{ r: 3, fill: T.charge }} />
+              {split ? (
+                <>
+                  <Tooltip contentStyle={{ fontFamily: "Inter", fontSize: 12, borderRadius: 8 }} formatter={(v, k, p) => [`${v} lb × ${p.payload[`${k}r`]}`, perWorkout.find((w) => w.key === k)?.day]} />
+                  {perWorkout.map((w) => (
+                    <Line key={w.key} type="monotone" dataKey={w.key} name={w.key} stroke={w.color} strokeWidth={3} dot={{ r: 3, fill: w.color }} connectNulls />
+                  ))}
+                </>
+              ) : (
+                <>
+                  <Tooltip contentStyle={{ fontFamily: "Inter", fontSize: 12, borderRadius: 8 }} formatter={(v, k, p) => [`${v} lb × ${p.payload.reps}`, "Top set"]} />
+                  <Line type="monotone" dataKey="weight" stroke={T.charge} strokeWidth={3} dot={{ r: 3, fill: T.charge }} />
+                </>
+              )}
             </LineChart>
           </ResponsiveContainer>
+          {split ? (
+            <div aria-label="By workout" style={{ marginTop: 10 }}>
+              {perWorkout.map((w) => (
+                <div key={w.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 0", borderTop: `1px solid ${T.steel}`, fontSize: 12, color: T.steelDark }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 5, background: w.color, flexShrink: 0, marginTop: 3 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>
+                      {w.day}{w.target ? <span style={{ color: T.steelDark, fontWeight: 500 }}> · {w.target} reps</span> : null}
+                    </div>
+                    <div>
+                      {w.sessions > 1 ? <>{w.first.weight}lb × {w.first.reps} → </> : null}
+                      Latest {w.latest.weight}lb × {w.latest.reps} <span style={{ color: T.steelDark }}>({w.latest.dateLabel})</span>
+                      {w.sessions > 1 && (
+                        <span style={{ marginLeft: 6, color: w.delta > 0 ? T.good : w.delta < 0 ? T.warn : T.steelDark, fontWeight: 700 }}>
+                          {w.delta > 0 ? "+" : ""}{w.delta}lb
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: T.steelDark, gap: 8 }}>
             <span>First: {first.weight}lb × {first.reps}</span>
             {history.length > 1 && (
@@ -8128,6 +8169,7 @@ function ExerciseProgress({ logs, program }) {
             )}
             <span>Latest: {latest.weight}lb × {latest.reps}</span>
           </div>
+          )}
         </>
       ) : (
         <p style={{ color: T.steelDark, fontSize: 13, textAlign: "center", margin: "12px 0" }}>No checked-off sets for this one yet.</p>

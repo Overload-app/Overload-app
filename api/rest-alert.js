@@ -23,10 +23,10 @@ export const LEG_MS = 220 * 1000;
 // and they haven't come back to the app, it buzzes again, twice. Each check
 // re-reads their workout, so the next set, Skip or opening the app stops it.
 // Fits in one call with the last leg (220s + 3s + 50s < 300s).
-// Real report: "I don't notice the rest timer because of the way it buzzes."
-// An iPhone gives one short tap per notification, so there are more of them,
-// closer together. 220s (longest wait) + 45s stays under maxDuration.
-export const FOLLOW_UPS_MS = [10000, 25000, 45000];
+// Real asks: "it doesn't buzz enough" and "get rid of the buzzes that say how
+// long ago the rest ended — they go off while you're doing the workout."
+// So: no late reminders, just a second buzz a few seconds after the first.
+export const SECOND_BUZZ_MS = 3000;
 export const SELF_URL = "https://www.overload-app.com/api/rest-alert";
 // A little after the rest ends, so an app that's open and already cleared
 // the alert has had time to save that.
@@ -133,13 +133,10 @@ export default async function handler(req, res) {
     const send = (subs, body) => sendToSubscriptions(subs, { kind: "rest", title: "Rest's up", body, tag: "rest", url: "/" },
       (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 60, urgency: "high" }));
     await send(state.push.subscriptions, "Time for your next set 💪");
-    const sentAt = Date.now();
-    for (const after of FOLLOW_UPS_MS) {
-      await sleep(sentAt + after - Date.now());
-      const { data: again } = await supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle();
-      if (!shouldSendRestAlert(again?.state, alert.endAt)) return;
-      await send(again.state.push.subscriptions, `Your rest ended ${Math.round((Date.now() - alert.endAt) / 1000)}s ago — next set!`);
-    }
+    await sleep(SECOND_BUZZ_MS);
+    const { data: again } = await supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle();
+    if (!shouldSendRestAlert(again?.state, alert.endAt)) return;
+    await send(again.state.push.subscriptions, "Next set 💪");
   })().catch(() => {}));
   return res.status(202).json({ scheduled: true });
 }
