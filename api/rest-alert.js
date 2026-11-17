@@ -18,15 +18,19 @@ export const MAX_REST_SECONDS = 15 * 60;
 // in legs: each one waits up to this long, checks the rest is still on, and
 // hands the remainder to a fresh call of this same endpoint.
 export const LEG_MS = 220 * 1000;
-// Real report: "when it goes off I don't notice it sometimes, as it's just a
-// small buzz since I have ringer off." If the rest is still the current one
-// and they haven't come back to the app, it buzzes again, twice. Each check
-// re-reads their workout, so the next set, Skip or opening the app stops it.
-// Fits in one call with the last leg (220s + 3s + 50s < 300s).
-// Real asks: "it doesn't buzz enough" and "get rid of the buzzes that say how
-// long ago the rest ended — they go off while you're doing the workout."
-// So: no late reminders, just a second buzz a few seconds after the first.
-export const SECOND_BUZZ_MS = 3000;
+// Real asks, in order: "doesn't buzz enough", then "get rid of the buzzes
+// that say how long ago the rest ended", then "I only want ONE notification
+// for rests — make it aggressive and obvious." One notification, loud title,
+// naming the next exercise and set, kept on screen until dismissed where
+// the phone allows it (see public/push-sw.js).
+export function nextSetLabel(state) {
+  const sets = state?.inProgressWorkout?.sets || [];
+  for (const ex of sets) {
+    const i = (ex?.logged || []).findIndex((l) => !l?.done);
+    if (i !== -1) return `${ex.name} · set ${i + 1}`;
+  }
+  return "";
+}
 export const SELF_URL = "https://www.overload-app.com/api/rest-alert";
 // A little after the rest ends, so an app that's open and already cleared
 // the alert has had time to save that.
@@ -77,6 +81,26 @@ export function internalCaller(req, secret) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
+// Today's date where the person is (duplicated from push-cron.js on purpose).
+function localDay(timeZone) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: timeZone || "UTC", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  } catch (e) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+// Real report: "the reminders are still inconsistent in every aspect,
+// something is weird about it." There was no way to tell a reminder that was
+// never sent from one the phone dropped. The You page now shows the last few
+// days of what the server sent (push_sent) and what a phone refused
+// (error_logs, type push-failed), straight from the server.
+export function reminderHistory(sentRows, failedRows) {
+  const sent = (sentRows || []).map((r) => ({ kind: String(r.kind || ""), at: r.sent_at, ok: true }));
+  const failed = (failedRows || []).map((r) => ({ kind: String(r.context?.kind || "reminder"), at: r.created_at, ok: false, codes: r.context?.codes || [] }));
+  return [...sent, ...failed].filter((e) => e.at).sort((a, b) => (a.at > b.at ? -1 : 1)).slice(0, 40);
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const privateKey = process.env.VAPID_PRIVATE_KEY;
@@ -97,6 +121,20 @@ export default async function handler(req, res) {
     } catch (e) {
       return res.status(401).json({ error: "Not signed in." });
     }
+  }
+  if (req.body?.history === true) {
+    const since = new Date(Date.now() - 3 * 86400000).toISOString();
+    const [sentQ, failQ, stateQ] = await Promise.all([
+      supabaseAdmin.from("push_sent").select("kind, day, sent_at").eq("user_id", userId).gte("sent_at", since).order("sent_at", { ascending: false }).limit(40),
+      supabaseAdmin.from("error_logs").select("created_at, context").eq("user_id", userId).eq("context->>type", "push-failed").gte("created_at", since).order("created_at", { ascending: false }).limit(20),
+      supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle(),
+    ]);
+    const push = stateQ.data?.state?.push || {};
+    return res.status(200).json({
+      entries: reminderHistory(sentQ.data, failQ.data),
+      devices: (push.subscriptions || []).length,
+      tz: push.tz || null,
+    });
   }
   // "Send a test notification" on the You page: one buzz a few seconds from
   // now (time to lock the phone), to everything this account has linked.
@@ -130,13 +168,22 @@ export default async function handler(req, res) {
       });
       return;
     }
-    const send = (subs, body) => sendToSubscriptions(subs, { kind: "rest", title: "Rest's up", body, tag: "rest", url: "/" },
-      (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 60, urgency: "high" }));
-    await send(state.push.subscriptions, "Time for your next set 💪");
-    await sleep(SECOND_BUZZ_MS);
-    const { data: again } = await supabaseAdmin.from("app_state").select("state").eq("user_id", userId).maybeSingle();
-    if (!shouldSendRestAlert(again?.state, alert.endAt)) return;
-    await send(again.state.push.subscriptions, "Next set 💪");
+    const next = nextSetLabel(state);
+    const subs = state.push.subscriptions || [];
+    const codes = [];
+    const ok = await sendToSubscriptions(subs, {
+      kind: "rest", title: "⏰ REST'S UP — GO! 💪", body: next ? `Next: ${next}` : "Time for your next set", tag: "rest", url: "/", loud: true,
+    }, (sub, payload) => webpush.sendNotification(sub, payload, { TTL: 60, urgency: "high" }).catch((e) => { codes.push(e?.statusCode || null); throw e; }));
+    // Into the same history as the scheduled reminders (see reminderHistory).
+    if (ok > 0) {
+      await Promise.resolve(supabaseAdmin.from("push_sent").upsert([{ user_id: userId, kind: `rest:${alert.endAt}`, day: localDay(state.push.tz) }], { onConflict: "user_id,kind,day", ignoreDuplicates: true })).catch(() => {});
+    }
+    if (codes.length > 0) {
+      await Promise.resolve(supabaseAdmin.from("error_logs").insert({
+        user_id: userId, message: `Rest alert refused by ${codes.length} of ${subs.length} device(s)`,
+        context: { type: "push-failed", kind: "rest", codes },
+      })).catch(() => {});
+    }
   })().catch(() => {}));
   return res.status(202).json({ scheduled: true });
 }

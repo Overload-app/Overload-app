@@ -97,7 +97,7 @@ describe("an account saved before the pre-launch changes", () => {
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 5000 });
     await user.click(tab("Train"));
     // One workout logged -> next scheduled is Pull (index 1).
-    expect(screen.getAllByText("ONE-TIME CHANGE").length).toBe(1);
+    expect(screen.getAllByText("ONE-TIME CHANGE · SEE WHAT").length).toBe(1);
     noCrash();
   }, 30000);
 

@@ -161,7 +161,7 @@ function recordSpend(supabaseAdmin, userId, today, usage, model) {
 // Same reasoning as before: a full program generation is a genuinely large
 // response, and Vercel's 10s default would kill it server-side no matter
 // what the client does.
-export const config = { maxDuration: 60 };
+export const config = { maxDuration: 110 };
 
 // Passes Anthropic's server-sent events straight through to the browser as
 // they arrive, rather than waiting for the whole reply. Also reads the token

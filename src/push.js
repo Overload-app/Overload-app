@@ -89,6 +89,21 @@ export async function requestTestNotification(delaySeconds = 10) {
   if (!res.ok) throw new Error("Couldn't send a test right now — try again in a minute.");
 }
 
+// The last few days of what the server sent this account, and what a phone
+// refused (see reminderHistory in api/rest-alert.js).
+export async function fetchReminderHistory() {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+  if (!token) throw new Error("Sign in again, then try that.");
+  const res = await fetch("/api/rest-alert", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ history: true }),
+  });
+  if (!res.ok) throw new Error("Couldn't load your reminder history right now.");
+  return res.json();
+}
+
 export async function requestRestAlert(endAt) {
   try {
     const { data } = await supabase.auth.getSession();

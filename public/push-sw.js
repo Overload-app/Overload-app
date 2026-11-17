@@ -22,6 +22,10 @@ self.addEventListener("push", (event) => {
     icon: "/icon-192.png",
     badge: "/icon-192.png",
     data: { url: data.url || "/" },
+    // Rest alerts: "make it aggressive and obvious." Stays up until dismissed
+    // and gives a long buzz where the phone allows it (Android, desktop;
+    // iPhone ignores both and gives its normal notification buzz).
+    ...(data.loud ? { requireInteraction: true, vibrate: [400, 150, 400, 150, 400], renotify: true } : {}),
   })));
 });
 
@@ -31,7 +35,11 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     for (const client of windows) {
-      if ("focus" in client) return client.focus();
+      if ("focus" in client) {
+        // The app switches to the screen the notification is about.
+        try { client.postMessage({ type: "go", url }); } catch (e) {}
+        return client.focus();
+      }
     }
     if (self.clients.openWindow) return self.clients.openWindow(url);
   })());

@@ -359,3 +359,29 @@ describe("reminders due at the same time", () => {
     expect(combineReminders([fake("reminder"), fake("weighin"), fake("food")])[0].note.title).toBe("Time to train, weigh in and log your food ⏰");
   });
 });
+
+import { nextSetLabel } from "./rest-alert.js";
+describe("rest alert names the next set", () => {
+  test("first exercise with an unchecked set", () => {
+    const state = { inProgressWorkout: { sets: [
+      { name: "Lat Pulldown", logged: [{ done: true }, { done: true }] },
+      { name: "Renegade Row", logged: [{ done: true }, { done: false }, { done: false }] },
+    ] } };
+    expect(nextSetLabel(state)).toBe("Renegade Row · set 2");
+    expect(nextSetLabel({})).toBe("");
+  });
+});
+
+import { reminderHistory } from "./rest-alert.js";
+describe("reminder history", () => {
+  test("sent and refused, newest first", () => {
+    const out = reminderHistory(
+      [{ kind: "food-1", sent_at: "2026-11-16T12:00:00Z" }],
+      [{ created_at: "2026-11-16T13:00:00Z", context: { kind: "weighin", codes: [410] } }],
+    );
+    expect(out).toEqual([
+      { kind: "weighin", at: "2026-11-16T13:00:00Z", ok: false, codes: [410] },
+      { kind: "food-1", at: "2026-11-16T12:00:00Z", ok: true },
+    ]);
+  });
+});

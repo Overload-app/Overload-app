@@ -129,16 +129,16 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await user.type(input, "make push shoulder/volume all dumbbells and 30 mins for today{enter}");
 
     // The app's own record of where it went.
-    expect(await screen.findByText(/Just for your next Push \(Shoulders\/Chest Volume\) workout/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(await screen.findByText(/One-time change to your next Push \(Shoulders\/Chest Volume\) workout/, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalled();
 
     // And on the Train tab, the marker sits on Push — not on Pull.
     await user.click(screen.getByRole("button", { name: /^Train$/ }));
     const pushCard = screen.getByText("Push (Shoulders/Chest Volume)").closest("[style]").parentElement.parentElement;
     const pullCard = screen.getByText("Pull (Back/Biceps + Conditioning)").closest("[style]").parentElement.parentElement;
-    expect(within(pushCard).getByText("ONE-TIME CHANGE")).toBeInTheDocument();
+    expect(within(pushCard).getByText("ONE-TIME CHANGE · SEE WHAT")).toBeInTheDocument();
     expect(within(pushCard).getByText(/Dumbbell Shoulder Press/)).toBeInTheDocument();
-    expect(within(pullCard).queryByText("ONE-TIME CHANGE")).not.toBeInTheDocument();
+    expect(within(pullCard).queryByText("ONE-TIME CHANGE · SEE WHAT")).not.toBeInTheDocument();
     // Pull still shows its own real exercises.
     expect(within(pullCard).getByText(/Lat Pulldown/)).toBeInTheDocument();
   }, 20000);
@@ -172,7 +172,7 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
     await user.click(screen.getByRole("button", { name: /^Coach$/ }));
     await user.type(screen.getByPlaceholderText("e.g. My shoulder hurts, adjust push day"), "change my pull day to only dumbbells for today{enter}");
-    await screen.findByText(/Just for your next Pull \(Back\/Biceps \+ Conditioning\) workout/, {}, { timeout: 4000 });
+    await screen.findByText(/One-time change to your next Pull \(Back\/Biceps \+ Conditioning\) workout/, {}, { timeout: 4000 });
 
     await user.click(screen.getByRole("button", { name: /^Train$/ }));
     const pullCard = screen.getByText("Pull (Back/Biceps + Conditioning)").closest("[style]").parentElement.parentElement;
@@ -199,7 +199,7 @@ describe("a one-time change asked for on a day that isn't next", () => {
     expect(aiCalls()).toBe(before);
 
     await user.click(screen.getByRole("button", { name: /^Train$/ }));
-    expect(screen.queryByText("ONE-TIME CHANGE")).not.toBeInTheDocument();
+    expect(screen.queryByText("ONE-TIME CHANGE · SEE WHAT")).not.toBeInTheDocument();
   }, 20000);
 
   test("a harder program that the session length had to trim says what was cut", async () => {
@@ -264,4 +264,47 @@ describe("a one-time change asked for on a day that isn't next", () => {
     await screen.findAllByText(/Done — your next Push/, {}, { timeout: 4000 });
     expect(models().slice(2)).toEqual(["claude-sonnet-5"]);
   }, 20000);
+
+  // Real asks: tap "changed for today" to see what changed, and a
+  // "revert to original" button.
+  test("the one-time change shows what changed, and Revert puts the original day back", async () => {
+    stored.todayOverride = [ex("Dumbbell Shoulder Press"), { ...ex("Lateral Raise"), sets: 2 }];
+    stored.todayOverrideDayIdx = 1;
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    await user.click(screen.getByText("ONE-TIME CHANGE · SEE WHAT"));
+    const sheet = screen.getByRole("dialog", { name: "One-time change" });
+    expect(within(sheet).getByText("Overhead Press → Dumbbell Shoulder Press")).toBeInTheDocument();
+    expect(within(sheet).getByText("Lateral Raise: 3×8-12, 75s rest → 2×8-12, 75s rest")).toBeInTheDocument();
+    await user.click(within(sheet).getByText("Revert to original"));
+    expect(screen.queryByText("ONE-TIME CHANGE · SEE WHAT")).not.toBeInTheDocument();
+    expect(stored.todayOverride).toBeNull();
+    expect(stored.program.days[1].exercises.map((e) => e.name)).toEqual(["Overhead Press", "Lateral Raise"]);
+  }, 20000);
+
+  test("reverting mid-workout switches to the original exercises and keeps checked-off sets", async () => {
+    stored.todayOverride = [ex("Dumbbell Shoulder Press"), ex("Lateral Raise")];
+    stored.todayOverrideDayIdx = 1;
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: /^Train$/ }, { timeout: 4000 });
+    await user.click(screen.getByRole("button", { name: /^Train$/ }));
+    await user.click(screen.getByText("Push (Shoulders/Chest Volume)"));
+    await screen.findByText(/CHANGED FOR TODAY ONLY/, {}, { timeout: 4000 });
+    const weights = screen.getAllByPlaceholderText("lb");
+    const reps = screen.getAllByPlaceholderText("reps");
+    await user.clear(weights[0]); await user.type(weights[0], "40");
+    await user.clear(reps[0]); await user.type(reps[0], "10");
+    await user.click(screen.getAllByLabelText("Mark set 1 done and start rest timer")[0]);
+    await user.click(screen.getByText(/CHANGED FOR TODAY ONLY/));
+    await user.click(within(screen.getByRole("dialog", { name: "One-time change" })).getByText("Revert to original"));
+    expect(await screen.findByText("Overhead Press")).toBeInTheDocument();
+    expect(screen.queryByText(/CHANGED FOR TODAY ONLY/)).not.toBeInTheDocument();
+    // The set already done on the swapped-in exercise is still there.
+    expect(screen.getByText("Dumbbell Shoulder Press")).toBeInTheDocument();
+    expect(screen.getByLabelText("Set 1 done, tap to undo")).toBeInTheDocument();
+  }, 20000);
 });
+

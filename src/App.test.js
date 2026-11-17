@@ -29,6 +29,12 @@ import {
   overrideDayName,
   coachResponseFlags,
   coachReplyText,
+  relogSuggestions,
+  goTabFrom,
+  openWorkoutDetail,
+  resolveOverrideTarget,
+  reminderEntryLabel,
+  todaysMealsLine,
   readLocalState,
   writeLocalState,
   hasPendingSync,
@@ -970,8 +976,24 @@ describe("coachChangeNote — the app stating what actually changed", () => {
 
   test("a today-only change is labelled as today-only, so a reply can't pass it off as permanent", () => {
     const note = coachChangeNote({ ...noFlags, hasOverride: true }, { todayOverride: [{ name: "Machine Chest Press" }] }, program);
-    expect(note).toContain("next session");
-    expect(note).toContain("isn't saved");
+    expect(note).toContain("One-time change to your next workout");
+    expect(note).toContain("normal program stays the same");
+  });
+
+  // Real report: mid-workout it said "just for your next Pull workout" about
+  // the Pull workout they had open.
+  test("a change to the workout that's open says so", () => {
+    const days = { days: [{ name: "Push" }, { name: "Pull" }] };
+    const note = coachChangeNote({ ...noFlags, hasOverride: true }, {}, days, 1, 1);
+    expect(note).toContain("Changed the Pull workout you have open, for today only");
+    expect(coachChangeNote({ ...noFlags, hasOverride: true }, {}, days, 1, null)).toContain("One-time change to your next Pull workout");
+  });
+
+  // Real report: the app's note appeared twice, because the AI copied it.
+  test("a copy of the app's note written by the AI is taken out of the reply", () => {
+    expect(coachReplyText({ reply: "Done — home session on Push. Just for your next Legs workout — this one isn't saved to your program." }, true))
+      .toBe("Done — home session on Push.");
+    expect(coachReplyText({ reply: "Just a one-time swap, nothing saved to your program." }, true)).toBe("Just a one-time swap, nothing saved to your program.");
   });
 
   test("a permanent day edit names the day it actually landed on", () => {
@@ -1995,7 +2017,7 @@ describe("streamed Coach replies", () => {
       });
       const pending = claudeChat({ system: "s", messages: [{ role: "user", content: "hi" }], onPartialReply: () => {} });
       const caught = pending.catch((e) => e);
-      await vi.advanceTimersByTimeAsync(61000);
+      await vi.advanceTimersByTimeAsync(101000);
       const err = await caught;
       expect(err).toBeInstanceOf(Error);
       expect(err.timeout).toBe(true);
@@ -4352,7 +4374,7 @@ describe("claudeChat", () => {
 
       const promise = claudeChat({ system: "s", messages: [] });
       const assertion = expect(promise).rejects.toMatchObject({ timeout: true });
-      await vi.advanceTimersByTimeAsync(60000);
+      await vi.advanceTimersByTimeAsync(100000);
       await assertion;
       const caught = await promise.catch((e) => e);
       expect(caught.offline).toBeUndefined();
@@ -5331,5 +5353,53 @@ describe("Progress — same exercise in two workouts", () => {
       ["Upper B", "10-12", 45, 50, 5],
     ]);
     expect(new Set(per.map((w) => w.color)).size).toBe(2);
+  });
+});
+
+describe("Nov 16 round — log again, reminder links, Coach context", () => {
+  test("log again: meals eaten on 2+ days, most frequent first, not ones already logged today", () => {
+    const meal = (name, cal) => ({ name, cal, protein: 10, carb: 10, fat: 5 });
+    const nutrition = [
+      { date: "2026-11-10", meals: [meal("Greek yogurt bowl", 560), meal("Burrito", 900)] },
+      { date: "2026-11-12", meals: [meal("Greek yogurt bowl", 540), meal("Protein shake", 200)] },
+      { date: "2026-11-14", meals: [meal("greek yogurt bowl", 550), meal("Protein shake", 210)] },
+      { date: "2026-11-16", meals: [meal("Protein shake", 200)] },
+    ];
+    const out = relogSuggestions(nutrition, "2026-11-16");
+    expect(out.map((m) => m.name)).toEqual(["greek yogurt bowl"]);
+    expect(out[0].cal).toBe(550); // the latest numbers
+  });
+
+  test("a reminder link opens the right tab", () => {
+    expect(goTabFrom("?go=fuel")).toBe("fuel");
+    expect(goTabFrom("?x=1&go=progress")).toBe("progress");
+    expect(goTabFrom("?go=hack")).toBeNull();
+    expect(goTabFrom("")).toBeNull();
+  });
+
+  test("reminder history names what was sent", () => {
+    const schedules = [{ id: "food-abc", type: "food", hour: 17, days: [] }];
+    expect(reminderEntryLabel("food-abc", schedules)).toBe("Food reminder (5pm)");
+    expect(reminderEntryLabel("rest:123", schedules)).toBe("Rest's up");
+    expect(reminderEntryLabel("weighin", [])).toBe("Weigh-in reminder");
+  });
+
+  test("the Coach is told how long the open workout has run and what's done", () => {
+    const now = Date.parse("2026-11-16T18:30:00Z");
+    const state = { inProgressWorkout: { runningSince: now - 30 * 60000, runningBaseline: 0, sets: [{ name: "Lat Pulldown", logged: [{ done: true }, { done: true }, { done: false }] }] } };
+    expect(openWorkoutDetail(state, now)).toBe(", about 30 min in so far — Lat Pulldown 2/3 sets done");
+  });
+
+  // Real report: "whatever day after leg day" — the AI picked Push, and the
+  // app moved it onto Legs because "leg" was the only day named.
+  test("a day named only to point at another one doesn't override the AI's pick", () => {
+    const state = { program: { days: [{ name: "Legs (Knee-Friendly)", exercises: [] }, { name: "Push (Shoulders/Chest Volume)", exercises: [] }] }, logs: { workouts: [] } };
+    const parsed = { todayOverride: [{ name: "Dumbbell Shoulder Press" }], todayOverrideDayIndex: 1, reply: "Set on your Push day." };
+    expect(resolveOverrideTarget(parsed, state, "but whatever day after leg day").dayIdx).toBe(1);
+  });
+
+  test("a meal photo is judged against what's already logged today", () => {
+    expect(todaysMealsLine([{ name: "Greek yogurt bowl", cal: 560 }])).toContain("Greek yogurt bowl (560 cal)");
+    expect(todaysMealsLine([])).toBe("");
   });
 });

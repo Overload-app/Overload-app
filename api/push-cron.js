@@ -142,20 +142,22 @@ function reminderMessage(type, state, now) {
     // silently switched it off. It now goes out on every day they picked,
     // unless they've already trained that day.
     const next = days[nextDayIndex(days, workouts)];
-    return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/" };
+    return { kind: "reminder", title: "Time to train 💪", body: `Today's workout: ${next?.name || "your next session"}. Tap to start.`, tag: "reminder", url: "/?go=home" };
   }
   if (type === "weighin") {
     if ((state?.logs?.bodyweight || []).some((w) => w.date === today)) return null;
-    return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/" };
+    return { kind: "weighin", title: "Weigh-in time ⚖️", body: "Step on the scale and log it — it keeps your plan on track.", tag: "weighin", url: "/?go=progress" };
   }
   if (type === "food") {
     const meals = (state?.logs?.nutrition || []).find((d) => d.date === today)?.meals || [];
     const cal = Math.round(meals.reduce((a, m) => a + (Number(m?.cal) || 0), 0));
     const target = Number(state?.targets?.calories) || 0;
+    // Tapping opens the Fuel tab straight away (url), where a photo or a
+    // one-tap "log again" takes seconds.
     const body = meals.length === 0
-      ? "Nothing logged yet today — add what you've eaten so far."
-      : target > 0 ? `You're at ${cal} of ${target} calories today — log anything you've eaten since.` : "Log anything you've eaten since your last meal.";
-    return { kind: "food", title: "Log your food 🍽️", body, tag: "food", url: "/" };
+      ? "Nothing logged yet today — tap, snap a photo of what you ate, done."
+      : target > 0 ? `You're at ${cal} of ${target} calories today — tap to add anything you've eaten since.` : "Tap to add anything you've eaten since your last meal.";
+    return { kind: "food", title: "Log your food 🍽️", body, tag: "food", url: "/?go=fuel" };
   }
   return null;
 }
@@ -239,7 +241,7 @@ export function combineReminders(due) {
   const what = due.map((d) => short[d.note.kind] || d.note.title);
   const list = what.length === 2 ? what.join(" and ") : `${what.slice(0, -1).join(", ")} and ${what[what.length - 1]}`;
   return [{
-    note: { kind: "reminders", title: `Time to ${list} ⏰`, body: due.map((d) => d.note.body).join(" "), tag: "reminders", url: "/" },
+    note: { kind: "reminders", title: `Time to ${list} ⏰`, body: due.map((d) => d.note.body).join(" "), tag: "reminders", url: (due.find((d) => d.note.kind === "food") || due[0]).note.url || "/" },
     keys: due.flatMap((d) => d.keys),
   }];
 }

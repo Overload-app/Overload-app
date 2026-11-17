@@ -11,7 +11,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, coachAcknowledgement, dateToISO, todayISO, buildProgram as buildProgramFn, calcTargets as calcTargetsFn } from "./App.jsx";
+import App, { Login, ProfileTab, Progress, Coach, ConfirmEmailScreen, EmailConfirmedScreen, WorkoutSession, OnboardingSummary, Onboarding, Home, Train, WorkoutHistoryEditor, QuizEditor, QuickRelog, coachAcknowledgement, dateToISO, todayISO, buildProgram as buildProgramFn, calcTargets as calcTargetsFn } from "./App.jsx";
 
 // jsdom doesn't implement ResizeObserver, which recharts' <ResponsiveContainer>
 // needs — this is a test-environment gap, not something the app is missing.
@@ -1862,7 +1862,7 @@ describe("<WorkoutSession /> 'find alternative' — instant quick suggestions, b
     // Quick suggestion shows first, then the list upgrades in place —
     // findBy rather than a synchronous check since a fast-resolving mock
     // can settle within the same act() cycle as the click itself.
-    expect(await screen.findByText(/Incline Dumbbell Press|Landmine Press/)).toBeInTheDocument();
+    expect((await screen.findAllByText(/Incline Dumbbell Press|Landmine Press/)).length).toBeGreaterThan(0);
     expect(await screen.findByText("Landmine Press")).toBeInTheDocument(); // upgraded in place
     expect(screen.queryByText("Finding more tailored suggestions…")).not.toBeInTheDocument();
   });
@@ -1914,7 +1914,7 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
     const user = setup();
 
     await user.click(screen.getByText("Find alternative"));
-    expect(await screen.findByText("Couldn't find a suggested alternative for this one.")).toBeInTheDocument();
+    expect(await screen.findByText("No ready-made swap for this one with your equipment.")).toBeInTheDocument();
     expect(screen.queryByText(/No alternatives available/)).not.toBeInTheDocument();
     expect(screen.getByText("None of these — request my own")).toBeInTheDocument(); // still there either way
     expect(screen.getByText("Try again")).toBeInTheDocument();
@@ -1948,7 +1948,7 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
 
     await user.click(screen.getByText("Find alternative"));
     expect(await screen.findByText("Needs a connection to find alternatives — you're offline right now.")).toBeInTheDocument();
-    expect(screen.queryByText("Couldn't find a suggested alternative for this one.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No ready-made swap for this one with your equipment.")).not.toBeInTheDocument();
     expect(screen.getByText("None of these — request my own")).toBeInTheDocument();
     expect(screen.getByText("Try again")).toBeInTheDocument();
   });
@@ -1963,8 +1963,36 @@ describe("<WorkoutSession /> 'find alternative' — empty result and retry", () 
     const user = setup();
 
     await user.click(screen.getByText("Find alternative"));
-    expect(await screen.findByText("Couldn't find a suggested alternative for this one.")).toBeInTheDocument();
+    expect(await screen.findByText("No ready-made swap for this one with your equipment.")).toBeInTheDocument();
     expect(screen.queryByText(/Needs a connection/)).not.toBeInTheDocument();
+  });
+});
+
+describe("<WorkoutSession /> alternatives — AI picks that all get filtered out", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  // Real report: Renegade Row → "Dumbbell Shrug" showed, then vanished and
+  // said it couldn't find an alternative; Try again did the same.
+  test("the quick suggestion stays when every AI pick is filtered out", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    // Dumbbell Row is already in the day, so the AI's only pick is filtered out.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ alternatives: ["Dumbbell Row"] }) }));
+    const day = { name: "Pull", exercises: [
+      { name: "Renegade Row", sets: 3, reps: "8-10", rest: 90, tips: ["a"] },
+      { name: "Dumbbell Row", sets: 3, reps: "8-10", rest: 90, tips: ["a"] },
+    ] };
+    const user = userEvent.setup();
+    render(
+      <WorkoutSession
+        day={day} isOverride={false} lastLog={null} logs={{ workouts: [] }} initialSets={null}
+        onFinish={vi.fn()} onCancel={vi.fn()} onSaveExit={vi.fn()}
+        equipment="dumbbell" injuries={[]} onSwapExercise={vi.fn()} onCacheAlternatives={vi.fn()}
+      />
+    );
+    await user.click(screen.getAllByText("Find alternative")[0]);
+    expect(await screen.findByText("Dumbbell Shrug")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/Finding more tailored/)).not.toBeInTheDocument());
+    expect(screen.getByText("Dumbbell Shrug")).toBeInTheDocument();
+    expect(screen.queryByText(/No ready-made swap/)).not.toBeInTheDocument();
   });
 });
 
@@ -2615,5 +2643,24 @@ describe("<WorkoutSession /> arrow, time and notes", () => {
     await user.click(screen.getByLabelText("Edit note for Incline Dumbbell Press"));
     await user.click(screen.getByText("Clear note"));
     expect(onSaveNote).toHaveBeenLastCalledWith("Incline Dumbbell Press", "");
+  });
+});
+
+describe("<QuickRelog /> — log a usual meal in one tap", () => {
+  test("tapping a meal logs it, and Undo takes it back off", async () => {
+    const user = userEvent.setup();
+    const day = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dateToISO(d); };
+    const nutrition = [
+      { date: day(2), meals: [{ name: "Protein Oats", cal: 450, protein: 30, carb: 50, fat: 10 }] },
+      { date: day(1), meals: [{ name: "Protein Oats", cal: 450, protein: 30, carb: 50, fat: 10 }] },
+    ];
+    const addMeal = vi.fn();
+    const removeMeal = vi.fn();
+    render(<QuickRelog nutrition={nutrition} todayCount={2} addMeal={addMeal} removeMeal={removeMeal} />);
+    await user.click(screen.getByRole("button", { name: "Log Protein Oats again" }));
+    expect(addMeal).toHaveBeenCalledWith({ name: "Protein Oats", cal: 450, protein: 30, carb: 50, fat: 10 });
+    expect(screen.getByRole("status")).toHaveTextContent("Logged Protein Oats");
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(removeMeal).toHaveBeenCalledWith(2);
   });
 });

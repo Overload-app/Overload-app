@@ -12,7 +12,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { scheduleRestChime, cancelRestChime, buzzRestDone, isRestChimeMuted, setRestChimeMuted } from "./restChime.js";
 import { renderShareCard, shareOrDownload } from "./shareCard.js";
-import { subscribeForPush, currentPushSubscription, withSubscription, deviceTimeZone, requestTestNotification, requestRestAlert, clearNotifications } from "./push.js";
+import { subscribeForPush, currentPushSubscription, withSubscription, deviceTimeZone, requestTestNotification, requestRestAlert, clearNotifications, fetchReminderHistory } from "./push.js";
 
 /* ============================================================
    ERROR LOGGING
@@ -221,7 +221,9 @@ export const TIMEOUT_MESSAGE = "That took too long to respond — try sending th
 // generation (thousands of output tokens), which can legitimately take
 // longer than a quick chat reply and is more likely to brush up against
 // max_tokens. 45s was tuned for typical replies, not this heavier case.
-const CLAUDE_REQUEST_TIMEOUT_MS = 60000;
+// Was 60s. Real report: mid-workout Coach changes (a whole day rewritten)
+// came back "That took too long to respond". The server allows 110s.
+const CLAUDE_REQUEST_TIMEOUT_MS = 100000;
 
 function offlineError() {
   const err = new Error(OFFLINE_MESSAGE);
@@ -1312,7 +1314,15 @@ export function coachResponseFlags(parsed) {
 // to remove is still there." Only claim success by default when a real
 // change is actually present in this response.
 export function coachReplyText(parsed, madeChange) {
-  return (parsed.reply && parsed.reply.trim())
+  // Real report: "Just for your next Legs (Knee-Friendly) workout — this one
+  // isn't saved to your program." appeared twice in one reply, once naming the
+  // wrong day. The AI copies the app's own note from earlier in the chat; the
+  // app adds the real one itself, so any copy the AI wrote is taken out.
+  const reply = String(parsed.reply || "")
+    .replace(/[^.!?]*\b(isn't|is not|not|nothing)\b[^.!?]*\bsaved to your program\b[^.!?]*[.!?]?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return reply || (parsed.reply && parsed.reply.trim())
     || (madeChange ? "Done!" : "Hmm, I didn't quite catch that — mind rephrasing what you'd like changed?");
 }
 
@@ -1399,7 +1409,13 @@ export function resolveOverrideTarget(parsed, state, message = "") {
   }
   const idx = coerceInt(raw);
   if (idx === null || idx < 0 || idx >= dayCount) return { dayIdx: null, valid: false };
-  if (named.length === 1 && named[0] !== idx) return { dayIdx: named[0], valid: true };
+  // Real report: "whatever day after leg day" — the AI rightly picked Push,
+  // and this moved it onto Legs because "leg" was the only day word in the
+  // message. A day named only to point AT another one doesn't count, and
+  // neither does one the AI's own reply clearly isn't about.
+  const pointsAway = /\b(after|before|following|other than|instead of|not|don'?t|except|besides)\b/i.test(message);
+  const replyNamesIdx = String(parsed?.reply || "").toLowerCase().includes(String(days[idx]?.name || "").toLowerCase().split(/[ (]/)[0]);
+  if (named.length === 1 && named[0] !== idx && !pointsAway && !replyNamesIdx) return { dayIdx: named[0], valid: true };
   if (named.length === 0) {
     const fit = focusFit(exercises, days[idx].name);
     const byFocus = bestByFocus();
@@ -1408,15 +1424,19 @@ export function resolveOverrideTarget(parsed, state, message = "") {
   return { dayIdx: idx, valid: true };
 }
 
-export function coachChangeNote(flags, parsed, program, overrideDayIndex) {
+export function coachChangeNote(flags, parsed, program, overrideDayIndex, openDayIndex = null) {
   if (flags.hasOverride) {
     // Names the day. "Just for your next session" was true of a change that
     // had landed on Pull while the reply said Push, so it confirmed the wrong
     // thing five times running. The app's record now says where it really went.
+    // Real report: mid-workout it said "just for your next Pull workout" about
+    // the Pull workout they had open — "no, it should be for the one I'm doing
+    // right now?" It was; the note just said it badly.
     const day = Number.isInteger(overrideDayIndex) ? program?.days?.[overrideDayIndex] : null;
+    if (day && overrideDayIndex === openDayIndex) return `(Changed the ${day.name} workout you have open, for today only. Tap "see what" on it to review or revert.)`;
     return day
-      ? `Just for your next ${day.name} workout — this one isn't saved to your program.`
-      : "Just for your next session — this one isn't saved to your program.";
+      ? `(One-time change to your next ${day.name} workout — your normal program stays the same. Tap "see what" on it to review or revert.)`
+      : "(One-time change to your next workout — your normal program stays the same.)";
   }
   if (flags.hasDayEdit) {
     const idx = coerceInt(parsed.programDayEdit.dayIndex);
@@ -1484,7 +1504,11 @@ function compressImageToBase64(file, maxDim = 768, quality = 0.72) {
   });
 }
 
-const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estimate the food and its nutrition. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}";
+// Real report: a photo of the same granola bowl, 7/8 eaten, came back at 320
+// cal against 560 for the full one — "it's not reading portions/size
+// properly." It estimated a normal serving of the food instead of the amount
+// actually in the photo.
+const MEAL_PHOTO_SYSTEM = "You analyze photos of meals for a fitness app. Estimate the food and its nutrition for EXACTLY the amount in the photo, not a standard serving. Judge the amount from the plate or bowl size, how full it is, its depth, and any hand, fork or spoon for scale. If the food is partly eaten or only leftovers are left, estimate just what is left (a bowl with a few spoonfuls left is maybe 10-15% of a full one) and say roughly what fraction you assumed in the note. Respond ONLY with JSON, no markdown fences: {\"name\": \"<short meal name>\", \"cal\": <number>, \"protein\": <number>, \"carb\": <number>, \"fat\": <number>, \"note\": \"<one short caveat about the estimate, under 15 words>\"}";
 
 // Real ask: "add an option where you can describe what you ate... I forgot
 // to take a picture and don't want to research the numbers myself." Same
@@ -4632,7 +4656,59 @@ export function WorkoutNoteBox({ day, logs, value, onChange }) {
   );
 }
 
-export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote, workoutNote = "", onWorkoutNote }) {
+// Real asks: "a spot where you can click on 'swapped for today' and it says
+// what was changed" and "if you change a workout for that day but decide you
+// want the original, a button that says revert to original."
+export function oneTimeChangeLines(original, changed) {
+  const orig = original || [];
+  const now = changed || [];
+  const fmt = (e) => `${e.sets}×${e.reps}${e.rest ? `, ${e.rest}s rest` : ""}`;
+  const removed = orig.filter((o) => !now.some((n) => isSameCoreExercise(n.name, o.name)));
+  const added = now.filter((n) => !orig.some((o) => isSameCoreExercise(n.name, o.name)));
+  const lines = [];
+  const pairs = Math.min(removed.length, added.length);
+  for (let i = 0; i < pairs; i++) lines.push({ kind: "swap", text: `${removed[i].name} → ${added[i].name}` });
+  removed.slice(pairs).forEach((e) => lines.push({ kind: "removed", text: `Removed ${e.name}` }));
+  added.slice(pairs).forEach((e) => lines.push({ kind: "added", text: `Added ${e.name}` }));
+  for (const n of now) {
+    const o = orig.find((x) => isSameCoreExercise(x.name, n.name));
+    if (o && fmt(o) !== fmt(n)) lines.push({ kind: "changed", text: `${n.name}: ${fmt(o)} → ${fmt(n)}` });
+  }
+  return lines;
+}
+
+export function OneTimeChangeSheet({ dayName, original, changed, inWorkout, onRevert, onClose }) {
+  const lines = oneTimeChangeLines(original, changed);
+  return (
+    <div className="fullscreen-overlay" role="dialog" aria-label="One-time change" style={{ background: "rgba(18,22,28,0.55)", zIndex: 90, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.paper, width: "100%", maxWidth: 520, borderRadius: "18px 18px 0 0", padding: "20px 18px calc(18px + env(safe-area-inset-bottom, 0px))", maxHeight: "85vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+          <div>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.steelDark, letterSpacing: 1, fontWeight: 600 }}>CHANGED FOR ONE WORKOUT</span>
+            <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: "2px 0 0", color: T.ink }}>{dayName}</h3>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", color: T.steelDark, cursor: "pointer", padding: 4 }}><X size={20} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: T.steelDark, margin: "8px 0 12px", lineHeight: 1.45 }}>
+          Only for your next {dayName} workout. Your normal program isn't changed.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+          {lines.length === 0 ? (
+            <div style={{ fontSize: 14, color: T.ink }}>Same exercises, sets and reps as usual.</div>
+          ) : lines.map((l, i) => (
+            <div key={i} style={{ fontSize: 14, color: T.ink, background: "#fff", border: `1px solid ${T.steel}`, borderRadius: 10, padding: "10px 12px", lineHeight: 1.4 }}>{l.text}</div>
+          ))}
+        </div>
+        <Btn variant="accent" style={{ width: "100%" }} onClick={onRevert}>Revert to original</Btn>
+        {inWorkout && (
+          <p style={{ fontSize: 12, color: T.steelDark, margin: "8px 0 0", textAlign: "center" }}>Sets you've already checked off are kept.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function WorkoutSession({ day, isOverride, onShowChange, lastLog, logs, initialSets, initialRest, onFinish, onCancel, onSaveExit, onAutoSave, onGoToCoach, equipment, injuries, onSwapExercise, onCacheAlternatives, gifCache: propGifCache, onCacheGif, resumedAt, priorActiveSeconds, onAdjustTime, notes, onSaveNote, workoutNote = "", onWorkoutNote }) {
   const [sets, setSets] = useState(() =>
     mergeResumedSets(day.exercises, initialSets, logs, day.name) || day.exercises.map((ex) => ({
       name: ex.name, reps: ex.reps, rest: ex.rest, tips: ex.tips, alternatives: ex.alternatives,
@@ -4819,7 +4895,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
       .then((alts) => {
         if (cancelled) return;
         if (alts.length > 0) {
-          setPickerAlts(usable(alts));
+          // Real report: "it shows Dumbbell Shrug, then it disappears and says
+          // it couldn't find an alternative; Try again does the same." Every
+          // AI pick was filtered out (already in the day / no video / wrong
+          // equipment) and the empty result REPLACED the quick list. Now the
+          // AI's picks go first and the quick ones stay underneath.
+          const better = usable(alts);
+          setPickerAlts([...better, ...quick.filter((q) => !better.includes(q))]);
           onCacheAlternatives(swapPickerIdx, alts);
         }
         // An empty (but successful) AI answer just means it agreed there's
@@ -5170,9 +5252,12 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
         </div>
         <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: "10px 0 0" }}>{day.name}</h2>
         {isOverride && (
-          <div style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(78,74,242,0.2)", color: T.charge, fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 20 }}>
-            <Sparkles size={12} /> SWAPPED BY COACH FOR TODAY ONLY
-          </div>
+          <button
+            onClick={() => onShowChange?.(sets, rest)}
+            style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(78,74,242,0.2)", color: T.charge, fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 20, border: "none", cursor: onShowChange ? "pointer" : "default" }}
+          >
+            <Sparkles size={12} /> CHANGED FOR TODAY ONLY{onShowChange && <> · SEE WHAT <ChevronRight size={12} /></>}
+          </button>
         )}
       </div>
       {/* The rest timer lives in the footer below, so nothing floats over
@@ -5466,8 +5551,13 @@ export function WorkoutSession({ day, isOverride, lastLog, logs, initialSets, in
                     // than quietly falling back to a coarser guess.
                     <div style={{ textAlign: "center", margin: "10px 0" }}>
                       <p style={{ color: T.steelDark, fontSize: 13, margin: "0 0 8px" }}>
-                        {pickerOffline ? "Needs a connection to find alternatives — you're offline right now." : "Couldn't find a suggested alternative for this one."}
+                        {pickerOffline ? "Needs a connection to find alternatives — you're offline right now." : "No ready-made swap for this one with your equipment."}
                       </p>
+                      {!pickerOffline && (
+                        <Btn variant="accent" style={{ width: "100%", marginBottom: 8 }} onClick={() => onGoToCoach?.(sets, rest)}>
+                          Ask the Coach for other options
+                        </Btn>
+                      )}
                       <button
                         onClick={() => setAlternativesRetryToken((t) => t + 1)}
                         style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0 }}
@@ -5757,7 +5847,7 @@ function StatChip({ label, val, color, icon }) {
   );
 }
 
-export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
+export function Home({ state, setActiveTab, startWorkout, onAskCoach, onShowChange, addMeal, removeMeal }) {
   const { program, targets, logs, profile } = state;
   const [insightDismissed, setInsightDismissed] = useState(false);
   const insight = insightDismissed ? null : detectCoachInsight(state);
@@ -5853,6 +5943,14 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
             <span style={{ color: T.charge, fontSize: 12, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>{program.splitName.toUpperCase()}</span>
             <h3 style={{ color: "#fff", fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: "4px 0 8px" }}>{nextDay.name}</h3>
             <span style={{ color: "#B9BEC6", fontSize: 13 }}>{nextDay.exercises.length} exercises</span>
+            {overrideAppliesTo(state, nextIdx) && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onShowChange?.(); }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 8, background: "rgba(78,74,242,0.25)", color: "#fff", fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 20, border: "none", cursor: "pointer" }}
+              >
+                Changed for today · see what <ChevronRight size={11} />
+              </button>
+            )}
           </div>
           <Dumbbell size={30} color={T.charge} />
         </div>
@@ -5881,6 +5979,7 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
         <Btn variant="ghost" style={{ width: "100%", marginTop: 14 }} onClick={() => setActiveTab("fuel")}>
           Log food <Plus size={16} />
         </Btn>
+        {addMeal && <QuickRelog nutrition={logs.nutrition} todayCount={todayMeals.length} addMeal={addMeal} removeMeal={removeMeal} />}
       </Card>
 
       <TickRule label="Your targets" />
@@ -5911,7 +6010,7 @@ export function Home({ state, setActiveTab, startWorkout, onAskCoach }) {
   );
 }
 
-export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry }) {
+export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry, onShowChange }) {
   const { program, logs } = state;
   // The most recent logged workout, matched back to a program day by name.
   // Name (not index) because that's all a log entry stores, and because a
@@ -5976,9 +6075,12 @@ export function Train({ state, startWorkout, setActiveTab, onOpenHistoryEntry })
                     </span>
                   )}
                   {hasOneTimeChange && (
-                    <span style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6, letterSpacing: 0.3 }}>
-                      ONE-TIME CHANGE
-                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onShowChange?.(); }}
+                      style={{ background: "#EEEDFF", color: T.chargeDeep, fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6, letterSpacing: 0.3, border: "none", cursor: "pointer" }}
+                    >
+                      ONE-TIME CHANGE · SEE WHAT
+                    </button>
                   )}
                 </div>
                 <div style={{ fontSize: 12, color: T.steelDark, marginTop: 3 }}>{(hasOneTimeChange ? state.todayOverride : day.exercises).map((e) => e.name).join(" · ")}</div>
@@ -6193,6 +6295,7 @@ Rules:
 - CRITICAL, real confirmed failure: a program with two similarly-named days (e.g. "Pull (Back/Biceps)" AND "Pull (Back/Biceps + Conditioning)," or two "Push" days) caused a wrong-but-still-in-range "dayIndex" to get picked — the reply confidently described editing the right-sounding day, but the actual index pointed at a DIFFERENT day, so nothing about the described change actually happened; asking again just repeated the same mistake. When a request names or implies a specific exercise (removing, swapping, or asking "is X in my workout"), do NOT pick "dayIndex" by which day's NAME sounds right — scan "Current program JSON" itself and find the exact day whose "exercises" array actually, currently contains that exercise by name RIGHT NOW, in this response, not from memory of an earlier message. If more than one day has a similar name, this is exactly the case that check is for. If you genuinely can't find the named exercise in ANY day's current exercise list, say so plainly in "reply" (it may already be gone, or never existed) instead of guessing a day and claiming a change that isn't real.
 - Only include exercises doable with the equipment stated in their profile, in your context below.
 - Spell equipment out in exercise names ("Dumbbell Row," not "DB Row") — not everyone using this app knows gym-jargon abbreviations.
+- PLAIN WORDS in "reply", always. Many people using this app are complete beginners. Write like you're talking to a friend who has never been to a gym: no jargon, acronyms or medical/science terms (not "DOMS", "intercostal", "RPE", "hypertrophy", "progressive overload", "compound", "deload", "TDEE", "lat attachment"). Say the everyday thing instead ("normal muscle soreness from training", "the muscles between your ribs", "how hard it felt", "building muscle"). If a term really is needed, explain it in a few words right there. Short, clear sentences; the answer first.
 - Exercise names must be JUST the plain, standard movement name — nothing else attached, ever. No parentheses, no dash-suffix, no trailing descriptor word or phrase either (not "Leg Press (Low)," not "Leg Press Moderate Depth" — just "Leg Press"). These get looked up against a real exercise-demo database afterward, and ANY extra word beyond the bare movement name is a common reason a lookup for an exercise that's obviously in the database still fails to match. Depth, tempo, stance, range of motion — that belongs in "tips," never the name.
 - If an exercise you're including already appears somewhere in "Current program JSON" (or in the version history) given in your context below, use the EXACT SAME spelling it already has there — don't rename or rephrase an exercise that's already established in this person's program. Otherwise, ONLY choose from the exercise vocabulary list given in your context below, named EXACTLY as written — every one of those is confirmed to have a real instructional video. Only go outside it for a movement pattern that list genuinely has no equivalent for, or because the user explicitly asked for something specific by name — not to add variety for its own sake.
 - If the user names a SPECIFIC exercise or variation (e.g. "make it a machine seated calf raise"), use exactly that, as a plain standard name with its equipment ("Machine Seated Calf Raise"). You CANNOT see which exercises have demo videos — the app looks the video up itself and warns them if there isn't one. So never say an exercise has no video or isn't in the library, and never swap what they asked for into something else for that reason. Real report: asked to make a seated calf raise a machine seated calf raise, the Coach renamed it to plain "Calf Raise" and claimed there was no video, when there was.
@@ -6274,11 +6377,11 @@ export function mealNameFromDescription(text) {
 
 // The same photo again, with what the person says it actually is — their
 // word beats how it looks (greek yogurt and sour cream look the same).
-export function photoFixMessages(photo, what) {
+export function photoFixMessages(photo, what, today) {
   const said = String(what || "").replace(/"/g, "'").trim().slice(0, 200);
   return [{ role: "user", content: [
     { type: "image", source: { type: "base64", media_type: photo.mediaType, data: photo.base64 } },
-    { type: "text", text: `Identify this meal and estimate its calories and macros. The person who ate it corrects you: "${said}". Their word beats how it looks — but it's a correction to the meal in the photo, not a new meal: estimate the WHOLE meal you see, with the portion sizes you can see, changing only what they corrected. Name the whole meal (a burger they say is fish is a "Fish burger", not "Fish"), and give real numbers for everything.` },
+    { type: "text", text: `Identify this meal and estimate its calories and macros. The person who ate it corrects you: "${said}". Their word beats how it looks — but it's a correction to the meal in the photo, not a new meal: estimate the WHOLE meal you see, with the portion sizes you can see (only the amount actually in the photo — if it's partly eaten, just what's left), changing only what they corrected. Name the whole meal (a burger they say is fish is a "Fish burger", not "Fish"), and give real numbers for everything.${todaysMealsLine(today)}` },
   ] }];
 }
 
@@ -6453,13 +6556,28 @@ export function coachLogSummary(state) {
 // Real ask: "just make it search that when it actually needs it" — a lookup
 // tool would cost more (a second round-trip re-sends the whole conversation),
 // so the saving comes from moving the prose, not from fetching it on demand.
+// Real report: "that looks a hell of a lot longer than 45 mins, considering I'm
+// already 30 mins in." The Coach didn't know how long they'd been going or
+// what was left.
+export function openWorkoutDetail(state, now = Date.now()) {
+  const w = state?.inProgressWorkout;
+  if (!w) return "";
+  const secs = w.runningSince ? accumulateActiveSeconds(w.runningBaseline || 0, w.runningSince, now) : (w.activeSeconds || 0);
+  const mins = Math.round(secs / 60);
+  const list = (w.sets || []).map((ex) => {
+    const done = (ex.logged || []).filter((l) => l.done).length;
+    return `${ex.name} ${done}/${(ex.logged || []).length} sets done`;
+  }).join("; ");
+  return `, about ${mins} min in so far${list ? ` — ${list}` : ""}`;
+}
+
 export function coachDayContextText(state) {
   const { days, openDayIndex, nextDayIndex, loggedSetsInOpenWorkout } = coachDayContext(state);
   if (days.length === 0) return "";
   const lines = [`Their days, by dayIndex: ${JSON.stringify(days)}`];
   lines.push(openDayIndex === null
     ? "Open right now: nothing — no workout in progress."
-    : `Open right now: dayIndex ${openDayIndex} ("${days[openDayIndex].name}"), workout in progress, ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged.`);
+    : `Open right now: dayIndex ${openDayIndex} ("${days[openDayIndex].name}"), workout in progress, ${loggedSetsInOpenWorkout} set${loggedSetsInOpenWorkout === 1 ? "" : "s"} already logged${openWorkoutDetail(state)}.`);
   lines.push(`Next scheduled: dayIndex ${nextDayIndex} ("${days[nextDayIndex].name}").`);
   // What the Coach was missing in the real transcript: a one-time change WAS
   // applied (to Pull), and it answered "I didn't actually apply that yet."
@@ -6513,6 +6631,7 @@ const COACH_LOG_RULES = `THEIR LOGGED DATA. Your context below carries a summary
 const COACH_DAY_RULES = `HOW TO READ THE DAY LINES IN YOUR CONTEXT BELOW ("Their days, by dayIndex", "Open right now", "Next scheduled"):
 - "Their days, by dayIndex" is the authoritative list. When they name a day, match it to one of these and use that exact dayIndex. Their wording will often NOT be the day's full name — they shorten it, reorder it, or drop part of it ("push (chest + shoulders)" for a day actually called "Push (Shoulders/Chest Volume)"). If their words plausibly point at exactly ONE day on that list, that IS the day: use its dayIndex and keep its real name. Only if they genuinely could mean two or more should you ask which, and then list the real day names so they can just pick. NEVER guess, and never treat a partial name as a reason to rewrite a day from scratch.
 - "Open right now" is the day they are literally looking at, with a workout in progress on it. If they say "the one I have open," "this workout," "the one I'm doing," or anything else meaning the session in front of them, that is the day — you can see it, so never tell them you can't and never make them name it.
+- Fitting the OPEN workout into a time: the minutes already spent count. "Make it 45 minutes" when the open line says about 30 min in means about 15 minutes LEFT — keep what they've finished, and cut what's left to fit those minutes (fewer remaining sets/exercises, shorter rest). Say plainly what's left, e.g. "About 15 min left: 2 sets of rows, then curls."
 - If that open workout has sets already logged, be careful: sets they've done are kept either way, but rewriting the whole day mid-session is disruptive and almost never wanted. Prefer "todayOverride", touch as few exercises as possible, and if what they asked for would replace the entire day, say what that does to their current session and ask first.
 - "Next scheduled" is what "today's workout" / "my next session" means when they don't name a day. A one-time change can go on ANY day, though: name it with "todayOverrideDayIndex". If they name a day ("my push day", "push shoulder/volume"), use THAT day's index even when it isn't next.
 - One message that changes TWO OR MORE days (e.g. "swap curls on pull and add calf raises to legs") needs "program" with every day — "programDayEdit" can only carry one day, so the other change would silently not happen.
@@ -6697,7 +6816,10 @@ export function applyCoachUndo(prev) {
 // separately gets the whole current program, logs and settings every time, so
 // nothing about the person's actual state is lost. The chat on screen still
 // keeps 60.
-export const COACH_API_HISTORY_LIMIT = 30;
+// Then 16 (Nov 2026, "cut cost a little more"): the chat history was the
+// biggest uncached part of each message. Eight back-and-forths still covers
+// any real follow-up, and the program, logs and settings come fresh anyway.
+export const COACH_API_HISTORY_LIMIT = 16;
 
 export function coachApiMessages(chat, limit = COACH_API_HISTORY_LIMIT) {
   const recent = chat.length > limit ? chat.slice(chat.length - limit) : chat;
@@ -7076,6 +7198,71 @@ function MacroBar({ label, val, max, color, icon }) {
 // "Removed X — Undo" for a few seconds after a one-tap delete. Found by the
 // stress test: a meal or weigh-in went with a single tap on a small ×, and
 // there was no way back.
+// Real ask: "I never think to log my food. How can we fix that?" Part of it is
+// making a log one tap: the meals they eat most often (last 3 weeks), ready
+// to add again with the numbers from the latest time.
+const GO_TABS = ["home", "train", "coach", "fuel", "progress", "profile"];
+export function goTabFrom(search) {
+  const m = /[?&]go=([a-z]+)/.exec(String(search || ""));
+  return m && GO_TABS.includes(m[1]) ? m[1] : null;
+}
+
+export function relogSuggestions(nutrition, today = todayISO(), limit = 6) {
+  const cutoff = new Date(`${today}T12:00:00`);
+  cutoff.setDate(cutoff.getDate() - 21);
+  const from = dateToISO(cutoff);
+  // Only meals they've had on two or more different days (a habit, not a
+  // one-off), and not ones already logged today.
+  const byName = new Map();
+  const keyOf = (m) => String(m?.name || "").trim().toLowerCase();
+  const loggedToday = new Set(((nutrition || []).find((d) => d?.date === today)?.meals || []).map(keyOf));
+  for (const day of [...(nutrition || [])].sort((a, b) => (a.date > b.date ? 1 : -1))) {
+    if (!day?.date || day.date < from || day.date > today) continue;
+    for (const m of day.meals || []) {
+      const key = keyOf(m);
+      if (!key || !(mealNumber(m.cal) > 0)) continue;
+      const e = byName.get(key) || { count: 0, days: new Set() };
+      e.days.add(day.date);
+      byName.set(key, { count: e.count + 1, days: e.days, last: day.date, meal: m });
+    }
+  }
+  return [...byName.entries()]
+    .filter(([key, e]) => e.days.size >= 2 && !loggedToday.has(key))
+    .map(([, e]) => e)
+    .sort((a, b) => b.count - a.count || (a.last > b.last ? -1 : 1))
+    .slice(0, limit)
+    .map((e) => ({ name: e.meal.name, cal: e.meal.cal, protein: e.meal.protein, carb: e.meal.carb, fat: e.meal.fat }));
+}
+
+export function QuickRelog({ nutrition, todayCount, addMeal, removeMeal }) {
+  const options = relogSuggestions(nutrition);
+  const [added, setAdded] = useState(null); // { name, index }
+  if (options.length === 0) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: T.steelDark, marginBottom: 6 }}>Log again — one tap</div>
+      {added && (
+        <div style={{ marginBottom: 6 }}>
+          <UndoBar text={`Logged ${added.name}`} onUndo={() => removeMeal(added.index)} onDone={() => setAdded(null)} />
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 }}>
+        {options.map((m) => (
+          <button
+            key={m.name}
+            onClick={() => { addMeal(m); setAdded({ name: m.name, index: todayCount }); }}
+            aria-label={`Log ${m.name} again`}
+            style={{ flexShrink: 0, maxWidth: 200, textAlign: "left", padding: "8px 12px", borderRadius: 12, border: `1px solid ${T.steel}`, background: "#fff", cursor: "pointer" }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.name}</div>
+            <div style={{ fontSize: 11, color: T.steelDark, fontFamily: "'JetBrains Mono', monospace" }}>+{Math.round(mealNumber(m.cal))} cal</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function UndoBar({ text, onUndo, onDone }) {
   useEffect(() => {
     const id = setTimeout(onDone, 6000);
@@ -7135,12 +7322,19 @@ export function updateMealJobResult(userId, result) {
   if (job?.status === "ready") writeMealJob(userId, { ...job, result });
 }
 
+// What's already logged today, so a photo of the rest of a meal can be
+// judged against the meal itself ("the same bowl, mostly eaten").
+export function todaysMealsLine(meals) {
+  const list = (meals || []).filter((m) => m?.name).slice(-8).map((m) => `${m.name} (${Math.round(mealNumber(m.cal))} cal)`);
+  return list.length ? ` Already logged today: ${list.join("; ")}. If the photo looks like part of one of those (for example what's left of it), estimate that fraction of it, not the whole thing again.` : "";
+}
+
 function mealJobRequest(job) {
   if (job.kind === "text") return { system: MEAL_TEXT_SYSTEM, messages: [{ role: "user", content: job.text }] };
-  if (job.kind === "fix") return { system: MEAL_PHOTO_SYSTEM, messages: photoFixMessages(job.photo, job.fix) };
+  if (job.kind === "fix") return { system: MEAL_PHOTO_SYSTEM, messages: photoFixMessages(job.photo, job.fix, job.today) };
   return { system: MEAL_PHOTO_SYSTEM, messages: [{ role: "user", content: [
     { type: "image", source: { type: "base64", media_type: job.photo.mediaType, data: job.photo.base64 } },
-    { type: "text", text: "Identify this meal and estimate its calories and macros." },
+    { type: "text", text: `Identify this meal and estimate its calories and macros for the amount actually in the photo.${todaysMealsLine(job.today)}` },
   ] }] };
 }
 
@@ -7217,6 +7411,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
   const { targets, logs, profile } = state;
   const today = todayISO();
   const todayLog = logs.nutrition.find((d) => d.date === today) || { date: today, meals: [] };
+  const todayMealsForPhoto = () => todayLog.meals.map((m) => ({ name: m.name, cal: m.cal }));
   const totals = todayLog.meals.reduce((a, m) => ({ cal: a.cal + mealNumber(m.cal), protein: a.protein + mealNumber(m.protein), carb: a.carb + mealNumber(m.carb), fat: a.fat + mealNumber(m.fat) }), { cal: 0, protein: 0, carb: 0, fat: 0 });
 
   const [showForm, setShowForm] = useState(false);
@@ -7354,7 +7549,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     if (!what || !lastPhoto) return;
     setLocalError(null);
     setPhotoFix("");
-    runMealJob(userId, { kind: "fix", fix: what, photo: lastPhoto, prevName: photoResult?.name });
+    runMealJob(userId, { kind: "fix", fix: what, photo: lastPhoto, prevName: photoResult?.name, today: todayMealsForPhoto() });
   }
 
   async function handlePhoto(e) {
@@ -7379,7 +7574,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
     setPhotoFix("");
     // Connectivity dropping between the check above and the request going
     // out gets the same fallback as being offline from the start.
-    runMealJob(userId, { kind: "photo", photo: { base64, mediaType } }, { onOffline: (j) => queuePhoto(j.photo.base64, j.photo.mediaType) });
+    runMealJob(userId, { kind: "photo", photo: { base64, mediaType }, today: todayMealsForPhoto() }, { onOffline: (j) => queuePhoto(j.photo.base64, j.photo.mediaType) });
   }
 
   return (
@@ -7487,6 +7682,7 @@ function Fuel({ state, addMeal, removeMeal, userId }) {
               Photo scanning and description both use AI and are usually close, but not exact — always worth a quick double-check.
             </span>
           </div>
+          <QuickRelog nutrition={logs.nutrition} todayCount={todayLog.meals.length} addMeal={addMeal} removeMeal={removeMeal} />
         </div>
       )}
       <input ref={fileInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handlePhoto} />
@@ -8950,6 +9146,53 @@ function NotificationPrompt({ kinds, schedules, onEnable, onDismiss }) {
   );
 }
 
+// What a push_sent name means to a person: a scheduled reminder's id, a rest
+// alert (rest:<time>) or the forgot-to-finish nudge (idle:<time>).
+export function reminderEntryLabel(kind, schedules) {
+  const k = String(kind || "");
+  if (k.startsWith("rest")) return "Rest's up";
+  if (k.startsWith("idle")) return "Still working out?";
+  const r = (schedules || []).find((x) => String(x.id) === k);
+  const type = r?.type || (/weigh/.test(k) ? "weighin" : /food/.test(k) ? "food" : /reminder|workout/.test(k) ? "workout" : k);
+  const name = { workout: "Workout reminder", food: "Food reminder", weighin: "Weigh-in reminder" }[type] || "Reminder";
+  return r ? `${name} (${hourLabel(r.hour)})` : name;
+}
+
+function ReminderHistory({ push }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  async function load() {
+    setLoading(true); setError("");
+    try { setData(await fetchReminderHistory()); } catch (e) { setError(e?.message || "Couldn't load that."); } finally { setLoading(false); }
+  }
+  const when = (at) => { try { return new Date(at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }); } catch (e) { return at; } };
+  return (
+    <div style={{ borderTop: `1px solid ${T.steel}`, marginTop: 10, paddingTop: 10 }}>
+      {!data ? (
+        <button onClick={load} disabled={loading} style={{ background: "none", border: "none", color: T.chargeDeep, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+          {loading ? "Loading…" : "What was sent recently?"}
+        </button>
+      ) : (
+        <div aria-label="Recent notifications">
+          <div style={{ fontSize: 13, color: T.ink, fontWeight: 600 }}>Sent in the last 3 days</div>
+          <div style={{ fontSize: 12, color: T.steelDark, margin: "2px 0 8px", lineHeight: 1.4 }}>
+            ✓ means it was handed to your phone. If one is ✓ but never showed up, the phone held it back (Focus, Sleep, or notification settings for Overload). Linked devices: {data.devices}.
+          </div>
+          {data.entries.length === 0 && <div style={{ fontSize: 13, color: T.steelDark }}>Nothing sent in the last 3 days.</div>}
+          {data.entries.map((e, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, padding: "6px 0", borderTop: i ? `1px solid ${T.steel}` : "none" }}>
+              <span style={{ color: T.ink }}>{reminderEntryLabel(e.kind, reminderSchedules(push))}</span>
+              <span style={{ color: e.ok ? T.good : T.warn, whiteSpace: "nowrap" }}>{when(e.at)} {e.ok ? "✓" : "✗ phone refused"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "6px 0 0" }}>{error}</p>}
+    </div>
+  );
+}
+
 function NotificationSettings({ push, onSetPushEnabled, onSetSchedules, onLinkPhone }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
@@ -9023,6 +9266,7 @@ function NotificationSettings({ push, onSetPushEnabled, onSetSchedules, onLinkPh
           <Btn variant="ghost" disabled={busy !== null} onClick={sendTest} style={{ width: "100%" }}><Bell size={14} /> Send a test notification</Btn>
           {testNote && <p style={{ fontSize: 12, color: T.good, margin: "8px 0 0" }}>{testNote}</p>}
         </div>
+        <ReminderHistory push={push} />
         {error && <p role="alert" style={{ fontSize: 12, color: T.warn, margin: "8px 0 0" }}>{error}</p>}
       </Card>
     </>
@@ -9198,7 +9442,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("home");
+  // Real ask behind it: "I never think to log my food." Tapping a reminder
+  // opens the screen it's about (food → Fuel), not just the app.
+  const [activeTab, setActiveTab] = useState(() => goTabFrom(typeof window !== "undefined" ? window.location.search : "") || "home");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (/[?&]go=/.test(window.location.search)) {
+      try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+    }
+    const sw = typeof navigator !== "undefined" ? navigator.serviceWorker : null;
+    if (!sw?.addEventListener) return;
+    const onMessage = (e) => {
+      const tab = e?.data?.type === "go" ? goTabFrom(String(e.data.url || "").replace(/^[^?]*/, "")) : null;
+      if (tab) setActiveTab(tab);
+    };
+    sw.addEventListener("message", onMessage);
+    return () => sw.removeEventListener("message", onMessage);
+  }, []);
   const mealJob = useMealJob(account?.id);
   // Done already (maybe on another device): take that reminder off the phone.
   const weighedToday = !!state?.logs?.bodyweight?.some((w) => w.date === todayISO());
@@ -9231,6 +9491,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account?.id, stateLoaded]);
   const [session, setSession] = useState(null);
+  // The "what changed / revert to original" sheet for a one-time change.
+  // { sets, rest } when opened from inside the workout (so progress is kept).
+  const [changeSheet, setChangeSheet] = useState(null);
   const lastRestAlertRef = useRef(null);
   // Food, "today's workout" and the rest all read todayISO() when they draw.
   // Left open past midnight, nothing redrew, so the Fuel tab kept showing
@@ -9770,7 +10033,7 @@ export default function App() {
       const nothingWorked = rejected.length > 0 && !madeChange;
       const changeNote = intendedButInvalid || overrideTargetInvalid || nothingWorked
         ? ""
-        : coachChangeNote(flags, parsed, stateRef.current.program, overrideTarget?.dayIdx);
+        : coachChangeNote(flags, parsed, stateRef.current.program, overrideTarget?.dayIdx, stateRef.current.inProgressWorkout?.dayIdx ?? null);
       // The safe calorie floor is applied when targets are saved; if it moved
       // the number, the reply has to say so. "Set you to 800 calories" while
       // 1,500 is what's actually saved is a lie on the Fuel screen.
@@ -10693,12 +10956,15 @@ export default function App() {
               setActiveTab={setActiveTab}
               startWorkout={startWorkout}
               onAskCoach={(prompt) => { setActiveTab("coach"); sendCoachMessage(prompt); }}
+              onShowChange={() => setChangeSheet({})}
+              addMeal={addMeal} removeMeal={removeMeal}
             />
           )}
           {activeTab === "train" && (
             <Train
               state={state} startWorkout={startWorkout} setActiveTab={setActiveTab}
               onOpenHistoryEntry={(idx) => { setHistoryEditorInitialIdx(idx); setHistoryEditorOpen(true); }}
+              onShowChange={() => setChangeSheet({})}
             />
           )}
           {activeTab === "coach" && <Coach messages={state.coachChat} loading={coachLoading} onSend={sendCoachMessage} onClearChat={clearCoachChat} coachUsage={state.coachUsage} dailyLimit={subscribed ? null : COACH_DAILY_LIMIT} lastChangeId={state.lastCoachChange?.id} onUndo={undoLastCoachChange} streamingReply={streamingReply} />}
@@ -10839,6 +11105,28 @@ export default function App() {
         </div>
       )}
 
+      {changeSheet && overrideDayIdx(state) !== null && (() => {
+        const idx = overrideDayIdx(state);
+        const inWorkout = !!(changeSheet.sets && session && session.dayIdx === idx);
+        return (
+          <OneTimeChangeSheet
+            dayName={state.program.days[idx].name}
+            original={state.program.days[idx].exercises}
+            changed={state.todayOverride}
+            inWorkout={inWorkout}
+            onClose={() => setChangeSheet(null)}
+            onRevert={() => {
+              if (inWorkout) autoSaveWorkoutProgress(session.dayIdx, changeSheet.sets, changeSheet.rest);
+              persist((prev) => ({ ...prev, todayOverride: null, todayOverrideDayIdx: null, lastCoachChange: null }));
+              // Reopen the workout on the original exercises; sets already
+              // checked off are carried over by mergeResumedSets.
+              if (inWorkout) setSession((s) => ({ ...s, resume: true, key: (s.key || 0) + 1 }));
+              setChangeSheet(null);
+            }}
+          />
+        );
+      })()}
+
       {session && state.program.days[session.dayIdx] && (
         <WorkoutSession
           day={
@@ -10847,6 +11135,8 @@ export default function App() {
               : state.program.days[session.dayIdx]
           }
           isOverride={overrideAppliesTo(state, session.dayIdx)}
+          key={session.key || 0}
+          onShowChange={(sets, rest) => setChangeSheet({ sets, rest })}
           lastLog={lastLogFor(state.program.days[session.dayIdx].name)}
           logs={state.logs}
           resumedAt={session.resumedAt}
